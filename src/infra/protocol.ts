@@ -7,9 +7,12 @@
 // ── Channel plugin → Infrastructure ───────────────────────────────
 
 /** Plugin identifies itself on connect */
+export type AgentRole = 'worker' | 'sensei'
+
 export type RegisterMsg = {
   type: 'register'
   agent: string  // agent name, e.g. "scratch", "orchestrator"
+  role: AgentRole
 }
 
 /** Agent sends a reply (via the `reply` tool in the channel plugin) */
@@ -33,6 +36,7 @@ export type DeliverMsg = {
 export type RegisteredMsg = {
   type: 'registered'
   agent: string
+  role: AgentRole
 }
 
 // ── Infrastructure HTTP endpoints ─────────────────────────────────
@@ -48,6 +52,37 @@ export type SendRequest = {
 /** POST /agent-idle — stop hook notification */
 export type AgentIdleRequest = {
   agent: string
+}
+
+// ── Events (queued for sensei) ────────────────────────────────────
+
+export type EventType = 'reply' | 'agent-idle' | 'task-created'
+
+export type QueuedEvent = {
+  id: number
+  type: EventType
+  agent: string
+  text?: string
+  taskId?: string
+  ts: string
+}
+
+// ── Task API types ───────────────────────────────────────────────
+
+export type CreateTaskRequest = {
+  title: string
+  description: string
+  queue: string
+  playbook?: string
+}
+
+export type UpdateTaskRequest = {
+  agent?: string
+  description?: string
+}
+
+export type UpdateStatusRequest = {
+  status: string
 }
 
 // ── Union types ───────────────────────────────────────────────────

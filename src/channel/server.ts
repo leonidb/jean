@@ -20,6 +20,7 @@ import {
 import type { DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
+const AGENT_ROLE = process.env.JEAN_ROLE ?? 'worker'
 const INFRA_URL = process.env.JEAN_INFRA_URL ?? 'ws://127.0.0.1:8700/ws'
 
 // ── MCP Server ─────────────────────────────────────────────────────
@@ -119,7 +120,7 @@ function connectToInfra() {
 
     ws.addEventListener('open', () => {
       process.stderr.write(`[jean] connected to infra as "${AGENT_NAME}"\n`)
-      sendToInfra({ type: 'register', agent: AGENT_NAME })
+      sendToInfra({ type: 'register', agent: AGENT_NAME, role: AGENT_ROLE })
     })
 
     ws.addEventListener('message', (event) => {
