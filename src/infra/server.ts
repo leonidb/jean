@@ -60,9 +60,30 @@ const pendingProjection = createProjection<PendingState>({
   filter: { types: ['reply', 'agent-idle', 'task-created', 'ack'] },
 })
 
+// Last task context per agent — tracks which task each agent was last messaged about
+const lastTaskContext = createProjection<Map<string, string>>({
+  name: 'lastTaskContext',
+  store,
+  reducer: (state, event) => {
+    if (event.type === 'send') {
+      const taskId = taskIdFromStream(event.stream)
+      const agent = (event.data as Record<string, unknown>)?.agent as string | undefined
+      if (taskId && agent) {
+        const next = new Map(state)
+        next.set(agent, taskId)
+        return next
+      }
+    }
+    return state
+  },
+  initial: new Map(),
+  filter: { types: ['send'] },
+})
+
 // Initialize: replay events to rebuild state
 await boardProjection.catchUp()
 await pendingProjection.catchUp()
+await lastTaskContext.catchUp()
 
 // ── Agent registry (role-based, ephemeral) ───────────────────────
 
@@ -134,10 +155,13 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
 
 function inferTaskId(agentName?: string): string | undefined {
   if (!agentName) return undefined
+  // Check if the agent has an active/blocked task on the board
   const task = boardProjection.state.tasks.find(
     t => (t.agent === agentName || t.queue === agentName) && (t.status === 'active' || t.status === 'blocked'),
   )
-  return task?.id
+  if (task) return task.id
+  // Fallback: last task this agent was messaged about (from lastTaskContext projection)
+  return lastTaskContext.state.get(agentName)
 }
 
 function nextTaskId(): string {
