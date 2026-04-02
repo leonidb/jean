@@ -414,8 +414,11 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
           case 'reply': {
             logEvent('reply', msg.from, msg.text)
-            // Queue as event for sensei (not direct delivery)
-            enqueueEvent('reply', msg.from, msg.text)
+            // Only queue replies from workers — sensei replies go to log only
+            const sender = agents.get(msg.from)
+            if (sender?.role !== 'sensei') {
+              enqueueEvent('reply', msg.from, msg.text)
+            }
             break
           }
         }
