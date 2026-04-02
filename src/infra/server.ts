@@ -408,16 +408,26 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           case 'register': {
             ws.data.agent = msg.agent
             ws.data.role = msg.role
-            agents.set(msg.agent, { ws, role: msg.role ?? 'worker', idle: false })
-            send(ws, { type: 'registered', agent: msg.agent, role: msg.role ?? 'worker' })
-            logEvent('register', msg.agent, `role=${msg.role ?? 'worker'}`)
+            const role = msg.role ?? 'worker'
+            agents.set(msg.agent, { ws, role, idle: false })
+            send(ws, { type: 'registered', agent: msg.agent, role })
+            logEvent('register', msg.agent, `role=${role}`)
 
-            // If sensei just connected and events are pending, nudge
-            if (msg.role === 'sensei' && eventQueue.length > 0) {
+            if (role === 'sensei') {
+              // Sensei just connected — treat as idle, nudge if work exists
               const entry = agents.get(msg.agent)
               if (entry) {
-                entry.idle = true // treat fresh connect as idle
-                nudgeSenseiIfIdle()
+                entry.idle = true
+                // Nudge if events pending OR board has actionable tasks
+                void (async () => {
+                  if (eventQueue.length > 0) {
+                    nudgeSenseiIfIdle()
+                    return
+                  }
+                  const board = await readBoard(BOARD_PATH)
+                  const hasWork = board.tasks.some(t => t.status === 'inbox' || t.status === 'active' || t.status === 'blocked')
+                  if (hasWork) nudgeSenseiIfIdle()
+                })()
               }
             }
             break
