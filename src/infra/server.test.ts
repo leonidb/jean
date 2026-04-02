@@ -61,10 +61,11 @@ describe('infrastructure server', () => {
     expect(data.delivered).toBe(false)
   })
 
-  test('/agent-idle GET returns ok', async () => {
+  test('/agent-idle GET for disconnected agent returns error', async () => {
     const res = await fetch(`${BASE}/agent-idle?name=scratch`)
-    const data = (await res.json()) as { ok: boolean }
-    expect(data.ok).toBe(true)
+    const data = (await res.json()) as { ok: boolean; error: string }
+    expect(data.ok).toBe(false)
+    expect(data.error).toBe('agent not connected')
   })
 
   test('/events returns pending events (empty initially)', async () => {

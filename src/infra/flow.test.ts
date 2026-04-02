@@ -26,16 +26,24 @@ afterAll(() => { server.kill() })
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 
-function connectAgent(name: string, role: string): Promise<{ ws: WebSocket; messages: any[] }> {
+function connectAgent(name: string, role: string): Promise<{ ws: WebSocket; messages: any[]; baselineCount: number }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(WS_URL)
     const messages: any[] = []
+    let resolved = false
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'register', agent: name, role }))
     }
     ws.onmessage = (e) => {
       messages.push(JSON.parse(String(e.data)))
-      if (messages.at(-1).type === 'registered') resolve({ ws, messages })
+      if (messages.at(-1).type === 'registered' && !resolved) {
+        resolved = true
+        if (role === 'sensei') {
+          setTimeout(() => resolve({ ws, messages, baselineCount: messages.length }), 100)
+        } else {
+          resolve({ ws, messages, baselineCount: messages.length })
+        }
+      }
     }
     ws.onerror = reject
     setTimeout(() => reject(new Error('timeout')), 3000)
@@ -82,14 +90,17 @@ describe('full lifecycle', () => {
     const pending = (await pendingRes.json()) as { events: Array<{ type: string }> }
     expect(pending.events.some(e => e.type === 'task-created')).toBe(true)
 
-    // 4. Signal sensei idle → nudge arrives
+    // 4. Signal sensei idle → nudge arrives (skip connect-time messages)
+    const senseiBaseline = senseiMsgs.length
     await fetch(`${BASE}/agent-idle`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: 'flow-sensei' }),
     })
-    const nudge = await waitForMessage(senseiMsgs, m => m.type === 'deliver' && m.from === 'infra')
-    expect(nudge.text).toContain('Events pending')
+    await Bun.sleep(200)
+    const nudge = senseiMsgs.slice(senseiBaseline).find(m => m.type === 'deliver' && m.from === 'infra')
+    expect(nudge).toBeDefined()
+    expect(nudge!.text).toContain('Events pending')
 
     // 5. Assign task to worker and mark active
     await fetch(`${BASE}/tasks/${task.id}`, {

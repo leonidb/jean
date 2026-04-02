@@ -26,17 +26,26 @@ afterAll(() => { server.kill() })
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 
-function connectAgent(name: string, role: string = 'worker'): Promise<{ ws: WebSocket; messages: any[] }> {
+function connectAgent(name: string, role: string = 'worker'): Promise<{ ws: WebSocket; messages: any[]; baselineCount: number }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(WS_URL)
     const messages: any[] = []
+    let resolved = false
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'register', agent: name, role }))
     }
     ws.onmessage = (e) => {
       const msg = JSON.parse(String(e.data))
       messages.push(msg)
-      if (msg.type === 'registered') resolve({ ws, messages })
+      if (msg.type === 'registered' && !resolved) {
+        resolved = true
+        // For sensei, wait a tick for the connect nudge to arrive
+        if (role === 'sensei') {
+          setTimeout(() => resolve({ ws, messages, baselineCount: messages.length }), 100)
+        } else {
+          resolve({ ws, messages, baselineCount: messages.length })
+        }
+      }
     }
     ws.onerror = reject
     setTimeout(() => reject(new Error('timeout')), 3000)
@@ -185,7 +194,7 @@ async function clearPendingEvents() {
 
 describe('sensei nudge', () => {
   test('sensei receives nudge when idle + events pending', async () => {
-    const { ws: sensei, messages } = await connectAgent('nudge-sensei', 'sensei')
+    const { ws: sensei, messages, baselineCount } = await connectAgent('nudge-sensei', 'sensei')
     const { ws: worker } = await connectAgent('nudge-worker')
 
     // Mark sensei idle
@@ -199,33 +208,27 @@ describe('sensei nudge', () => {
     worker.send(JSON.stringify({ type: 'reply', from: 'nudge-worker', text: 'finished' }))
     await Bun.sleep(200)
 
-    const nudge = messages.find(m => m.type === 'deliver' && m.from === 'infra')
+    // Look for nudge after connect-time messages
+    const postConnect = messages.slice(baselineCount)
+    const nudge = postConnect.find(m => m.type === 'deliver' && m.from === 'infra' && m.text?.includes('Events pending'))
     expect(nudge).toBeDefined()
-    expect(nudge!.text).toContain('Events pending')
 
     sensei.close()
     worker.close()
   })
 
-  test('no nudge when sensei is not idle', async () => {
-    // Close any previous sensei first, then connect fresh
-    const { ws: sensei, messages } = await connectAgent('busy-sensei', 'sensei')
-
-    // Sensei just connected — not marked idle
-    // Worker sends reply
+  test('worker event is queued even when sensei is busy', async () => {
+    const { ws: sensei, messages, baselineCount } = await connectAgent('busy-sensei', 'sensei')
     const { ws: worker } = await connectAgent('busy-worker')
+
+    // Worker sends reply
     worker.send(JSON.stringify({ type: 'reply', from: 'busy-worker', text: 'done' }))
     await Bun.sleep(200)
 
-    // Filter messages received AFTER registration
-    const postRegMsgs = messages.slice(1) // skip 'registered' message
-    const nudge = postRegMsgs.find(m => m.type === 'deliver' && m.from === 'infra' && m.text?.includes('Events pending'))
-    // Sensei was NOT idle (freshly connected, no idle signal) so should not get nudged
-    // BUT: the server treats fresh sensei connect as idle if events pending
-    // This is actually desired behavior — let's verify the event was queued instead
-    const res = await fetch(`${BASE}/events/pending?agent=busy-worker`)
-    const data = (await res.json()) as { events: Array<{ text: string }> }
-    expect(data.events.some(e => (e as any).data?.text === 'done')).toBe(true)
+    // Event should be queued regardless
+    const res = await fetch(`${BASE}/events?agent=busy-worker`)
+    const data = (await res.json()) as { events: Array<{ data: { text: string } }> }
+    expect(data.events.some(e => e.data?.text === 'done')).toBe(true)
 
     sensei.close()
     worker.close()
@@ -234,8 +237,7 @@ describe('sensei nudge', () => {
   test('sensei going idle does not create actionable event', async () => {
     await clearPendingEvents()
 
-    const { ws: sensei, messages } = await connectAgent('self-loop-sensei', 'sensei')
-    await Bun.sleep(100)
+    const { ws: sensei, messages, baselineCount } = await connectAgent('self-loop-sensei', 'sensei')
 
     // Mark sensei idle — should NOT create a pending event
     await fetch(`${BASE}/agent-idle`, {
@@ -250,8 +252,9 @@ describe('sensei nudge', () => {
     const data = (await res.json()) as { events: Array<{ type: string }> }
     expect(data.events.length).toBe(0)
 
-    // Sensei should NOT have been nudged (no actionable events existed)
-    const nudges = messages.filter(m => m.type === 'deliver' && m.from === 'infra')
+    // No new nudges after connect (only the connect nudge in baseline)
+    const postConnect = messages.slice(baselineCount)
+    const nudges = postConnect.filter(m => m.type === 'deliver' && m.from === 'infra')
     expect(nudges.length).toBe(0)
 
     // But the event IS in history (informational)

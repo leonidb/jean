@@ -72,6 +72,7 @@ type AgentEntry = {
   ws: AgentSocket
   role: AgentRole
   idle: boolean
+  sessionId?: string
 }
 
 const agents = new Map<string, AgentEntry>()
@@ -154,10 +155,12 @@ function pendingByAgent(): Record<string, number> {
 
 // ── Sensei nudge ──────────────────────────────────────────────────
 
-function nudgeSenseiIfIdle() {
+function nudgeSenseiIfIdle(reason?: string) {
   const sensei = findSensei()
   if (!sensei || !sensei.idle) return
-  if (pendingProjection.state.length === 0) return
+
+  // Check if there's actually something to nudge about
+  if (!reason && pendingProjection.state.length === 0) return
 
   sensei.idle = false // prevent double-nudge
   send(sensei.ws, {
@@ -299,26 +302,49 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     if (path === '/agent-idle' && (req.method === 'POST' || req.method === 'GET')) {
       return (async () => {
         let agentName: string | null = null
+        let sessionId: string | undefined
         if (req.method === 'POST') {
-          const body = (await req.json()) as { agent: string }
+          const body = (await req.json()) as { agent: string; sessionId?: string }
           agentName = body.agent
+          sessionId = body.sessionId
         } else {
           agentName = url.searchParams.get('name')
+          sessionId = url.searchParams.get('sessionId') ?? undefined
         }
         if (!agentName) {
           return Response.json({ error: 'missing agent name' }, { status: 400 })
         }
 
         const entry = agents.get(agentName)
-        if (entry) entry.idle = true
 
-        const role = entry?.role ?? 'worker'
+        // Validate session ID if provided — flag stale stop hooks
+        if (sessionId && entry?.sessionId && sessionId !== entry.sessionId) {
+          process.stderr.write(`[jean] WARNING: agent-idle for "${agentName}" from stale session ${sessionId} (current: ${entry.sessionId})\n`)
+          void record('agent-idle', agentStream(agentName), {
+            agent: agentName,
+            role: entry.role,
+            stale: true,
+            hookSessionId: sessionId,
+            currentSessionId: entry.sessionId,
+          })
+          return Response.json({ ok: false, error: 'stale session', currentSessionId: entry.sessionId })
+        }
+
+        // Agent not connected — stop hook from a disconnected agent
+        if (!entry) {
+          process.stderr.write(`[jean] WARNING: agent-idle for "${agentName}" but agent is not connected\n`)
+          void record('agent-idle', agentStream(agentName), { agent: agentName, role: 'unknown', disconnected: true })
+          return Response.json({ ok: false, error: 'agent not connected' })
+        }
+
+        entry.idle = true
+        const role = entry.role
         const taskId = inferTaskId(agentName)
         const stream = taskId ? taskStream(taskId) : agentStream(agentName)
         await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData & { agent: string })
 
         // If sensei just went idle, check for pending work
-        if (entry?.role === 'sensei') {
+        if (role === 'sensei') {
           nudgeSenseiIfIdle()
         }
 
@@ -431,6 +457,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
   },
 
   websocket: {
+    idleTimeout: 10, // detect dead connections within 10 seconds
     open(ws) {
       // ws-open is pre-registration, no agent info yet
     },
@@ -449,25 +476,60 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
         switch (msg.type) {
           case 'register': {
+            const role = msg.role ?? 'worker'
+
+            // Handle existing agent with same name
+            const existing = agents.get(msg.agent)
+            if (existing && existing.ws !== ws) {
+              if (msg.sessionId && existing.sessionId && msg.sessionId === existing.sessionId) {
+                // Same session reconnecting — update the WebSocket
+              } else {
+                // New session replacing old one — clean up old socket
+                existing.ws.data.agent = undefined
+                existing.ws.close()
+              }
+              agents.delete(msg.agent)
+            }
+
+            // Only one sensei allowed — reject different agent trying to be sensei
+            if (role === 'sensei') {
+              const existingSensei = findSensei()
+              if (existingSensei && existingSensei.ws !== ws) {
+                send(ws, { type: 'deliver', from: 'infra', text: 'ERROR: Another sensei is already connected. Only one sensei per dojo. This connection will be ignored.' })
+                break
+              }
+            }
+
             ws.data.agent = msg.agent
             ws.data.role = msg.role
-            const role = msg.role ?? 'worker'
             const hasActiveTask = boardProjection.state.tasks.some(
               t => t.agent === msg.agent && (t.status === 'active' || t.status === 'blocked'),
             )
             const idle = !hasActiveTask
-            agents.set(msg.agent, { ws, role, idle })
+            const sessionId = msg.sessionId
+            agents.set(msg.agent, { ws, role, idle, sessionId })
             send(ws, { type: 'registered', agent: msg.agent, role })
-            void record('register', agentStream(msg.agent), { agent: msg.agent, role, idle } satisfies RegisterData & { agent: string })
+            void record('register', agentStream(msg.agent), { agent: msg.agent, role, idle, sessionId } satisfies RegisterData & { agent: string; sessionId?: string })
 
-            if (role === 'sensei' && idle) {
+            if (role === 'sensei') {
+              // Always nudge sensei on connect — get up to date
+              // Delay slightly to ensure the channel plugin is ready to receive
+              setTimeout(() => {
+                send(ws, {
+                  type: 'deliver',
+                  from: 'infra',
+                  text: 'You just connected. Check the board and events to get up to date.',
+                })
+              }, 500)
+            } else if (idle) {
+              // Worker connected — nudge sensei if there's work
               if (pendingProjection.state.length > 0) {
                 nudgeSenseiIfIdle()
               } else {
                 const hasWork = boardProjection.state.tasks.some(
                   t => t.status === 'inbox' || t.status === 'active' || t.status === 'blocked',
                 )
-                if (hasWork) nudgeSenseiIfIdle()
+                if (hasWork) nudgeSenseiIfIdle('worker connected, board has work')
               }
             }
             break
@@ -491,5 +553,12 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     },
   },
 })
+
+// Heartbeat: ping all connected agents every 5 seconds to detect dead connections
+setInterval(() => {
+  for (const [name, entry] of agents) {
+    entry.ws.ping()
+  }
+}, 5000)
 
 void record('start', SYSTEM_STREAM, { port: PORT } satisfies StartData)

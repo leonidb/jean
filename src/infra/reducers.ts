@@ -48,6 +48,7 @@ export type AckData = {
 export type RegisterData = {
   role: string
   idle: boolean
+  sessionId?: string
 }
 
 export type NudgeData = {
