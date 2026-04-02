@@ -325,14 +325,25 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       return Response.json({ ok })
     }
 
-    // POST /events/ack — batch ack events up to ID for an agent
+    // POST /events/ack — batch ack events up to ID (optionally filtered by source agent)
     if (path === '/events/ack' && req.method === 'POST') {
       return (async () => {
-        const body = (await req.json()) as { agent: string; upToId: number }
-        if (!body.agent || !body.upToId) {
-          return Response.json({ error: 'missing agent or upToId' }, { status: 400 })
+        const body = (await req.json()) as { upToId: number; agent?: string }
+        if (!body.upToId) {
+          return Response.json({ error: 'missing upToId' }, { status: 400 })
         }
-        const count = ackEventsUpTo(body.agent, body.upToId)
+        if (body.agent) {
+          const count = ackEventsUpTo(body.agent, body.upToId)
+          return Response.json({ acknowledged: count })
+        }
+        // No agent filter — ack all events up to ID
+        let count = 0
+        for (let i = eventQueue.length - 1; i >= 0; i--) {
+          if (eventQueue[i]!.id <= body.upToId) {
+            eventQueue.splice(i, 1)
+            count++
+          }
+        }
         return Response.json({ acknowledged: count })
       })()
     }
