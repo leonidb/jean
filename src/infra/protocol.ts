@@ -54,17 +54,30 @@ export type AgentIdleRequest = {
   agent: string
 }
 
-// ── Events (queued for sensei) ────────────────────────────────────
+// ── Unified event system ─────────────────────────────────────────
 
-export type EventType = 'reply' | 'agent-idle' | 'task-created'
+export type EventKind =
+  // Actionable (drive sensei nudge loop)
+  | 'reply'
+  | 'agent-idle'
+  | 'task-created'
+  // Informational
+  | 'start'
+  | 'register'
+  | 'disconnect'
+  | 'send'
+  | 'task-status'
+  | 'task-updated'
+  | 'nudge'
+  | 'ack'
 
-export type QueuedEvent = {
-  id: number
-  type: EventType
-  agent: string
-  text?: string
-  taskId?: string
-  ts: string
+export type HistoryEvent = {
+  id: number           // monotonic, survives restarts
+  kind: EventKind
+  ts: string           // ISO 8601
+  agent?: string       // source or target agent
+  taskId?: string      // inferred or explicit
+  text?: string        // human-readable detail
 }
 
 // ── Task API types ───────────────────────────────────────────────

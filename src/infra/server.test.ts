@@ -1,12 +1,17 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import type { Subprocess } from 'bun'
+import { unlinkSync } from 'fs'
 
 const TEST_PORT = 8799
+const BOARD_PATH = '/tmp/jean-test-board.json'
+const HISTORY_PATH = '/tmp/jean-test-history.jsonl'
 let server: Subprocess
 
 beforeAll(async () => {
+  try { unlinkSync(BOARD_PATH) } catch {}
+  try { unlinkSync(HISTORY_PATH) } catch {}
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
-    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_BOARD: '/tmp/jean-test-board.json' },
+    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_BOARD: BOARD_PATH, JEAN_HISTORY: HISTORY_PATH },
     stdout: 'ignore',
     stderr: 'pipe',
   })
@@ -62,11 +67,18 @@ describe('infrastructure server', () => {
     expect(data.ok).toBe(true)
   })
 
-  test('/events returns event log', async () => {
+  test('/events returns pending events (empty initially)', async () => {
     const res = await fetch(`${BASE}/events`)
     const data = (await res.json()) as { events: unknown[] }
     expect(Array.isArray(data.events)).toBe(true)
-    expect(data.events.length).toBeGreaterThan(0) // at least the start event
+  })
+
+  test('/history returns persistent event log', async () => {
+    const res = await fetch(`${BASE}/history`)
+    const data = (await res.json()) as { events: Array<{ kind: string }> }
+    expect(Array.isArray(data.events)).toBe(true)
+    expect(data.events.length).toBeGreaterThan(0)
+    expect(data.events.some(e => e.kind === 'start')).toBe(true)
   })
 
   test('WebSocket registration works', async () => {

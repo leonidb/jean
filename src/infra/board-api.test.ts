@@ -4,12 +4,14 @@ import { unlinkSync } from 'fs'
 
 const TEST_PORT = 8798
 const BOARD_PATH = '/tmp/jean-test-board-api.json'
+const HISTORY_PATH = '/tmp/jean-test-history-api.jsonl'
 let server: Subprocess
 
 beforeAll(async () => {
   try { unlinkSync(BOARD_PATH) } catch {}
+  try { unlinkSync(HISTORY_PATH) } catch {}
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
-    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_BOARD: BOARD_PATH },
+    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_BOARD: BOARD_PATH, JEAN_HISTORY: HISTORY_PATH },
     stdout: 'ignore',
     stderr: 'pipe',
   })

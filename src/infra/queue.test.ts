@@ -4,12 +4,14 @@ import { unlinkSync } from 'fs'
 
 const TEST_PORT = 8797
 const BOARD_PATH = '/tmp/jean-test-board-queue.json'
+const HISTORY_PATH = '/tmp/jean-test-history-queue.jsonl'
 let server: Subprocess
 
 beforeAll(async () => {
   try { unlinkSync(BOARD_PATH) } catch {}
+  try { unlinkSync(HISTORY_PATH) } catch {}
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
-    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_BOARD: BOARD_PATH },
+    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_BOARD: BOARD_PATH, JEAN_HISTORY: HISTORY_PATH },
     stdout: 'ignore',
     stderr: 'pipe',
   })
@@ -49,9 +51,9 @@ describe('event queue', () => {
     await Bun.sleep(100)
 
     const res = await fetch(`${BASE}/events/pending?agent=reply-worker`)
-    const data = (await res.json()) as { events: Array<{ type: string; agent: string; text: string }> }
+    const data = (await res.json()) as { events: Array<{ kind: string; agent: string; text: string }> }
     expect(data.events.length).toBeGreaterThanOrEqual(1)
-    const event = data.events.find(e => e.type === 'reply')
+    const event = data.events.find(e => e.kind === 'reply')
     expect(event).toBeDefined()
     expect(event!.text).toBe('done with task')
 
@@ -68,8 +70,8 @@ describe('event queue', () => {
     })
 
     const res = await fetch(`${BASE}/events/pending?agent=idle-worker`)
-    const data = (await res.json()) as { events: Array<{ type: string; agent: string }> }
-    expect(data.events.some(e => e.type === 'agent-idle')).toBe(true)
+    const data = (await res.json()) as { events: Array<{ kind: string; agent: string }> }
+    expect(data.events.some(e => e.kind === 'agent-idle')).toBe(true)
 
     ws.close()
   })
@@ -82,8 +84,8 @@ describe('event queue', () => {
     })
 
     const res = await fetch(`${BASE}/events/pending?agent=queue-test`)
-    const data = (await res.json()) as { events: Array<{ type: string; agent: string }> }
-    expect(data.events.some(e => e.type === 'task-created')).toBe(true)
+    const data = (await res.json()) as { events: Array<{ kind: string; agent: string }> }
+    expect(data.events.some(e => e.kind === 'task-created')).toBe(true)
   })
 
   test('GET /events/agents returns per-agent counts', async () => {
@@ -168,6 +170,19 @@ describe('event queue', () => {
   })
 })
 
+async function clearPendingEvents() {
+  const res = await fetch(`${BASE}/events`)
+  const data = (await res.json()) as { events: Array<{ id: number }> }
+  if (data.events.length > 0) {
+    const maxId = Math.max(...data.events.map(e => e.id))
+    await fetch(`${BASE}/events/ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ upToId: maxId }),
+    })
+  }
+}
+
 describe('sensei nudge', () => {
   test('sensei receives nudge when idle + events pending', async () => {
     const { ws: sensei, messages } = await connectAgent('nudge-sensei', 'sensei')
@@ -213,6 +228,53 @@ describe('sensei nudge', () => {
     expect(data.events.some(e => e.text === 'done')).toBe(true)
 
     sensei.close()
+    worker.close()
+  })
+
+  test('sensei going idle does not create actionable event', async () => {
+    await clearPendingEvents()
+
+    const { ws: sensei, messages } = await connectAgent('self-loop-sensei', 'sensei')
+    await Bun.sleep(100)
+
+    // Mark sensei idle — should NOT create a pending event
+    await fetch(`${BASE}/agent-idle`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: 'self-loop-sensei' }),
+    })
+    await Bun.sleep(200)
+
+    // No pending events for sensei
+    const res = await fetch(`${BASE}/events?agent=self-loop-sensei`)
+    const data = (await res.json()) as { events: Array<{ kind: string }> }
+    expect(data.events.length).toBe(0)
+
+    // Sensei should NOT have been nudged (no actionable events existed)
+    const nudges = messages.filter(m => m.type === 'deliver' && m.from === 'infra')
+    expect(nudges.length).toBe(0)
+
+    // But the event IS in history (informational)
+    const histRes = await fetch(`${BASE}/history`)
+    const hist = (await histRes.json()) as { events: Array<{ kind: string; agent: string }> }
+    expect(hist.events.some(e => e.kind === 'agent-idle' && e.agent === 'self-loop-sensei')).toBe(true)
+
+    sensei.close()
+  })
+
+  test('worker going idle creates actionable event', async () => {
+    const { ws: worker } = await connectAgent('idle-actionable-worker')
+
+    await fetch(`${BASE}/agent-idle`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: 'idle-actionable-worker' }),
+    })
+
+    const res = await fetch(`${BASE}/events?agent=idle-actionable-worker`)
+    const data = (await res.json()) as { events: Array<{ kind: string }> }
+    expect(data.events.some(e => e.kind === 'agent-idle')).toBe(true)
+
     worker.close()
   })
 })

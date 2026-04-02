@@ -84,9 +84,9 @@ describe('createTask', () => {
 // ── updateTaskStatus ───────────────────────────────────────────────
 
 describe('updateTaskStatus', () => {
-  test('transitions inbox → active', async () => {
+  test('transitions inbox → active', () => {
     const task = createTask({ title: 'T', description: 'D', queue: 'q' })
-    await Bun.sleep(1) // ensure updatedAt differs
+    task.updatedAt = '2000-01-01T00:00:00.000Z' // backdate to guarantee difference
     const updated = updateTaskStatus(task, 'active')
     expect(updated.status).toBe('active')
     expect(updated.updatedAt).not.toBe(task.updatedAt)

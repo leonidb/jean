@@ -4,12 +4,14 @@ import { unlinkSync } from 'fs'
 
 const TEST_PORT = 8796
 const BOARD_PATH = '/tmp/jean-test-board-flow.json'
+const HISTORY_PATH = '/tmp/jean-test-history-flow.jsonl'
 let server: Subprocess
 
 beforeAll(async () => {
   try { unlinkSync(BOARD_PATH) } catch {}
+  try { unlinkSync(HISTORY_PATH) } catch {}
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
-    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_BOARD: BOARD_PATH },
+    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_BOARD: BOARD_PATH, JEAN_HISTORY: HISTORY_PATH },
     stdout: 'ignore',
     stderr: 'pipe',
   })
@@ -77,8 +79,8 @@ describe('full lifecycle', () => {
     // 3. Verify task-created event is queued
     await Bun.sleep(100)
     const pendingRes = await fetch(`${BASE}/events/pending?agent=flow-worker`)
-    const pending = (await pendingRes.json()) as { events: Array<{ type: string }> }
-    expect(pending.events.some(e => e.type === 'task-created')).toBe(true)
+    const pending = (await pendingRes.json()) as { events: Array<{ kind: string }> }
+    expect(pending.events.some(e => e.kind === 'task-created')).toBe(true)
 
     // 4. Signal sensei idle → nudge arrives
     await fetch(`${BASE}/agent-idle`, {
@@ -120,8 +122,8 @@ describe('full lifecycle', () => {
 
     // 8. Verify reply is queued
     const replyPending = await fetch(`${BASE}/events/pending?agent=flow-worker`)
-    const replyEvents = (await replyPending.json()) as { events: Array<{ type: string; text: string }> }
-    expect(replyEvents.events.some(e => e.type === 'reply' && e.text === 'Task complete. All good.')).toBe(true)
+    const replyEvents = (await replyPending.json()) as { events: Array<{ kind: string; text: string }> }
+    expect(replyEvents.events.some(e => e.kind === 'reply' && e.text === 'Task complete. All good.')).toBe(true)
 
     // 9. Worker goes idle
     await fetch(`${BASE}/agent-idle`, {
@@ -131,8 +133,8 @@ describe('full lifecycle', () => {
     })
     await Bun.sleep(100)
     const idlePending = await fetch(`${BASE}/events/pending?agent=flow-worker`)
-    const idleEvents = (await idlePending.json()) as { events: Array<{ type: string }> }
-    expect(idleEvents.events.some(e => e.type === 'agent-idle')).toBe(true)
+    const idleEvents = (await idlePending.json()) as { events: Array<{ kind: string }> }
+    expect(idleEvents.events.some(e => e.kind === 'agent-idle')).toBe(true)
 
     // 10. Signal sensei idle → gets nudged again
     // Reset sensei messages to track new nudge
@@ -182,6 +184,103 @@ describe('full lifecycle', () => {
 
     senseiWs.close()
     workerWs.close()
+  })
+})
+
+describe('history', () => {
+  test('task-scoped history via GET /history?taskId', async () => {
+    // The full lifecycle test already ran — check history for that task
+    const boardRes = await fetch(`${BASE}/board`)
+    const board = (await boardRes.json()) as { tasks: Array<{ id: string; status: string }> }
+    const doneTask = board.tasks.find(t => t.status === 'done')
+    expect(doneTask).toBeDefined()
+
+    const res = await fetch(`${BASE}/history?taskId=${doneTask!.id}`)
+    const data = (await res.json()) as { events: Array<{ kind: string; taskId: string }> }
+
+    // Should have task-created, task-status changes, send, reply, agent-idle, ack
+    expect(data.events.length).toBeGreaterThanOrEqual(3)
+    expect(data.events.every(e => e.taskId === doneTask!.id)).toBe(true)
+    expect(data.events.some(e => e.kind === 'task-created')).toBe(true)
+    expect(data.events.some(e => e.kind === 'task-status')).toBe(true)
+  })
+
+  test('worker reply gets taskId inferred from board', async () => {
+    // Create a task, assign agent, make active, then send a reply
+    const { ws } = await connectAgent('infer-worker', 'worker')
+
+    const createRes = await fetch(`${BASE}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Inference test', description: '', queue: 'infer-worker' }),
+    })
+    const task = (await createRes.json()) as { id: string }
+
+    // Assign and activate
+    await fetch(`${BASE}/tasks/${task.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: 'infer-worker' }),
+    })
+    await fetch(`${BASE}/tasks/${task.id}/status`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'active' }),
+    })
+
+    // Worker replies — taskId should be inferred
+    ws.send(JSON.stringify({ type: 'reply', from: 'infer-worker', text: 'inferred reply' }))
+    await Bun.sleep(200)
+
+    // Check pending events — the reply should have the taskId
+    const res = await fetch(`${BASE}/events?agent=infer-worker`)
+    const data = (await res.json()) as { events: Array<{ kind: string; taskId?: string; text: string }> }
+    const reply = data.events.find(e => e.kind === 'reply' && e.text === 'inferred reply')
+    expect(reply).toBeDefined()
+    expect(reply!.taskId).toBe(task.id)
+
+    ws.close()
+  })
+
+  test('ack events appear in history', async () => {
+    const { ws } = await connectAgent('ack-hist-worker', 'worker')
+    ws.send(JSON.stringify({ type: 'reply', from: 'ack-hist-worker', text: 'ack me' }))
+    await Bun.sleep(100)
+
+    // Get the event and ack it
+    const pending = await fetch(`${BASE}/events?agent=ack-hist-worker`)
+    const events = (await pending.json()) as { events: Array<{ id: number }> }
+    const eventId = events.events[0]!.id
+    await fetch(`${BASE}/events/${eventId}/ack`, { method: 'POST' })
+    await Bun.sleep(100)
+
+    // Check history for ack event
+    const res = await fetch(`${BASE}/history`)
+    const data = (await res.json()) as { events: Array<{ kind: string; text?: string }> }
+    const ackEvent = data.events.find(e => e.kind === 'ack' && e.text?.includes(String(eventId)))
+    expect(ackEvent).toBeDefined()
+
+    ws.close()
+  })
+
+  test('GET /history?last=N returns only last N events', async () => {
+    const allRes = await fetch(`${BASE}/history`)
+    const allData = (await allRes.json()) as { events: Array<{ id: number }> }
+    const total = allData.events.length
+
+    const lastRes = await fetch(`${BASE}/history?last=3`)
+    const lastData = (await lastRes.json()) as { events: Array<{ id: number }> }
+    expect(lastData.events.length).toBe(3)
+    // Should be the last 3 from the full list
+    expect(lastData.events[0]!.id).toBe(allData.events[total - 3]!.id)
+  })
+
+  test('event IDs are sequential', async () => {
+    const res = await fetch(`${BASE}/history`)
+    const data = (await res.json()) as { events: Array<{ id: number }> }
+    for (let i = 1; i < data.events.length; i++) {
+      expect(data.events[i]!.id).toBeGreaterThan(data.events[i - 1]!.id)
+    }
   })
 })
 
