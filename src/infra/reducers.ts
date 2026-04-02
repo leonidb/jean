@@ -111,11 +111,13 @@ export const boardReducer: Reducer<Board> = (state, event) => {
       const taskId = taskIdFromStream(event.stream)
       if (!taskId) return state
       return {
-        tasks: state.tasks.map(t =>
-          t.id === taskId
-            ? { ...t, status: d.to, updatedAt: event.ts }
-            : t,
-        ),
+        tasks: state.tasks.map(t => {
+          if (t.id !== taskId) return t
+          const updated = { ...t, status: d.to, updatedAt: event.ts }
+          // When activating a task, ensure agent is set (default to queue)
+          if (d.to === 'active' && !updated.agent) updated.agent = t.queue
+          return updated
+        }),
       }
     }
 
