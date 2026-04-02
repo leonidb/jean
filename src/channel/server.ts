@@ -178,4 +178,11 @@ function scheduleReconnect() {
 await mcp.connect(new StdioServerTransport())
 connectToInfra()
 
+// Detect parent death: when Claude exits, stdin closes. SDK doesn't handle this (PR #1613).
+process.stdin.on('end', () => {
+  process.stderr.write(`[jean] stdin closed (parent died), shutting down\n`)
+  ws?.close()
+  process.exit(0)
+})
+
 process.stderr.write(`[jean] channel plugin started for agent "${AGENT_NAME}"\n`)
