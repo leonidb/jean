@@ -95,6 +95,17 @@ function deliverToAgent(agentName: string, msg: DeliverMsg): boolean {
   return true
 }
 
+// ── SSE subscribers ──────────────────────────────────────────────
+
+const sseSubscribers = new Set<{ write: (data: string) => void; close: () => void }>()
+
+function broadcastSSE(event: StoredEvent) {
+  const json = JSON.stringify(toApiEvent(event))
+  for (const sub of sseSubscribers) {
+    try { sub.write(`data: ${json}\n\n`) } catch { sseSubscribers.delete(sub) }
+  }
+}
+
 // ── Record event (append + project + side effects) ───────────────
 
 async function record(type: string, stream: string, data: unknown): Promise<StoredEvent> {
@@ -107,6 +118,9 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
   const taskId = taskIdFromStream(stream)
   const agent = (data as Record<string, unknown>)?.agent as string | undefined
   process.stderr.write(`[jean] ${type}${agent ? ` agent=${agent}` : ''}${taskId ? ` task=${taskId}` : ''}\n`)
+
+  // Broadcast to SSE listeners
+  broadcastSSE(event)
 
   // Nudge sensei if pending queue grew
   if (pendingProjection.state.length > sizeBefore) {
@@ -419,6 +433,39 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         let events = await store.read({ stream })
         if (last) events = events.slice(-Number(last))
         return Response.json({ events: raw ? events : events.map(toApiEvent) })
+      })()
+    }
+
+    // ── SSE stream ──────────────────────────────────────────────
+
+    // GET /stream — Server-Sent Events, real-time event broadcast
+    // First message is the lastEventId so the client knows where live starts
+    if (path === '/stream') {
+      return (async () => {
+        const lastId = await store.lastId()
+        const stream = new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder()
+            const sub = {
+              write: (data: string) => controller.enqueue(encoder.encode(data)),
+              close: () => controller.close(),
+            }
+            // Send lastEventId as first message
+            sub.write(`data: ${JSON.stringify({ type: 'connected', lastEventId: lastId })}\n\n`)
+            sseSubscribers.add(sub)
+            // Clean up when client disconnects
+            req.signal.addEventListener('abort', () => {
+              sseSubscribers.delete(sub)
+            })
+          },
+        })
+        return new Response(stream, {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+          },
+        })
       })()
     }
 
