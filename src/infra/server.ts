@@ -454,7 +454,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
   },
 
   websocket: {
-    idleTimeout: 10, // detect dead connections within 10 seconds
     open(ws) {
       // ws-open is pre-registration, no agent info yet
     },
@@ -550,12 +549,5 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     },
   },
 })
-
-// Heartbeat: ping all connected agents every 5 seconds to detect dead connections
-setInterval(() => {
-  for (const [name, entry] of agents) {
-    entry.ws.ping()
-  }
-}, 5000)
 
 void record('start', SYSTEM_STREAM, { port: PORT } satisfies StartData)
