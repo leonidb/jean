@@ -1,0 +1,24 @@
+{
+  "name": "jean",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "jean": "./src/cli/jean.ts"
+  },
+  "scripts": {
+    "infra": "bun run src/infra/server.ts",
+    "board": "bun run src/cli/jean.ts board",
+    "status": "bun run src/cli/jean.ts status",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0"
+  }
+}
