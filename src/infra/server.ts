@@ -130,15 +130,27 @@ function nextTaskId(): string {
   return String(boardProjection.state.tasks.length + 1).padStart(3, '0')
 }
 
+function resolveAgent(event: StoredEvent): string | undefined {
+  const agent = agentFromEvent(event)
+  if (agent) return agent
+  // For task-stream events, look up the queue from the board
+  const taskId = taskIdFromStream(event.stream)
+  if (taskId) {
+    const task = boardProjection.state.tasks.find(t => t.id === taskId)
+    return task?.agent ?? task?.queue
+  }
+  return undefined
+}
+
 function pendingEvents(agent?: string): StoredEvent[] {
   if (!agent) return [...pendingProjection.state]
-  return pendingProjection.state.filter(e => agentFromEvent(e) === agent)
+  return pendingProjection.state.filter(e => resolveAgent(e) === agent)
 }
 
 function pendingByAgent(): Record<string, number> {
   const counts: Record<string, number> = {}
   for (const e of pendingProjection.state) {
-    const agent = agentFromEvent(e)
+    const agent = resolveAgent(e)
     if (agent) counts[agent] = (counts[agent] ?? 0) + 1
   }
   return counts
@@ -187,12 +199,11 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         }
         const taskId = nextTaskId()
         await record('task-created', taskStream(taskId), {
-          agent: body.queue,
           title: body.title,
           description: body.description ?? '',
           queue: body.queue,
           playbook: body.playbook,
-        } satisfies TaskCreatedData & { agent: string })
+        } satisfies TaskCreatedData)
         const task = boardProjection.state.tasks.find(t => t.id === taskId)
         return Response.json(task, { status: 201 })
       })()
@@ -382,7 +393,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         }
         let toAck = pendingProjection.state.filter(e => e.id <= body.upToId)
         if (body.agent) {
-          toAck = toAck.filter(e => agentFromEvent(e) === body.agent)
+          toAck = toAck.filter(e => resolveAgent(e) === body.agent)
         }
         const eventIds = toAck.map(e => e.id)
         if (eventIds.length > 0) {
