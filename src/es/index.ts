@@ -1,0 +1,5 @@
+export type { StoredEvent, NewEvent, Reducer, Snapshot, StoreBackend, SnapshotBackend } from './types.ts'
+export { createStore, memoryBackend, jsonlBackend, memorySnapshotBackend, fileSnapshotBackend } from './store.ts'
+export type { EventStore, ReadOpts } from './store.ts'
+export { createProjection } from './projection.ts'
+export type { Projection, ProjectionOpts } from './projection.ts'
