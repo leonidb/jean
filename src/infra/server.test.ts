@@ -74,7 +74,7 @@ describe('infrastructure server', () => {
 
     const registered = await new Promise<{ type: string; agent: string }>((resolve, reject) => {
       ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'register', agent: 'test-agent' }))
+        ws.send(JSON.stringify({ type: 'register', agent: 'test-agent', role: 'worker' }))
       }
       ws.onmessage = (e) => {
         resolve(JSON.parse(String(e.data)))
@@ -88,8 +88,8 @@ describe('infrastructure server', () => {
 
     // Verify the agent appears in /agents
     const res = await fetch(`${BASE}/agents`)
-    const data = (await res.json()) as { agents: string[] }
-    expect(data.agents).toContain('test-agent')
+    const data = (await res.json()) as { agents: Array<{ name: string; role: string }> }
+    expect(data.agents.some(a => a.name === 'test-agent')).toBe(true)
 
     ws.close()
   })
@@ -102,7 +102,7 @@ describe('infrastructure server', () => {
 
     await new Promise<void>((resolve, reject) => {
       ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'register', agent: 'routed-agent' }))
+        ws.send(JSON.stringify({ type: 'register', agent: 'routed-agent', role: 'worker' }))
       }
       ws.onmessage = (e) => {
         const msg = JSON.parse(String(e.data))
