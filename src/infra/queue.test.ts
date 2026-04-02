@@ -51,11 +51,11 @@ describe('event queue', () => {
     await Bun.sleep(100)
 
     const res = await fetch(`${BASE}/events/pending?agent=reply-worker`)
-    const data = (await res.json()) as { events: Array<{ kind: string; agent: string; text: string }> }
+    const data = (await res.json()) as { events: Array<{ type: string; agent: string; data: { text: string } }> }
     expect(data.events.length).toBeGreaterThanOrEqual(1)
-    const event = data.events.find(e => e.kind === 'reply')
+    const event = data.events.find(e => e.type === 'reply')
     expect(event).toBeDefined()
-    expect(event!.text).toBe('done with task')
+    expect(event!.data.text).toBe('done with task')
 
     ws.close()
   })
@@ -70,8 +70,8 @@ describe('event queue', () => {
     })
 
     const res = await fetch(`${BASE}/events/pending?agent=idle-worker`)
-    const data = (await res.json()) as { events: Array<{ kind: string; agent: string }> }
-    expect(data.events.some(e => e.kind === 'agent-idle')).toBe(true)
+    const data = (await res.json()) as { events: Array<{ type: string; agent: string }> }
+    expect(data.events.some(e => e.type === 'agent-idle')).toBe(true)
 
     ws.close()
   })
@@ -84,8 +84,8 @@ describe('event queue', () => {
     })
 
     const res = await fetch(`${BASE}/events/pending?agent=queue-test`)
-    const data = (await res.json()) as { events: Array<{ kind: string; agent: string }> }
-    expect(data.events.some(e => e.kind === 'task-created')).toBe(true)
+    const data = (await res.json()) as { events: Array<{ type: string; agent: string }> }
+    expect(data.events.some(e => e.type === 'task-created')).toBe(true)
   })
 
   test('GET /events/agents returns per-agent counts', async () => {
@@ -161,10 +161,10 @@ describe('event queue', () => {
     await Bun.sleep(100)
 
     const res = await fetch(`${BASE}/events/pending?agent=fifo-worker`)
-    const data = (await res.json()) as { events: Array<{ text: string }> }
-    expect(data.events[0]!.text).toBe('first')
-    expect(data.events[1]!.text).toBe('second')
-    expect(data.events[2]!.text).toBe('third')
+    const data = (await res.json()) as { events: Array<{ data: { text: string } }> }
+    expect(data.events[0]!.data.text).toBe('first')
+    expect(data.events[1]!.data.text).toBe('second')
+    expect(data.events[2]!.data.text).toBe('third')
 
     ws.close()
   })
@@ -225,7 +225,7 @@ describe('sensei nudge', () => {
     // This is actually desired behavior — let's verify the event was queued instead
     const res = await fetch(`${BASE}/events/pending?agent=busy-worker`)
     const data = (await res.json()) as { events: Array<{ text: string }> }
-    expect(data.events.some(e => e.text === 'done')).toBe(true)
+    expect(data.events.some(e => (e as any).data?.text === 'done')).toBe(true)
 
     sensei.close()
     worker.close()
@@ -247,7 +247,7 @@ describe('sensei nudge', () => {
 
     // No pending events for sensei
     const res = await fetch(`${BASE}/events?agent=self-loop-sensei`)
-    const data = (await res.json()) as { events: Array<{ kind: string }> }
+    const data = (await res.json()) as { events: Array<{ type: string }> }
     expect(data.events.length).toBe(0)
 
     // Sensei should NOT have been nudged (no actionable events existed)
@@ -256,8 +256,8 @@ describe('sensei nudge', () => {
 
     // But the event IS in history (informational)
     const histRes = await fetch(`${BASE}/history`)
-    const hist = (await histRes.json()) as { events: Array<{ kind: string; agent: string }> }
-    expect(hist.events.some(e => e.kind === 'agent-idle' && e.agent === 'self-loop-sensei')).toBe(true)
+    const hist = (await histRes.json()) as { events: Array<{ type: string; agent: string }> }
+    expect(hist.events.some(e => e.type === 'agent-idle' && e.agent === 'self-loop-sensei')).toBe(true)
 
     sensei.close()
   })
@@ -272,8 +272,8 @@ describe('sensei nudge', () => {
     })
 
     const res = await fetch(`${BASE}/events?agent=idle-actionable-worker`)
-    const data = (await res.json()) as { events: Array<{ kind: string }> }
-    expect(data.events.some(e => e.kind === 'agent-idle')).toBe(true)
+    const data = (await res.json()) as { events: Array<{ type: string }> }
+    expect(data.events.some(e => e.type === 'agent-idle')).toBe(true)
 
     worker.close()
   })
@@ -299,7 +299,7 @@ describe('role-based routing', () => {
     // Reply should be in the queue
     const res = await fetch(`${BASE}/events/pending?agent=routing-worker`)
     const data = (await res.json()) as { events: Array<{ text: string }> }
-    expect(data.events.some(e => e.text === 'routed reply')).toBe(true)
+    expect(data.events.some(e => (e as any).data?.text === 'routed reply')).toBe(true)
 
     // Sensei should NOT have received it directly (it's not idle)
     const directDelivery = senseiMsgs.find(m => m.type === 'deliver' && m.text === 'routed reply')

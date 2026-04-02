@@ -5,33 +5,66 @@
  * Bun HTTP/WebSocket server that:
  * - Accepts WebSocket connections from channel plugins (one per agent)
  * - Routes messages between connected agents (role-based)
- * - Manages task state via board CRUD endpoints
- * - Records all events to a persistent history (JSONL)
+ * - Manages task state derived from events (event sourcing)
  * - Queues actionable events for the sensei and delivers them reactively
  * - Receives stop hook notifications (agent went idle)
  *
  * No LLM — fast, deterministic plumbing.
  */
 
-import { dirname, join } from 'path'
-import { appendFile } from 'fs/promises'
+import { dirname } from 'path'
 import type { ServerWebSocket } from 'bun'
 import {
-  readBoard, writeBoard, findTask, upsertTask, createTask,
-  updateTaskStatus, canTransition,
-  type Board, type Task, type TaskStatus,
-} from './board.ts'
+  createStore, jsonlBackend, createProjection, fileSnapshotBackend,
+  type StoredEvent, type EventStore,
+} from '../es/index.ts'
+import { canTransition, type Board, type Task, type TaskStatus } from './board.ts'
+import {
+  boardReducer, pendingReducer,
+  taskStream, agentStream, SYSTEM_STREAM, taskIdFromStream,
+  toApiEvent,
+  type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
+  type SendData, type AgentIdleData, type RegisterData, type AckData,
+  type ReplyData, type NudgeData, type StartData,
+  type PendingState,
+} from './reducers.ts'
 import type {
   InboundMsg, OutboundMsg, DeliverMsg, SendRequest,
-  AgentRole, EventKind, HistoryEvent,
+  AgentRole,
   CreateTaskRequest, UpdateTaskRequest, UpdateStatusRequest,
 } from './protocol.ts'
 
 const PORT = Number(process.env.JEAN_PORT ?? 8700)
 const BOARD_PATH = process.env.JEAN_BOARD ?? './board.json'
-const HISTORY_PATH = process.env.JEAN_HISTORY ?? join(dirname(BOARD_PATH), 'history.jsonl')
+const HISTORY_PATH = process.env.JEAN_HISTORY ?? `${dirname(BOARD_PATH)}/history.jsonl`
 
-// ── Agent registry (role-based) ───────────────────────────────────
+// ── Event store & projections ────────────────────────────────────
+
+const store: EventStore = createStore(jsonlBackend(HISTORY_PATH))
+
+const boardProjection = createProjection<Board>({
+  name: 'board',
+  store,
+  reducer: boardReducer,
+  initial: { tasks: [] },
+  filter: { types: ['task-created', 'task-status', 'task-updated'] },
+  snapshots: fileSnapshotBackend(dirname(BOARD_PATH)),
+  snapshotEvery: 50,
+})
+
+const pendingProjection = createProjection<PendingState>({
+  name: 'pending',
+  store,
+  reducer: pendingReducer,
+  initial: [],
+  filter: { types: ['reply', 'agent-idle', 'task-created', 'ack'] },
+})
+
+// Initialize: replay events to rebuild state
+await boardProjection.catchUp()
+await pendingProjection.catchUp()
+
+// ── Agent registry (role-based, ephemeral) ───────────────────────
 
 type AgentSocket = ServerWebSocket<{ agent?: string; role?: AgentRole }>
 
@@ -61,150 +94,62 @@ function deliverToAgent(agentName: string, msg: DeliverMsg): boolean {
   return true
 }
 
-// ── Board cache (for sync taskId inference) ──────────────────────
+// ── Record event (append + project + side effects) ───────────────
 
-let boardCache: Board = { tasks: [] }
-
-async function cachedReadBoard(): Promise<Board> {
-  boardCache = await readBoard(BOARD_PATH)
-  return boardCache
-}
-
-function inferTaskId(agent?: string): string | undefined {
-  if (!agent) return undefined
-  const task = boardCache.tasks.find(
-    t => (t.agent === agent || t.queue === agent) && (t.status === 'active' || t.status === 'blocked'),
-  )
-  return task?.id
-}
-
-// ── Unified event system ─────────────────────────────────────────
-
-let eventIdCounter = 0
-const pendingQueue: HistoryEvent[] = []
-
-function isActionable(event: HistoryEvent): boolean {
-  if (event.kind === 'reply') return true
-  if (event.kind === 'task-created') return true
-  // Only worker idle is actionable — sensei idle is informational
-  if (event.kind === 'agent-idle') {
-    const entry = agents.get(event.agent ?? '')
-    return entry?.role !== 'sensei'
-  }
-  return false
-}
-
-function recordEvent(kind: EventKind, opts: { agent?: string; text?: string; taskId?: string } = {}): HistoryEvent {
-  const taskId = opts.taskId ?? inferTaskId(opts.agent)
-  const event: HistoryEvent = {
-    id: ++eventIdCounter,
-    kind,
-    ts: new Date().toISOString(),
-    ...(opts.agent && { agent: opts.agent }),
-    ...(taskId && { taskId }),
-    ...(opts.text && { text: opts.text }),
-  }
-
-  // Persist (fire-and-forget)
-  void appendToHistory(event)
+async function record(type: string, stream: string, data: unknown): Promise<StoredEvent> {
+  const sizeBefore = pendingProjection.state.length
+  const event = await store.append({ stream, type, data })
+  boardProjection.apply(event)
+  pendingProjection.apply(event)
 
   // Stderr for real-time observability
-  process.stderr.write(`[jean] ${event.kind}${event.agent ? ` agent=${event.agent}` : ''}${event.taskId ? ` task=${event.taskId}` : ''}${event.text ? ` ${event.text}` : ''}\n`)
+  const taskId = taskIdFromStream(stream)
+  const agent = (data as Record<string, unknown>)?.agent as string | undefined
+  process.stderr.write(`[jean] ${type}${agent ? ` agent=${agent}` : ''}${taskId ? ` task=${taskId}` : ''}\n`)
 
-  // Actionable events enter the pending queue and nudge sensei
-  if (isActionable(event)) {
-    pendingQueue.push(event)
+  // Nudge sensei if pending queue grew
+  if (pendingProjection.state.length > sizeBefore) {
     nudgeSenseiIfIdle()
   }
 
   return event
 }
 
-async function appendToHistory(event: HistoryEvent): Promise<void> {
-  const line = JSON.stringify(event) + '\n'
-  await appendFile(HISTORY_PATH, line)
+// ── Helpers ──────────────────────────────────────────────────────
+
+function inferTaskId(agentName?: string): string | undefined {
+  if (!agentName) return undefined
+  const task = boardProjection.state.tasks.find(
+    t => (t.agent === agentName || t.queue === agentName) && (t.status === 'active' || t.status === 'blocked'),
+  )
+  return task?.id
 }
 
-async function loadLastEventId(): Promise<number> {
-  const file = Bun.file(HISTORY_PATH)
-  if (!(await file.exists())) return 0
-  const text = await file.text()
-  const lines = text.trimEnd().split('\n')
-  if (lines.length === 0) return 0
-  try {
-    const last = JSON.parse(lines[lines.length - 1]!) as { id: number }
-    return last.id
-  } catch {
-    return 0
-  }
+function nextTaskId(): string {
+  return String(boardProjection.state.tasks.length + 1).padStart(3, '0')
 }
 
-async function readHistory(opts?: { taskId?: string; last?: number }): Promise<HistoryEvent[]> {
-  const file = Bun.file(HISTORY_PATH)
-  if (!(await file.exists())) return []
-  const text = await file.text()
-  let events = text.trimEnd().split('\n')
-    .filter(line => line.length > 0)
-    .map(line => JSON.parse(line) as HistoryEvent)
-  if (opts?.taskId) {
-    events = events.filter(e => e.taskId === opts.taskId)
+function pendingEvents(agent?: string): StoredEvent[] {
+  const all = pendingProjection.state
+  if (agent) {
+    return all.filter(e => {
+      const a = (e.data as Record<string, unknown>)?.agent as string | undefined
+        ?? (e.stream.startsWith('agent-') ? e.stream.slice(6) : undefined)
+        ?? (e.stream.startsWith('task-') ? boardProjection.state.tasks.find(t => t.id === taskIdFromStream(e.stream))?.queue : undefined)
+      return a === agent
+    })
   }
-  if (opts?.last) {
-    events = events.slice(-opts.last)
-  }
-  return events
-}
-
-// ── Pending queue helpers ────────────────────────────────────────
-
-function pendingEvents(agent?: string): HistoryEvent[] {
-  if (agent) return pendingQueue.filter(e => e.agent === agent)
-  return [...pendingQueue]
+  return [...all]
 }
 
 function pendingByAgent(): Record<string, number> {
   const counts: Record<string, number> = {}
-  for (const e of pendingQueue) {
-    if (e.agent) counts[e.agent] = (counts[e.agent] ?? 0) + 1
+  for (const e of pendingProjection.state) {
+    const agent = (e.data as Record<string, unknown>)?.agent as string | undefined
+      ?? (e.stream.startsWith('agent-') ? e.stream.slice(6) : undefined)
+    if (agent) counts[agent] = (counts[agent] ?? 0) + 1
   }
   return counts
-}
-
-function ackEvent(id: number): boolean {
-  const idx = pendingQueue.findIndex(e => e.id === id)
-  if (idx < 0) return false
-  pendingQueue.splice(idx, 1)
-  recordEvent('ack', { text: String(id) })
-  return true
-}
-
-function ackEventsUpTo(agent: string, upToId: number): number {
-  let count = 0
-  const ackedIds: number[] = []
-  for (let i = pendingQueue.length - 1; i >= 0; i--) {
-    const e = pendingQueue[i]!
-    if (e.agent === agent && e.id <= upToId) {
-      ackedIds.push(e.id)
-      pendingQueue.splice(i, 1)
-      count++
-    }
-  }
-  if (count > 0) recordEvent('ack', { agent, text: ackedIds.join(',') })
-  return count
-}
-
-function ackAllUpTo(upToId: number): number {
-  let count = 0
-  const ackedIds: number[] = []
-  for (let i = pendingQueue.length - 1; i >= 0; i--) {
-    if (pendingQueue[i]!.id <= upToId) {
-      ackedIds.push(pendingQueue[i]!.id)
-      pendingQueue.splice(i, 1)
-      count++
-    }
-  }
-  if (count > 0) recordEvent('ack', { text: ackedIds.join(',') })
-  return count
 }
 
 // ── Sensei nudge ──────────────────────────────────────────────────
@@ -212,7 +157,7 @@ function ackAllUpTo(upToId: number): number {
 function nudgeSenseiIfIdle() {
   const sensei = findSensei()
   if (!sensei || !sensei.idle) return
-  if (pendingQueue.length === 0) return
+  if (pendingProjection.state.length === 0) return
 
   sensei.idle = false // prevent double-nudge
   send(sensei.ws, {
@@ -220,15 +165,10 @@ function nudgeSenseiIfIdle() {
     from: 'infra',
     text: 'Events pending. Check the board.',
   })
-  recordEvent('nudge', { text: `${pendingQueue.length} events pending` })
+  void record('nudge', SYSTEM_STREAM, { pendingCount: pendingProjection.state.length } satisfies NudgeData)
 }
 
 // ── HTTP + WebSocket server ───────────────────────────────────────
-
-// Initialize: load counter from history, cache board, then start
-const initCounter = await loadLastEventId()
-eventIdCounter = initCounter
-boardCache = await readBoard(BOARD_PATH).catch(() => ({ tasks: [] }))
 
 Bun.serve<{ agent?: string; role?: AgentRole }>({
   port: PORT,
@@ -253,43 +193,34 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         if (!body.title || !body.queue) {
           return Response.json({ error: 'missing title or queue' }, { status: 400 })
         }
-        const board = await cachedReadBoard()
-        const task = createTask({
+        const taskId = nextTaskId()
+        const event = await record('task-created', taskStream(taskId), {
           title: body.title,
           description: body.description ?? '',
           queue: body.queue,
           playbook: body.playbook,
-        })
-        const updated = upsertTask(board, task)
-        await writeBoard(BOARD_PATH, updated)
-        boardCache = updated
-        recordEvent('task-created', { agent: task.queue, text: task.title, taskId: task.id })
+        } satisfies TaskCreatedData)
+        const task = boardProjection.state.tasks.find(t => t.id === taskId)
         return Response.json(task, { status: 201 })
       })()
     }
 
     // GET /tasks — list tasks
     if (path === '/tasks' && req.method === 'GET') {
-      return (async () => {
-        const board = await cachedReadBoard()
-        let tasks = board.tasks
-        const status = url.searchParams.get('status')
-        if (status) tasks = tasks.filter(t => t.status === status)
-        const queue = url.searchParams.get('queue')
-        if (queue) tasks = tasks.filter(t => t.queue === queue)
-        return Response.json({ tasks })
-      })()
+      let tasks = boardProjection.state.tasks
+      const status = url.searchParams.get('status')
+      if (status) tasks = tasks.filter(t => t.status === status)
+      const queue = url.searchParams.get('queue')
+      if (queue) tasks = tasks.filter(t => t.queue === queue)
+      return Response.json({ tasks })
     }
 
     // GET /tasks/:id
     const taskGetMatch = path.match(/^\/tasks\/(\w+)$/)
     if (taskGetMatch && req.method === 'GET') {
-      return (async () => {
-        const board = await cachedReadBoard()
-        const task = findTask(board, taskGetMatch[1]!)
-        if (!task) return Response.json({ error: 'not found' }, { status: 404 })
-        return Response.json(task)
-      })()
+      const task = boardProjection.state.tasks.find(t => t.id === taskGetMatch[1])
+      if (!task) return Response.json({ error: 'not found' }, { status: 404 })
+      return Response.json(task)
     }
 
     // PATCH /tasks/:id/status — transition status
@@ -300,8 +231,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         if (!body.status) {
           return Response.json({ error: 'missing status' }, { status: 400 })
         }
-        const board = await cachedReadBoard()
-        const task = findTask(board, statusMatch[1]!)
+        const task = boardProjection.state.tasks.find(t => t.id === statusMatch[1])
         if (!task) return Response.json({ error: 'not found' }, { status: 404 })
         if (!canTransition(task.status, body.status as TaskStatus)) {
           return Response.json(
@@ -309,11 +239,11 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             { status: 400 },
           )
         }
-        const updated = updateTaskStatus(task, body.status as TaskStatus)
-        const newBoard = upsertTask(board, updated)
-        await writeBoard(BOARD_PATH, newBoard)
-        boardCache = newBoard
-        recordEvent('task-status', { taskId: task.id, text: `${task.status} → ${body.status}` })
+        await record('task-status', taskStream(task.id), {
+          from: task.status,
+          to: body.status,
+        } satisfies TaskStatusData)
+        const updated = boardProjection.state.tasks.find(t => t.id === task.id)
         return Response.json(updated)
       })()
     }
@@ -323,19 +253,13 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     if (taskPatchMatch && req.method === 'PATCH') {
       return (async () => {
         const body = (await req.json()) as UpdateTaskRequest
-        const board = await cachedReadBoard()
-        const task = findTask(board, taskPatchMatch[1]!)
+        const task = boardProjection.state.tasks.find(t => t.id === taskPatchMatch[1])
         if (!task) return Response.json({ error: 'not found' }, { status: 404 })
-        const updated: Task = {
-          ...task,
-          ...body.agent !== undefined && { agent: body.agent },
-          ...body.description !== undefined && { description: body.description },
-          updatedAt: new Date().toISOString(),
-        }
-        const newBoard = upsertTask(board, updated)
-        await writeBoard(BOARD_PATH, newBoard)
-        boardCache = newBoard
-        recordEvent('task-updated', { taskId: task.id, text: task.id })
+        await record('task-updated', taskStream(task.id), {
+          ...(body.agent !== undefined && { agent: body.agent }),
+          ...(body.description !== undefined && { description: body.description }),
+        } satisfies TaskUpdatedData)
+        const updated = boardProjection.state.tasks.find(t => t.id === task.id)
         return Response.json(updated)
       })()
     }
@@ -355,16 +279,17 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           text: body.text,
           taskId: body.taskId,
         })
-        // Agent just received work — mark as not idle
         if (delivered) {
           const entry = agents.get(body.to)
           if (entry) entry.idle = false
         }
-        recordEvent('send', {
+        const stream = body.taskId ? taskStream(body.taskId) : agentStream(body.to)
+        void record('send', stream, {
           agent: body.to,
-          taskId: body.taskId,
-          text: `from=${body.from ?? 'api'} ${delivered ? 'delivered' : 'not connected'}: ${body.text}`,
-        })
+          from: body.from ?? 'api',
+          text: body.text,
+          delivered,
+        } satisfies SendData)
         return Response.json({ delivered })
       })()
     }
@@ -373,28 +298,28 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     if (path === '/agent-idle' && (req.method === 'POST' || req.method === 'GET')) {
       return (async () => {
-        let agent: string | null = null
+        let agentName: string | null = null
         if (req.method === 'POST') {
           const body = (await req.json()) as { agent: string }
-          agent = body.agent
+          agentName = body.agent
         } else {
-          agent = url.searchParams.get('name')
+          agentName = url.searchParams.get('name')
         }
-        if (!agent) {
+        if (!agentName) {
           return Response.json({ error: 'missing agent name' }, { status: 400 })
         }
 
-        const entry = agents.get(agent)
+        const entry = agents.get(agentName)
         if (entry) entry.idle = true
 
-        // If this is the sensei going idle, nudge if events pending
+        const role = entry?.role ?? 'worker'
+        const taskId = inferTaskId(agentName)
+        const stream = taskId ? taskStream(taskId) : agentStream(agentName)
+        await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData & { agent: string })
+
+        // If sensei just went idle, check for pending work
         if (entry?.role === 'sensei') {
-          recordEvent('agent-idle', { agent })
-          // Re-check: sensei is now idle, maybe events arrived while it was busy
           nudgeSenseiIfIdle()
-        } else {
-          // Worker went idle — actionable event for sensei
-          recordEvent('agent-idle', { agent })
         }
 
         return Response.json({ ok: true })
@@ -406,13 +331,13 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     // GET /events — pending actionable events (optionally filtered by agent)
     if (path === '/events' && req.method === 'GET') {
       const agent = url.searchParams.get('agent') ?? undefined
-      return Response.json({ events: pendingEvents(agent) })
+      return Response.json({ events: pendingEvents(agent).map(toApiEvent) })
     }
 
-    // GET /events/pending — alias for /events (backward compat)
+    // GET /events/pending — alias for /events
     if (path === '/events/pending') {
       const agent = url.searchParams.get('agent') ?? undefined
-      return Response.json({ events: pendingEvents(agent) })
+      return Response.json({ events: pendingEvents(agent).map(toApiEvent) })
     }
 
     // GET /events/agents — agents with pending event counts
@@ -423,38 +348,54 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     // POST /events/:id/ack — acknowledge a single event
     const ackMatch = path.match(/^\/events\/(\d+)\/ack$/)
     if (ackMatch && req.method === 'POST') {
-      const ok = ackEvent(Number(ackMatch[1]))
-      return Response.json({ ok })
+      return (async () => {
+        const id = Number(ackMatch[1])
+        const exists = pendingProjection.state.some(e => e.id === id)
+        if (!exists) return Response.json({ ok: false })
+        await record('ack', SYSTEM_STREAM, { eventIds: [id] } satisfies AckData)
+        return Response.json({ ok: true })
+      })()
     }
 
-    // POST /events/ack — batch ack events up to ID (optionally filtered by source agent)
+    // POST /events/ack — batch ack events up to ID
     if (path === '/events/ack' && req.method === 'POST') {
       return (async () => {
         const body = (await req.json()) as { upToId: number; agent?: string }
         if (!body.upToId) {
           return Response.json({ error: 'missing upToId' }, { status: 400 })
         }
+        let toAck = pendingProjection.state.filter(e => e.id <= body.upToId)
         if (body.agent) {
-          const count = ackEventsUpTo(body.agent, body.upToId)
-          return Response.json({ acknowledged: count })
+          toAck = toAck.filter(e => {
+            const a = (e.data as Record<string, unknown>)?.agent as string | undefined
+              ?? (e.stream.startsWith('agent-') ? e.stream.slice(6) : undefined)
+            return a === body.agent
+          })
         }
-        const count = ackAllUpTo(body.upToId)
-        return Response.json({ acknowledged: count })
+        const eventIds = toAck.map(e => e.id)
+        if (eventIds.length > 0) {
+          await record('ack', SYSTEM_STREAM, { eventIds } satisfies AckData)
+        }
+        return Response.json({ acknowledged: eventIds.length })
       })()
     }
 
     // ── History endpoint ────────────────────────────────────────
 
     // GET /history — full persistent event history
+    // ?taskId=001 — filter by task
+    // ?stream=agent-scratch — filter by stream
+    // ?last=50 — last N events
+    // ?raw=true — return raw StoredEvents (with stream, data) instead of translated ApiEvents
     if (path === '/history') {
       return (async () => {
         const taskId = url.searchParams.get('taskId') ?? undefined
         const last = url.searchParams.get('last')
-        const events = await readHistory({
-          taskId,
-          last: last ? Number(last) : undefined,
-        })
-        return Response.json({ events })
+        const raw = url.searchParams.get('raw') === 'true'
+        const stream = url.searchParams.get('stream') ?? (taskId ? taskStream(taskId) : undefined)
+        let events = await store.read({ stream })
+        if (last) events = events.slice(-Number(last))
+        return Response.json({ events: raw ? events : events.map(toApiEvent) })
       })()
     }
 
@@ -462,10 +403,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     // GET /board — read the board
     if (path === '/board') {
-      return (async () => {
-        const board = await cachedReadBoard()
-        return Response.json(board)
-      })()
+      return Response.json(boardProjection.state)
     }
 
     // GET /agents — list connected agents with roles
@@ -485,7 +423,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         name: 'jean-infra',
         agents: [...agents.entries()].map(([n, e]) => ({ name: n, role: e.role })),
         sensei: sensei ? { connected: true, idle: sensei.idle } : { connected: false },
-        pendingEvents: pendingQueue.length,
+        pendingEvents: pendingProjection.state.length,
       })
     }
 
@@ -494,14 +432,14 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
   websocket: {
     open(ws) {
-      // ws-open is pre-registration, no agent info yet — skip recording
+      // ws-open is pre-registration, no agent info yet
     },
 
     close(ws) {
       const agent = ws.data.agent
       if (agent) {
         agents.delete(agent)
-        recordEvent('disconnect', { agent })
+        void record('disconnect', agentStream(agent), { agent })
       }
     },
 
@@ -514,21 +452,19 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             ws.data.agent = msg.agent
             ws.data.role = msg.role
             const role = msg.role ?? 'worker'
-            // Determine idle state from board: if agent has an active task, it's busy
-            const hasActiveTask = boardCache.tasks.some(
+            const hasActiveTask = boardProjection.state.tasks.some(
               t => t.agent === msg.agent && (t.status === 'active' || t.status === 'blocked'),
             )
             const idle = !hasActiveTask
             agents.set(msg.agent, { ws, role, idle })
             send(ws, { type: 'registered', agent: msg.agent, role })
-            recordEvent('register', { agent: msg.agent, text: `role=${role} idle=${idle}` })
+            void record('register', agentStream(msg.agent), { agent: msg.agent, role, idle } satisfies RegisterData & { agent: string })
 
             if (role === 'sensei' && idle) {
-              // Sensei just connected idle — nudge if work exists
-              if (pendingQueue.length > 0) {
+              if (pendingProjection.state.length > 0) {
                 nudgeSenseiIfIdle()
               } else {
-                const hasWork = boardCache.tasks.some(
+                const hasWork = boardProjection.state.tasks.some(
                   t => t.status === 'inbox' || t.status === 'active' || t.status === 'blocked',
                 )
                 if (hasWork) nudgeSenseiIfIdle()
@@ -538,14 +474,13 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           }
 
           case 'reply': {
-            // Only queue replies from workers — sensei replies go to history only
             const sender = agents.get(msg.from)
+            const taskId = inferTaskId(msg.from)
+            const stream = taskId ? taskStream(taskId) : agentStream(msg.from)
             if (sender?.role !== 'sensei') {
-              recordEvent('reply', { agent: msg.from, text: msg.text })
+              void record('reply', stream, { agent: msg.from, text: msg.text } satisfies ReplyData & { agent: string })
             } else {
-              // Sensei reply: record as informational (not actionable)
-              // Use 'send' kind since it's sensei communicating outward
-              recordEvent('send', { agent: msg.from, text: msg.text })
+              void record('send', stream, { agent: msg.from, from: msg.from, text: msg.text, delivered: true } satisfies SendData & { agent: string })
             }
             break
           }
@@ -557,4 +492,4 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
   },
 })
 
-recordEvent('start', { text: `listening on http://127.0.0.1:${PORT}` })
+void record('start', SYSTEM_STREAM, { port: PORT } satisfies StartData)

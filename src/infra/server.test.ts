@@ -75,10 +75,10 @@ describe('infrastructure server', () => {
 
   test('/history returns persistent event log', async () => {
     const res = await fetch(`${BASE}/history`)
-    const data = (await res.json()) as { events: Array<{ kind: string }> }
+    const data = (await res.json()) as { events: Array<{ type: string }> }
     expect(Array.isArray(data.events)).toBe(true)
     expect(data.events.length).toBeGreaterThan(0)
-    expect(data.events.some(e => e.kind === 'start')).toBe(true)
+    expect(data.events.some(e => e.type === 'start')).toBe(true)
   })
 
   test('WebSocket registration works', async () => {

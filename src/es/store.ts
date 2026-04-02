@@ -32,6 +32,7 @@ export function createStore(backend: StoreBackend): EventStore {
   return {
     async append(event) {
       const id = (await ensureId()) + 1
+      nextId = id  // increment before async write to prevent concurrent duplicates
       const stored: StoredEvent = {
         id,
         stream: event.stream,
@@ -40,7 +41,6 @@ export function createStore(backend: StoreBackend): EventStore {
         data: event.data,
       }
       await backend.append(stored)
-      nextId = id
       return stored
     },
 

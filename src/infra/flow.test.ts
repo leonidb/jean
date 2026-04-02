@@ -79,8 +79,8 @@ describe('full lifecycle', () => {
     // 3. Verify task-created event is queued
     await Bun.sleep(100)
     const pendingRes = await fetch(`${BASE}/events/pending?agent=flow-worker`)
-    const pending = (await pendingRes.json()) as { events: Array<{ kind: string }> }
-    expect(pending.events.some(e => e.kind === 'task-created')).toBe(true)
+    const pending = (await pendingRes.json()) as { events: Array<{ type: string }> }
+    expect(pending.events.some(e => e.type === 'task-created')).toBe(true)
 
     // 4. Signal sensei idle → nudge arrives
     await fetch(`${BASE}/agent-idle`, {
@@ -122,8 +122,8 @@ describe('full lifecycle', () => {
 
     // 8. Verify reply is queued
     const replyPending = await fetch(`${BASE}/events/pending?agent=flow-worker`)
-    const replyEvents = (await replyPending.json()) as { events: Array<{ kind: string; text: string }> }
-    expect(replyEvents.events.some(e => e.kind === 'reply' && e.text === 'Task complete. All good.')).toBe(true)
+    const replyEvents = (await replyPending.json()) as { events: Array<{ type: string; data: { text: string } }> }
+    expect(replyEvents.events.some(e => e.type === 'reply' && e.data.text === 'Task complete. All good.')).toBe(true)
 
     // 9. Worker goes idle
     await fetch(`${BASE}/agent-idle`, {
@@ -133,8 +133,8 @@ describe('full lifecycle', () => {
     })
     await Bun.sleep(100)
     const idlePending = await fetch(`${BASE}/events/pending?agent=flow-worker`)
-    const idleEvents = (await idlePending.json()) as { events: Array<{ kind: string }> }
-    expect(idleEvents.events.some(e => e.kind === 'agent-idle')).toBe(true)
+    const idleEvents = (await idlePending.json()) as { events: Array<{ type: string }> }
+    expect(idleEvents.events.some(e => e.type === 'agent-idle')).toBe(true)
 
     // 10. Signal sensei idle → gets nudged again
     // Reset sensei messages to track new nudge
@@ -196,13 +196,13 @@ describe('history', () => {
     expect(doneTask).toBeDefined()
 
     const res = await fetch(`${BASE}/history?taskId=${doneTask!.id}`)
-    const data = (await res.json()) as { events: Array<{ kind: string; taskId: string }> }
+    const data = (await res.json()) as { events: Array<{ type: string; taskId: string }> }
 
     // Should have task-created, task-status changes, send, reply, agent-idle, ack
     expect(data.events.length).toBeGreaterThanOrEqual(3)
     expect(data.events.every(e => e.taskId === doneTask!.id)).toBe(true)
-    expect(data.events.some(e => e.kind === 'task-created')).toBe(true)
-    expect(data.events.some(e => e.kind === 'task-status')).toBe(true)
+    expect(data.events.some(e => e.type === 'task-created')).toBe(true)
+    expect(data.events.some(e => e.type === 'task-status')).toBe(true)
   })
 
   test('worker reply gets taskId inferred from board', async () => {
@@ -234,8 +234,8 @@ describe('history', () => {
 
     // Check pending events — the reply should have the taskId
     const res = await fetch(`${BASE}/events?agent=infer-worker`)
-    const data = (await res.json()) as { events: Array<{ kind: string; taskId?: string; text: string }> }
-    const reply = data.events.find(e => e.kind === 'reply' && e.text === 'inferred reply')
+    const data = (await res.json()) as { events: Array<{ type: string; taskId?: string; text: string }> }
+    const reply = data.events.find(e => e.type === 'reply' && (e.data as any)?.text === 'inferred reply')
     expect(reply).toBeDefined()
     expect(reply!.taskId).toBe(task.id)
 
@@ -256,8 +256,8 @@ describe('history', () => {
 
     // Check history for ack event
     const res = await fetch(`${BASE}/history`)
-    const data = (await res.json()) as { events: Array<{ kind: string; text?: string }> }
-    const ackEvent = data.events.find(e => e.kind === 'ack' && e.text?.includes(String(eventId)))
+    const data = (await res.json()) as { events: Array<{ type: string; text?: string }> }
+    const ackEvent = data.events.find(e => e.type === 'ack' && (e.data as any)?.eventIds?.includes(eventId))
     expect(ackEvent).toBeDefined()
 
     ws.close()
@@ -285,7 +285,7 @@ describe('history', () => {
 })
 
 describe('board persistence', () => {
-  test('tasks survive server restart', async () => {
+  test('tasks are persisted in event history', async () => {
     // Create a task
     const createRes = await fetch(`${BASE}/tasks`, {
       method: 'POST',
@@ -294,9 +294,14 @@ describe('board persistence', () => {
     })
     const task = (await createRes.json()) as { id: string }
 
-    // Verify it's on the board file
-    const file = Bun.file(BOARD_PATH)
-    const board = await file.json() as { tasks: Array<{ id: string; title: string }> }
+    // Verify it's in the event history (source of truth)
+    const histRes = await fetch(`${BASE}/history?taskId=${task.id}`)
+    const hist = (await histRes.json()) as { events: Array<{ type: string; data: { title?: string } }> }
+    expect(hist.events.some(e => e.type === 'task-created' && e.data.title === 'Persist me')).toBe(true)
+
+    // Verify it's on the board (derived projection)
+    const boardRes = await fetch(`${BASE}/board`)
+    const board = (await boardRes.json()) as { tasks: Array<{ id: string; title: string }> }
     expect(board.tasks.some(t => t.id === task.id && t.title === 'Persist me')).toBe(true)
   })
 })
