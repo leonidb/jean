@@ -1,8 +1,8 @@
 /**
- * Board — task state persistence.
+ * Board — task types and state transitions.
  *
- * The board is a JSON file. The orchestrator is the single writer;
- * `jean board` and infrastructure read it.
+ * Board state is derived from events via the boardReducer.
+ * This module defines the types and transition rules.
  */
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -44,62 +44,4 @@ const transitions: Record<TaskStatus, TaskStatus[]> = {
 
 export function canTransition(from: TaskStatus, to: TaskStatus): boolean {
   return transitions[from].includes(to)
-}
-
-// ── Persistence ────────────────────────────────────────────────────
-
-const EMPTY_BOARD: Board = { tasks: [] }
-
-export async function readBoard(path: string): Promise<Board> {
-  const file = Bun.file(path)
-  if (!(await file.exists())) return { ...EMPTY_BOARD, tasks: [] }
-  return file.json() as Promise<Board>
-}
-
-export async function writeBoard(path: string, board: Board): Promise<void> {
-  await Bun.write(path, JSON.stringify(board, null, 2) + '\n')
-}
-
-// ── Helpers ────────────────────────────────────────────────────────
-
-let counter = 0
-
-export function nextTaskId(): string {
-  return String(++counter).padStart(3, '0')
-}
-
-export function createTask(
-  fields: Pick<Task, 'title' | 'description' | 'queue'> &
-    Partial<Pick<Task, 'playbook' | 'agent'>>,
-): Task {
-  const now = new Date().toISOString()
-  return {
-    id: nextTaskId(),
-    status: 'inbox',
-    createdAt: now,
-    updatedAt: now,
-    ...fields,
-  }
-}
-
-export function updateTaskStatus(task: Task, status: TaskStatus): Task {
-  if (!canTransition(task.status, status)) {
-    throw new Error(`Invalid transition: ${task.status} → ${status}`)
-  }
-  return { ...task, status, updatedAt: new Date().toISOString() }
-}
-
-export function findTask(board: Board, id: string): Task | undefined {
-  return board.tasks.find(t => t.id === id)
-}
-
-export function upsertTask(board: Board, task: Task): Board {
-  const idx = board.tasks.findIndex(t => t.id === task.id)
-  const tasks = [...board.tasks]
-  if (idx >= 0) {
-    tasks[idx] = task
-  } else {
-    tasks.push(task)
-  }
-  return { tasks }
 }

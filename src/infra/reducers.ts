@@ -6,9 +6,11 @@
  */
 
 import type { Reducer, StoredEvent } from '../es/index.ts'
-import { canTransition, type Board, type Task, type TaskStatus } from './board.ts'
+import type { Board, Task, TaskStatus } from './board.ts'
+import type { AgentRole } from './protocol.ts'
 
 // ── Event data shapes ────────────────────────────────────────────
+// Common: most events carry `agent` in data
 
 export type TaskCreatedData = {
   title: string
@@ -18,8 +20,8 @@ export type TaskCreatedData = {
 }
 
 export type TaskStatusData = {
-  from: string
-  to: string
+  from: TaskStatus
+  to: TaskStatus
 }
 
 export type TaskUpdatedData = {
@@ -28,14 +30,17 @@ export type TaskUpdatedData = {
 }
 
 export type ReplyData = {
+  agent: string
   text: string
 }
 
 export type AgentIdleData = {
-  role: string
+  agent: string
+  role: AgentRole
 }
 
 export type SendData = {
+  agent: string
   from: string
   text: string
   delivered: boolean
@@ -46,7 +51,8 @@ export type AckData = {
 }
 
 export type RegisterData = {
-  role: string
+  agent: string
+  role: AgentRole
   idle: boolean
   sessionId?: string
 }
@@ -71,6 +77,12 @@ export function taskIdFromStream(stream: string): string | undefined {
 
 export function agentFromStream(stream: string): string | undefined {
   return stream.startsWith('agent-') ? stream.slice(6) : undefined
+}
+
+/** Extract agent name from a StoredEvent — checks data.agent, then stream prefix. */
+export function agentFromEvent(event: StoredEvent): string | undefined {
+  return (event.data as Record<string, unknown>)?.agent as string | undefined
+    ?? agentFromStream(event.stream)
 }
 
 // ── Board reducer ────────────────────────────────────────────────
@@ -101,7 +113,7 @@ export const boardReducer: Reducer<Board> = (state, event) => {
       return {
         tasks: state.tasks.map(t =>
           t.id === taskId
-            ? { ...t, status: d.to as TaskStatus, updatedAt: event.ts }
+            ? { ...t, status: d.to, updatedAt: event.ts }
             : t,
         ),
       }
@@ -141,7 +153,6 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
       return [...state, event]
 
     case 'agent-idle': {
-      // Only worker idle is actionable — sensei idle is informational
       const d = event.data as AgentIdleData
       if (d.role === 'sensei') return state
       return [...state, event]
@@ -171,8 +182,7 @@ export type ApiEvent = {
 
 export function toApiEvent(event: StoredEvent): ApiEvent {
   const taskId = taskIdFromStream(event.stream)
-  const agent = agentFromStream(event.stream)
-    ?? (event.data as Record<string, unknown>)?.agent as string | undefined
+  const agent = agentFromEvent(event)
   return {
     id: event.id,
     type: event.type,

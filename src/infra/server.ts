@@ -18,10 +18,10 @@ import {
   createStore, jsonlBackend, createProjection, fileSnapshotBackend,
   type StoredEvent, type EventStore,
 } from '../es/index.ts'
-import { canTransition, type Board, type Task, type TaskStatus } from './board.ts'
+import { canTransition, type Board, type TaskStatus } from './board.ts'
 import {
   boardReducer, pendingReducer,
-  taskStream, agentStream, SYSTEM_STREAM, taskIdFromStream,
+  taskStream, agentStream, SYSTEM_STREAM, taskIdFromStream, agentFromEvent,
   toApiEvent,
   type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
   type SendData, type AgentIdleData, type RegisterData, type AckData,
@@ -131,23 +131,14 @@ function nextTaskId(): string {
 }
 
 function pendingEvents(agent?: string): StoredEvent[] {
-  const all = pendingProjection.state
-  if (agent) {
-    return all.filter(e => {
-      const a = (e.data as Record<string, unknown>)?.agent as string | undefined
-        ?? (e.stream.startsWith('agent-') ? e.stream.slice(6) : undefined)
-        ?? (e.stream.startsWith('task-') ? boardProjection.state.tasks.find(t => t.id === taskIdFromStream(e.stream))?.queue : undefined)
-      return a === agent
-    })
-  }
-  return [...all]
+  if (!agent) return [...pendingProjection.state]
+  return pendingProjection.state.filter(e => agentFromEvent(e) === agent)
 }
 
 function pendingByAgent(): Record<string, number> {
   const counts: Record<string, number> = {}
   for (const e of pendingProjection.state) {
-    const agent = (e.data as Record<string, unknown>)?.agent as string | undefined
-      ?? (e.stream.startsWith('agent-') ? e.stream.slice(6) : undefined)
+    const agent = agentFromEvent(e)
     if (agent) counts[agent] = (counts[agent] ?? 0) + 1
   }
   return counts
@@ -155,12 +146,10 @@ function pendingByAgent(): Record<string, number> {
 
 // ── Sensei nudge ──────────────────────────────────────────────────
 
-function nudgeSenseiIfIdle(reason?: string) {
+function nudgeSenseiIfIdle(force = false) {
   const sensei = findSensei()
   if (!sensei || !sensei.idle) return
-
-  // Check if there's actually something to nudge about
-  if (!reason && pendingProjection.state.length === 0) return
+  if (!force && pendingProjection.state.length === 0) return
 
   sensei.idle = false // prevent double-nudge
   send(sensei.ws, {
@@ -197,12 +186,13 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           return Response.json({ error: 'missing title or queue' }, { status: 400 })
         }
         const taskId = nextTaskId()
-        const event = await record('task-created', taskStream(taskId), {
+        await record('task-created', taskStream(taskId), {
+          agent: body.queue,
           title: body.title,
           description: body.description ?? '',
           queue: body.queue,
           playbook: body.playbook,
-        } satisfies TaskCreatedData)
+        } satisfies TaskCreatedData & { agent: string })
         const task = boardProjection.state.tasks.find(t => t.id === taskId)
         return Response.json(task, { status: 201 })
       })()
@@ -341,7 +331,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         const role = entry.role
         const taskId = inferTaskId(agentName)
         const stream = taskId ? taskStream(taskId) : agentStream(agentName)
-        await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData & { agent: string })
+        await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData)
 
         // If sensei just went idle, check for pending work
         if (role === 'sensei') {
@@ -392,11 +382,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         }
         let toAck = pendingProjection.state.filter(e => e.id <= body.upToId)
         if (body.agent) {
-          toAck = toAck.filter(e => {
-            const a = (e.data as Record<string, unknown>)?.agent as string | undefined
-              ?? (e.stream.startsWith('agent-') ? e.stream.slice(6) : undefined)
-            return a === body.agent
-          })
+          toAck = toAck.filter(e => agentFromEvent(e) === body.agent)
         }
         const eventIds = toAck.map(e => e.id)
         if (eventIds.length > 0) {
@@ -509,7 +495,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             const sessionId = msg.sessionId
             agents.set(msg.agent, { ws, role, idle, sessionId })
             send(ws, { type: 'registered', agent: msg.agent, role })
-            void record('register', agentStream(msg.agent), { agent: msg.agent, role, idle, sessionId } satisfies RegisterData & { agent: string; sessionId?: string })
+            void record('register', agentStream(msg.agent), { agent: msg.agent, role, idle, sessionId } satisfies RegisterData)
 
             if (role === 'sensei') {
               // Always nudge sensei on connect — get up to date
@@ -529,7 +515,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
                 const hasWork = boardProjection.state.tasks.some(
                   t => t.status === 'inbox' || t.status === 'active' || t.status === 'blocked',
                 )
-                if (hasWork) nudgeSenseiIfIdle('worker connected, board has work')
+                if (hasWork) nudgeSenseiIfIdle(true)
               }
             }
             break
@@ -540,9 +526,9 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             const taskId = inferTaskId(msg.from)
             const stream = taskId ? taskStream(taskId) : agentStream(msg.from)
             if (sender?.role !== 'sensei') {
-              void record('reply', stream, { agent: msg.from, text: msg.text } satisfies ReplyData & { agent: string })
+              void record('reply', stream, { agent: msg.from, text: msg.text } satisfies ReplyData)
             } else {
-              void record('send', stream, { agent: msg.from, from: msg.from, text: msg.text, delivered: true } satisfies SendData & { agent: string })
+              void record('send', stream, { agent: msg.from, from: msg.from, text: msg.text, delivered: true } satisfies SendData)
             }
             break
           }
