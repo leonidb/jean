@@ -3,8 +3,8 @@
  * Jean infrastructure service.
  *
  * Bun HTTP/WebSocket server that:
- * - Accepts WebSocket connections from channel plugins (one per agent)
- * - Routes messages between connected agents (role-based)
+ * - Accepts connections from agents via WebSocket or external channels (Slack)
+ * - Routes messages between connected agents (transport-agnostic)
  * - Manages task state derived from events (event sourcing)
  * - Queues actionable events for the sensei and delivers them reactively
  * - Receives stop hook notifications (agent went idle)
@@ -38,6 +38,11 @@ const PORT = Number(process.env.JEAN_PORT ?? 8700)
 const BOARD_PATH = process.env.JEAN_BOARD ?? './board.json'
 const HISTORY_PATH = process.env.JEAN_HISTORY ?? `${dirname(BOARD_PATH)}/history.jsonl`
 
+// Slack config (optional)
+const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN
+const SLACK_CHANNEL = process.env.SLACK_CHANNEL
+
 // ── Event store & projections ────────────────────────────────────
 
 const store: EventStore = createStore(jsonlBackend(HISTORY_PATH))
@@ -60,7 +65,6 @@ const pendingProjection = createProjection<PendingState>({
   filter: { types: ['reply', 'agent-idle', 'task-created', 'ack'] },
 })
 
-// Last task context per agent — tracks which task each agent was last messaged about
 const lastTaskContext = createProjection<Map<string, string>>({
   name: 'lastTaskContext',
   store,
@@ -80,20 +84,18 @@ const lastTaskContext = createProjection<Map<string, string>>({
   filter: { types: ['send'] },
 })
 
-// Initialize: replay events to rebuild state
 await boardProjection.catchUp()
 await pendingProjection.catchUp()
 await lastTaskContext.catchUp()
 
-// ── Agent registry (role-based, ephemeral) ───────────────────────
-
-type AgentSocket = ServerWebSocket<{ agent?: string; role?: AgentRole }>
+// ── Agent registry (transport-agnostic) ──────────────────────────
 
 type AgentEntry = {
-  ws: AgentSocket
   role: AgentRole
   idle: boolean
   sessionId?: string
+  deliver: (msg: DeliverMsg) => boolean
+  close?: () => void
 }
 
 const agents = new Map<string, AgentEntry>()
@@ -105,15 +107,26 @@ function findSensei(): AgentEntry | undefined {
   return undefined
 }
 
-function send(ws: AgentSocket, msg: OutboundMsg) {
-  if (ws.readyState === 1) ws.send(JSON.stringify(msg))
-}
-
 function deliverToAgent(agentName: string, msg: DeliverMsg): boolean {
   const entry = agents.get(agentName)
   if (!entry) return false
-  send(entry.ws, msg)
-  return true
+  return entry.deliver(msg)
+}
+
+// ── WebSocket helpers ────────────────────────────────────────────
+
+type AgentSocket = ServerWebSocket<{ agent?: string; role?: AgentRole }>
+
+function wsSend(ws: AgentSocket, msg: OutboundMsg) {
+  if (ws.readyState === 1) ws.send(JSON.stringify(msg))
+}
+
+function wsDeliver(ws: AgentSocket): (msg: DeliverMsg) => boolean {
+  return (msg) => {
+    if (ws.readyState !== 1) return false
+    ws.send(JSON.stringify(msg))
+    return true
+  }
 }
 
 // ── SSE subscribers ──────────────────────────────────────────────
@@ -135,15 +148,12 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
   boardProjection.apply(event)
   pendingProjection.apply(event)
 
-  // Stderr for real-time observability
   const taskId = taskIdFromStream(stream)
   const agent = (data as Record<string, unknown>)?.agent as string | undefined
   process.stderr.write(`[jean] ${type}${agent ? ` agent=${agent}` : ''}${taskId ? ` task=${taskId}` : ''}\n`)
 
-  // Broadcast to SSE listeners
   broadcastSSE(event)
 
-  // Nudge sensei if pending queue grew
   if (pendingProjection.state.length > sizeBefore) {
     nudgeSenseiIfIdle()
   }
@@ -155,12 +165,10 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
 
 function inferTaskId(agentName?: string): string | undefined {
   if (!agentName) return undefined
-  // Check if the agent has an active/blocked task on the board
   const task = boardProjection.state.tasks.find(
     t => (t.agent === agentName || t.queue === agentName) && (t.status === 'active' || t.status === 'blocked'),
   )
   if (task) return task.id
-  // Fallback: last task this agent was messaged about (from lastTaskContext projection)
   return lastTaskContext.state.get(agentName)
 }
 
@@ -171,7 +179,6 @@ function nextTaskId(): string {
 function resolveAgent(event: StoredEvent): string | undefined {
   const agent = agentFromEvent(event)
   if (agent) return agent
-  // For task-stream events, look up the queue from the board
   const taskId = taskIdFromStream(event.stream)
   if (taskId) {
     const task = boardProjection.state.tasks.find(t => t.id === taskId)
@@ -201,13 +208,67 @@ function nudgeSenseiIfIdle(force = false) {
   if (!sensei || !sensei.idle) return
   if (!force && pendingProjection.state.length === 0) return
 
-  sensei.idle = false // prevent double-nudge
-  send(sensei.ws, {
+  sensei.idle = false
+  sensei.deliver({
     type: 'deliver',
     from: 'infra',
     text: 'Events pending. Check the board.',
   })
   void record('nudge', SYSTEM_STREAM, { pendingCount: pendingProjection.state.length } satisfies NudgeData)
+}
+
+// ── Slack integration (optional) ─────────────────────────────────
+
+let slackConnected = false
+
+async function initSlack() {
+  if (!SLACK_APP_TOKEN || !SLACK_BOT_TOKEN || !SLACK_CHANNEL) return
+
+  const { App } = await import('@slack/bolt')
+  const app = new App({
+    token: SLACK_BOT_TOKEN,
+    appToken: SLACK_APP_TOKEN,
+    socketMode: true,
+  })
+
+  // Derive channel name for agent registry
+  let channelName = SLACK_CHANNEL
+  try {
+    const info = await app.client.conversations.info({ channel: SLACK_CHANNEL })
+    channelName = (info.channel as { name?: string })?.name ?? SLACK_CHANNEL
+  } catch { /* use channel ID as fallback */ }
+
+  // Register Slack channel as an agent
+  agents.set(channelName, {
+    role: 'user',
+    idle: true,
+    deliver: (msg) => {
+      void app.client.chat.postMessage({
+        channel: SLACK_CHANNEL!,
+        text: `*${msg.from}*: ${msg.text}`,
+      })
+      return true
+    },
+  })
+
+  // Listen for messages in the channel
+  app.message(async ({ message }) => {
+    const m = message as { channel?: string; text?: string; bot_id?: string; subtype?: string }
+    // Ignore bot messages (our own) and non-matching channels
+    if (m.bot_id || m.subtype) return
+    if (m.channel !== SLACK_CHANNEL) return
+    if (!m.text) return
+
+    void record('reply', agentStream(channelName), {
+      agent: channelName,
+      text: m.text,
+    } satisfies ReplyData)
+  })
+
+  await app.start()
+  slackConnected = true
+  process.stderr.write(`[jean] slack connected: #${channelName} (${SLACK_CHANNEL})\n`)
+  void record('register', agentStream(channelName), { agent: channelName, role: 'user', idle: true } satisfies RegisterData)
 }
 
 // ── HTTP + WebSocket server ───────────────────────────────────────
@@ -220,7 +281,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     const url = new URL(req.url)
     const path = url.pathname
 
-    // WebSocket upgrade for channel plugins
     if (path === '/ws') {
       if (server.upgrade(req, { data: {} })) return
       return new Response('upgrade failed', { status: 400 })
@@ -228,7 +288,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     // ── Task CRUD ───────────────────────────────────────────────
 
-    // POST /tasks — create a task
     if (path === '/tasks' && req.method === 'POST') {
       return (async () => {
         const body = (await req.json()) as CreateTaskRequest
@@ -247,7 +306,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       })()
     }
 
-    // GET /tasks — list tasks
     if (path === '/tasks' && req.method === 'GET') {
       let tasks = boardProjection.state.tasks
       const status = url.searchParams.get('status')
@@ -257,7 +315,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       return Response.json({ tasks })
     }
 
-    // GET /tasks/:id
     const taskGetMatch = path.match(/^\/tasks\/(\w+)$/)
     if (taskGetMatch && req.method === 'GET') {
       const task = boardProjection.state.tasks.find(t => t.id === taskGetMatch[1])
@@ -265,7 +322,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       return Response.json(task)
     }
 
-    // PATCH /tasks/:id/status — transition status
     const statusMatch = path.match(/^\/tasks\/(\w+)\/status$/)
     if (statusMatch && req.method === 'PATCH') {
       return (async () => {
@@ -290,7 +346,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       })()
     }
 
-    // PATCH /tasks/:id — update fields
     const taskPatchMatch = path.match(/^\/tasks\/(\w+)$/)
     if (taskPatchMatch && req.method === 'PATCH') {
       return (async () => {
@@ -308,7 +363,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     // ── Message routing ─────────────────────────────────────────
 
-    // POST /send — push a message to an agent
     if (path === '/send' && req.method === 'POST') {
       return (async () => {
         const body = (await req.json()) as SendRequest
@@ -356,7 +410,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
         const entry = agents.get(agentName)
 
-        // Validate session ID if provided — flag stale stop hooks
         if (sessionId && entry?.sessionId && sessionId !== entry.sessionId) {
           process.stderr.write(`[jean] WARNING: agent-idle for "${agentName}" from stale session ${sessionId} (current: ${entry.sessionId})\n`)
           void record('agent-idle', agentStream(agentName), {
@@ -369,7 +422,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           return Response.json({ ok: false, error: 'stale session', currentSessionId: entry.sessionId })
         }
 
-        // Agent not connected — stop hook from a disconnected agent
         if (!entry) {
           process.stderr.write(`[jean] WARNING: agent-idle for "${agentName}" but agent is not connected\n`)
           void record('agent-idle', agentStream(agentName), { agent: agentName, role: 'unknown', disconnected: true })
@@ -382,7 +434,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         const stream = taskId ? taskStream(taskId) : agentStream(agentName)
         await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData)
 
-        // If sensei just went idle, check for pending work
         if (role === 'sensei') {
           nudgeSenseiIfIdle()
         }
@@ -393,24 +444,20 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     // ── Event endpoints ─────────────────────────────────────────
 
-    // GET /events — pending actionable events (optionally filtered by agent)
     if (path === '/events' && req.method === 'GET') {
       const agent = url.searchParams.get('agent') ?? undefined
       return Response.json({ events: pendingEvents(agent).map(toApiEvent) })
     }
 
-    // GET /events/pending — alias for /events
     if (path === '/events/pending') {
       const agent = url.searchParams.get('agent') ?? undefined
       return Response.json({ events: pendingEvents(agent).map(toApiEvent) })
     }
 
-    // GET /events/agents — agents with pending event counts
     if (path === '/events/agents') {
       return Response.json({ agents: pendingByAgent() })
     }
 
-    // POST /events/:id/ack — acknowledge a single event
     const ackMatch = path.match(/^\/events\/(\d+)\/ack$/)
     if (ackMatch && req.method === 'POST') {
       return (async () => {
@@ -422,7 +469,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       })()
     }
 
-    // POST /events/ack — batch ack events up to ID
     if (path === '/events/ack' && req.method === 'POST') {
       return (async () => {
         const body = (await req.json()) as { upToId: number; agent?: string }
@@ -443,11 +489,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     // ── History endpoint ────────────────────────────────────────
 
-    // GET /history — full persistent event history
-    // ?taskId=001 — filter by task
-    // ?stream=agent-scratch — filter by stream
-    // ?last=50 — last N events
-    // ?raw=true — return raw StoredEvents (with stream, data) instead of translated ApiEvents
     if (path === '/history') {
       return (async () => {
         const taskId = url.searchParams.get('taskId') ?? undefined
@@ -462,8 +503,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     // ── SSE stream ──────────────────────────────────────────────
 
-    // GET /stream — Server-Sent Events, real-time event broadcast
-    // First message is the lastEventId so the client knows where live starts
     if (path === '/stream') {
       return (async () => {
         const lastId = await store.lastId()
@@ -474,10 +513,8 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
               write: (data: string) => controller.enqueue(encoder.encode(data)),
               close: () => controller.close(),
             }
-            // Send lastEventId as first message
             sub.write(`data: ${JSON.stringify({ type: 'connected', lastEventId: lastId })}\n\n`)
             sseSubscribers.add(sub)
-            // Clean up when client disconnects
             req.signal.addEventListener('abort', () => {
               sseSubscribers.delete(sub)
             })
@@ -495,12 +532,10 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     // ── Info endpoints ──────────────────────────────────────────
 
-    // GET /board — read the board
     if (path === '/board') {
       return Response.json(boardProjection.state)
     }
 
-    // GET /agents — list connected agents with roles
     if (path === '/agents') {
       const list = [...agents.entries()].map(([name, entry]) => ({
         name,
@@ -510,7 +545,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       return Response.json({ agents: list })
     }
 
-    // GET / — health check
     if (path === '/') {
       const sensei = findSensei()
       return Response.json({
@@ -518,6 +552,9 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         agents: [...agents.entries()].map(([n, e]) => ({ name: n, role: e.role })),
         sensei: sensei ? { connected: true, idle: sensei.idle } : { connected: false },
         pendingEvents: pendingProjection.state.length,
+        slack: SLACK_APP_TOKEN
+          ? { configured: true, connected: slackConnected, channel: SLACK_CHANNEL }
+          : { configured: false },
       })
     }
 
@@ -525,9 +562,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
   },
 
   websocket: {
-    open(ws) {
-      // ws-open is pre-registration, no agent info yet
-    },
+    open(ws) {},
 
     close(ws) {
       const agent = ws.data.agent
@@ -547,22 +582,22 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
             // Handle existing agent with same name
             const existing = agents.get(msg.agent)
-            if (existing && existing.ws !== ws) {
+            if (existing && existing.deliver !== wsDeliver(ws)) {
               if (msg.sessionId && existing.sessionId && msg.sessionId === existing.sessionId) {
-                // Same session reconnecting — update the WebSocket
+                // Same session reconnecting
               } else {
-                // New session replacing old one — clean up old socket
-                existing.ws.data.agent = undefined
-                existing.ws.close()
+                // New session replacing old one
+                if (ws.data.agent) ws.data.agent = undefined
+                existing.close?.()
               }
               agents.delete(msg.agent)
             }
 
-            // Only one sensei allowed — reject different agent trying to be sensei
+            // Only one sensei allowed
             if (role === 'sensei') {
               const existingSensei = findSensei()
-              if (existingSensei && existingSensei.ws !== ws) {
-                send(ws, { type: 'deliver', from: 'infra', text: 'ERROR: Another sensei is already connected. Only one sensei per dojo. This connection will be ignored.' })
+              if (existingSensei) {
+                wsSend(ws, { type: 'deliver', from: 'infra', text: 'ERROR: Another sensei is already connected. Only one sensei per dojo. This connection will be ignored.' })
                 break
               }
             }
@@ -574,22 +609,25 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             )
             const idle = !hasActiveTask
             const sessionId = msg.sessionId
-            agents.set(msg.agent, { ws, role, idle, sessionId })
-            send(ws, { type: 'registered', agent: msg.agent, role })
+            agents.set(msg.agent, {
+              role,
+              idle,
+              sessionId,
+              deliver: wsDeliver(ws),
+              close: () => { ws.data.agent = undefined; ws.close() },
+            })
+            wsSend(ws, { type: 'registered', agent: msg.agent, role })
             void record('register', agentStream(msg.agent), { agent: msg.agent, role, idle, sessionId } satisfies RegisterData)
 
             if (role === 'sensei') {
-              // Always nudge sensei on connect — get up to date
-              // Delay slightly to ensure the channel plugin is ready to receive
               setTimeout(() => {
-                send(ws, {
+                deliverToAgent(msg.agent, {
                   type: 'deliver',
                   from: 'infra',
                   text: 'You just connected. Check the board and events to get up to date.',
                 })
               }, 500)
             } else if (idle) {
-              // Worker connected — nudge sensei if there's work
               if (pendingProjection.state.length > 0) {
                 nudgeSenseiIfIdle()
               } else {
@@ -621,4 +659,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
   },
 })
 
+// ── Startup ──────────────────────────────────────────────────────
+
 void record('start', SYSTEM_STREAM, { port: PORT } satisfies StartData)
+await initSlack()

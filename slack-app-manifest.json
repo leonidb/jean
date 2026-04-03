@@ -1,0 +1,32 @@
+{
+  "display_information": {
+    "name": "Jean",
+    "description": "Multi-agent orchestration for Claude Code",
+    "background_color": "#2c2c2c"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Jean",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "channels:history",
+        "channels:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "message.channels"
+      ]
+    },
+    "socket_mode_enabled": true,
+    "org_deploy_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
