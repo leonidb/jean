@@ -7,7 +7,7 @@
 // ── Channel plugin → Infrastructure ───────────────────────────────
 
 /** Plugin identifies itself on connect */
-export type AgentRole = 'worker' | 'sensei'
+export type AgentRole = 'worker' | 'sensei' | 'user'
 
 export type RegisterMsg = {
   type: 'register'
