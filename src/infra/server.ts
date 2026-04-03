@@ -377,7 +377,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         })
         if (delivered) {
           const entry = agents.get(body.to)
-          if (entry) entry.idle = false
+          if (entry && entry.role === 'worker') entry.idle = false
         }
         const stream = body.taskId ? taskStream(body.taskId) : agentStream(body.to)
         void record('send', stream, {
