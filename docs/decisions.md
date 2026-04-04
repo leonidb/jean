@@ -1,6 +1,6 @@
 # Jean — Design Decisions & Alternatives
 
-Record of design choices made during concept development, with alternatives considered and reasons for rejection.
+Record of design choices, with alternatives considered and reasons for rejection.
 
 ## 1. Communication: Channels vs alternatives
 
@@ -34,24 +34,31 @@ Alternatives considered:
 
 Why passive won: Simplest model. Agent works with its skills, stops when done/stuck. Stop hook detects idle. Orchestrator pings to check. Agent replies naturally. No special protocols.
 
-## 4. Playbook & skills: Separate vs unified
+## 4. Task routing: Tags vs playbooks
 
-**Chosen: Unified (playbook contains skill section)**
+**Chosen: Tags (agent capabilities) — playbooks deferred**
 
-Alternatives considered:
-- **Separate files**: Playbook for orchestrator, SKILL.md for agent, maintained independently. Rejected because: inevitable drift, two files to maintain for one flow.
-- **Skills only (no playbook)**: Just install skills, no orchestrator flow definition. Rejected because: orchestrator needs to know the steps, gates, message templates.
+Original plan: Playbooks as single markdown files containing orchestrator flow + agent skill + message templates. `jean init agent` would extract the skill section and install it.
 
-Why unified won: Single source of truth. The `## Skill` section is extracted by `jean init` and installed as the agent's SKILL.md. One file defines the entire flow.
-
-## 5. Board storage: JSON vs SQLite
-
-**Chosen: JSON file**
+What happened: In practice, skills are installed manually per agent and work well standalone. The orchestrator (sensei) routes tasks by matching agent tags to task requirements. Communication is lightweight — sensei sends freeform task descriptions, not templated messages. The playbook parser was never built because the simpler tags + skills model proved sufficient.
 
 Alternatives considered:
-- **SQLite**: Better concurrency (WAL mode), query flexibility. Deferred because: orchestrator is single writer (no concurrency issue), JSON is human-readable and debuggable, simpler to start.
+- **Playbook-based routing**: Task specifies a playbook, playbook maps to a queue/agent. Rejected because: adds indirection, sensei can make better routing decisions by looking at agent tags + availability directly.
+- **Queue-based routing**: One queue = one agent. Rejected because: too rigid, doesn't handle agents with multiple capabilities.
 
-Decision: Start with JSON, move to SQLite if needed for history/queries.
+Why tags won: Simple, declarative, flexible. Agent says "I can do code-review and investigation." Sensei matches tasks to capabilities. No parser, no extraction step, no template language.
+
+## 5. State storage: Event sourcing (JSONL)
+
+**Chosen: Event sourcing with JSONL backend**
+
+All state changes are events appended to `history.jsonl`. The board and pending-events views are projections — computed by replaying events through reducers. Snapshots are taken periodically for fast startup.
+
+Alternatives considered:
+- **Direct JSON file**: Read/modify/write a board.json file. Was the original plan. Rejected because: no history, no audit trail, concurrent writes risk corruption, no way to derive different views of state.
+- **SQLite**: Better concurrency (WAL mode), query flexibility. Deferred because: JSONL is simpler to debug and the `StoreBackend` interface supports swapping later.
+
+Why event sourcing won: History comes free (every event is logged). Board state is always reconstructable. Adding new projections (like pending events) is just a new reducer — no schema migration. SSE streaming is trivial since events are the native unit.
 
 ## 6. Project root: Convention vs explicit
 
@@ -87,3 +94,39 @@ Why building blocks won: `jean peek`, `jean board` are independent commands. Use
 Jean-Claude Van Damme reference. Commands like `kick` and `split` are his signature moves. The name is short, memorable, and fun without being forced. People who get the reference grin; the commands make sense even if you don't.
 
 Full acronym: YALLA — Yet Another Lightweight Loom for Agents. "Yalla" means "let's go" in Arabic/Hebrew.
+
+## 10. Agent discovery: Central registry vs filesystem scan
+
+**Chosen: Filesystem scan (directory-based discovery)**
+
+Alternatives considered:
+- **Central registry file**: A JSON file listing all agents. Rejected because: drifts from reality (agent folder deleted but registry not updated), single point of failure, extra maintenance.
+- **Git worktree list only**: Discover agents from `git worktree list`. Rejected because: not all agents are worktrees — sensei is a plain directory.
+
+Why filesystem scan won: The `.jean-agent.json` file in each directory is both the identity and the discovery mechanism. Scanning subdirectories of the dojo root finds all agents, regardless of whether they're worktrees or plain dirs. Git worktree info is enrichment (adds branch info), not the primary discovery path.
+
+## 11. Agent creation: Worktrees vs plain directories
+
+**Chosen: Role-based defaults with overrides**
+
+Workers default to git worktrees (they need isolated code copies). Non-workers (sensei, user) default to plain directories. Both can be overridden with `--worktree` / `--no-worktree`.
+
+Why: Workers need to edit code without conflicting with each other. The orchestrator doesn't edit code — it manages state. Making the common case automatic while allowing overrides covers edge cases without forcing a one-size-fits-all approach.
+
+## 12. External communication: Slack integration
+
+**Chosen: Transport-agnostic agent registry with Slack as a `user` role agent**
+
+The infrastructure maintains a transport-agnostic agent registry — each agent has a `deliver` function regardless of whether it's connected via WebSocket (Claude agents) or Slack (human). Slack messages arrive via `@slack/bolt` socket mode and are routed through the same event/delivery pipeline.
+
+Why: Treating Slack as just another agent (with `user` role) means the sensei doesn't need special Slack-handling logic. It sends messages to "slack" the same way it sends to "scratch". The plumbing handles transport differences.
+
+## 13. Knowledge base: Dojo-level KB vs agent-level
+
+**Chosen: Shared KB at `.jean/kb/`, sensei reads it**
+
+Alternatives considered:
+- **Per-agent KB**: Each agent has its own knowledge files. Rejected because: duplication, drift, agents need project-wide context not agent-specific data.
+- **Global skill with KB**: A global Claude skill that loads in every session. Rejected because: confuses workers with irrelevant context (e.g. team management data in a code review agent).
+
+Why dojo-level won: Project knowledge belongs to the project, not to individual agents. The sensei reads KB for context when making routing and communication decisions. Workers get task descriptions that contain what they need — they don't need to browse the KB themselves.

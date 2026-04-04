@@ -1,113 +1,65 @@
 # Jean — Development Roadmap
 
-## Milestone 1: Channel Communication (proof of concept)
+## Milestone 1: Channel Communication ✓
 
 **Goal**: Two Claude sessions communicate through a custom Jean channel plugin.
 
-### Steps
-1. **Build the Jean channel plugin** — fork fakechat's architecture
-   - Bun/TypeScript MCP server with `claude/channel` capability
-   - HTTP endpoint for receiving messages from external processes
-   - WebSocket for real-time communication with infrastructure
-   - `reply` tool for agent → infrastructure communication
-   - Test: install as dev channel, start Claude with `--dangerously-load-development-channels`, send a message via `curl`, verify it arrives
-
-2. **Build minimal infrastructure service** — Bun HTTP/WebSocket server
-   - Accepts connections from channel plugins
-   - Routes messages between connected sessions
-   - Test: two Claude sessions connected, message from session A reaches session B
-
-3. **Test the stop hook** — verify the mechanism
-   - Configure a stop hook in a test worktree
-   - Verify it fires when Claude goes idle
-   - Verify it can notify the infrastructure service (HTTP POST)
-
-### Deliverable
-Two Claude sessions (one "orchestrator", one "agent") where:
-- Orchestrator sends a task via channel → agent receives it
-- Agent works, finishes, goes idle → stop hook fires → orchestrator gets notified
-- Orchestrator pings agent → agent replies with status
+**Completed** (Mar 27). Channel plugin built and validated. Infrastructure service routes messages between connected agents. Stop hook fires on agent idle and notifies infrastructure.
 
 ---
 
-## Milestone 2: Board & Task State
+## Milestone 2: Board & Task State ✓
 
 **Goal**: Tasks have persistent state that survives across events.
 
-### Steps
-1. **Board JSON schema** — define and implement
-   - Task fields: id, title, description, status, playbook, queue, timestamps
-   - Read/write functions in the infrastructure layer
-
-2. **Orchestrator reads/writes the board**
-   - On every event: read board, decide action, update board
-   - Board is the source of truth, not conversation memory
-
-3. **`jean board` CLI command**
-   - Reads board.json, renders kanban view in terminal
-   - Instant — just reads a file
-
-### Deliverable
-End-to-end: kick a task → board shows it as inbox → orchestrator assigns → board shows active → agent finishes → board shows review.
+**Completed** (Mar–Apr). Event-sourced board with JSONL backend. Board is a projection derived from events (task-created, task-status, task-updated). Pending events projection tracks what sensei needs to act on. Full HTTP API for task CRUD, status transitions, event acknowledgment. `jean board` CLI renders kanban view. SSE endpoint (`GET /stream`) for real-time event broadcast. History endpoint with filtering.
 
 ---
 
-## Milestone 3: Playbooks & Skills
+## Milestone 2.5: Agent Management & Dojo Setup ✓
 
-**Goal**: Define a flow once, Jean handles the rest.
+**Goal**: Streamlined agent creation and dojo structure.
 
-### Steps
-1. **Playbook format** — implement the markdown parser
-   - Parse YAML frontmatter (queue, model, budget, gates)
-   - Extract `## Skill` section
-   - Extract `## Flow` and `## Message Template` for orchestrator
-
-2. **`jean init agent` command**
-   - Takes a folder path and playbook name
-   - Extracts skill section, writes to `.claude/skills/jean-<playbook>/SKILL.md`
-   - Registers channel plugin config
-   - Configures stop hook
-
-3. **Write the `bug-repro` playbook**
-   - First real playbook, based on existing `issue-repro` skill
-   - Test end-to-end with the work-dojo scratch worktree
-
-### Deliverable
-`jean init agent scratch --playbook bug-repro` sets up an agent. User starts Claude with `--channels`. Kick a bug task → agent reproduces it following the skill → orchestrator manages the flow.
+**Completed** (Apr). `jean agent add/list/tag/remove/start` CLI. Workers default to git worktrees, non-workers to plain directories. Agent identity via `.jean-agent.json` (name, role, tags). Directory-based agent discovery. Tags flow from agent → channel plugin → infra → sensei for routing. Slack integration as a `user` role agent. KB directory (`.jean/kb/`) for shared project knowledge. Sensei skills migrated from global hub.
 
 ---
 
-## Milestone 4: Human Interaction
+## Milestone 3: Human Interaction & Polish
 
 **Goal**: The human can interact with the system naturally.
 
-### Steps
-1. **`jean peek`** — connect to an agent or orchestrator session
+### To build
+1. **`jean peek`** — connect to a running agent's terminal
 2. **`/jean kick`** — skill for kicking tasks from any Claude session
-3. **`/jean ship`** — approve a task in review state (orchestrator acts on it)
+3. **`/jean ship`** — approve a task in review state
 4. **`jean board` polish** — status indicators, timestamps, agent state
 5. **Desktop notifications** — notify human when tasks need attention
+6. **Broader default permissions** — role-based permission profiles so workers don't block on approvals
 
 ### Deliverable
 Full manual-mode workflow: kick from working session → agent handles → get notified → peek/approve → done.
 
 ---
 
-## Milestone 5: Polish & Publish
+## Milestone 4: Dojo Init & Distribution
 
 **Goal**: Ready for other people to use.
 
-### Steps
-1. **`jean init` project command** — scaffolds a new Jean project
-2. **Documentation** — setup guide, playbook authoring guide, architecture overview
-3. **Second playbook** — `code-review` or `investigation` to prove generality
-4. **Blog post** — "Jean: Yet Another Lightweight Loom for Agents"
+### To build
+1. **`jean dojo init`** — scaffolds a new dojo (`.jean/`, `.bare/`, first agent)
+2. **Package jean as installable CLI** — `npx jean` or similar
+3. **Documentation** — setup guide, architecture overview
+4. **Simplify channel setup** — reduce per-agent boilerplate (`.mcp.json`, settings)
 
 ---
 
 ## Future (not scoped)
+
 - Auto mode: orchestrator starts agents when tasks arrive
-- Manager agent: summarizes state, answers on behalf of human
+- SQLite event store backend (replace JSONL)
+- Knowledge base agent: dedicated agent for recording/retrieving findings across the dojo
+- Monitoring/meta agent: observes events, proposes improvements to skills and configs
+- Idle/busy reconciliation: agent state should reflect actual activity, not just board state
 - Multiple agents per queue (concurrent worktrees)
+- Permission proxy: explore if sensei can approve permissions on behalf of human
 - `jean ui` opinionated layout preset
-- SQLite board for history and queries

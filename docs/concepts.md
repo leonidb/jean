@@ -1,6 +1,6 @@
 # Jean — Concepts & Design Notes
 
-Working document. Last updated: 2026-03-28.
+Working document. Last updated: 2026-04-04.
 
 ---
 
@@ -13,29 +13,29 @@ A framework for multi-agent execution where autonomous coding agents work in par
 ## Architecture
 
 ```
-┌──────────┐     ┌──────────┐     ┌──────────┐
-│ Agent A  │     │ Agent B  │     │ Agent C  │
-│ (scratch)│     │ (review) │     │(research)│
-│          │     │          │     │          │
-│ Jean     │     │ Jean     │     │ Jean     │
-│ plugin   │     │ plugin   │     │ plugin   │
-└────┬─────┘     └────┬─────┘     └────┬─────┘
-     │                │                │
-  channel          channel          channel
-     │                │                │
-     └────────────────┼────────────────┘
+┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+│ Agent A  │     │ Agent B  │     │ Agent C  │     │  Slack   │
+│ (scratch)│     │ (review) │     │(research)│     │ (user)   │
+│          │     │          │     │          │     │          │
+│ Jean     │     │ Jean     │     │ Jean     │     │ Bolt SDK │
+│ plugin   │     │ plugin   │     │ plugin   │     │          │
+└────┬─────┘     └────┬─────┘     └────┬─────┘     └────┬─────┘
+     │                │                │                  │
+  channel          channel          channel            channel
+     │                │                │                  │
+     └────────────────┼────────────────┼──────────────────┘
                       │
               ┌───────▼────────┐
-              │  Orchestrator  │
+              │  Sensei        │
               │  (Claude)      │
               │                │
-              │  - pushes tasks│
+              │  - routes tasks│
+              │    by tags     │
               │  - checks on   │
               │    idle agents │
               │  - manages     │
               │    board/state │
-              │  - applies     │
-              │    playbooks   │
+              │  - reads KB    │
               │  - talks to    │
               │    human       │
               └───────┬────────┘
@@ -45,87 +45,92 @@ A framework for multi-agent execution where autonomous coding agents work in par
               │ (Bun/TS)       │
               │                │
               │ - channel svr  │
-              │ - board persist│
+              │ - event store  │
+              │   (JSONL)      │
+              │ - projections  │
+              │   (board,      │
+              │    pending)    │
               │ - stop hook rx │
-              │ - agent start  │
-              │   (auto mode)  │
+              │ - SSE stream   │
+              │ - Slack bridge │
               └────────────────┘
 ```
 
 ### Components
 
 **Agents** — Claude sessions, each in its own folder/worktree, each with a role.
-- Receive work via channels (pushed by orchestrator)
+- Receive work via channels (pushed by sensei)
 - Work until they finish or get stuck, then stop
-- Don't know about each other — only the orchestrator talks to them
+- Don't know about each other — only the sensei talks to them
 - Human can connect and interact directly at any time
 - Each has a **Jean plugin** installed: channel + skills + stop hook
+- Declare capabilities via **tags** (e.g. `bug-repro`, `code-review`) — sensei routes by tags
 
-**Orchestrator** — an always-running Claude session that manages the flow.
-- Pushes tasks to agents via channels
+**Sensei (orchestrator)** — an always-running Claude session that manages the flow.
+- Pushes tasks to agents via channels, routing by agent tags
 - Gets notified when agents go idle (via stop hook → infrastructure)
 - Checks on idle agents ("what's your status?") and interprets the response
-- Updates the board, notifies human when needed
-- Applies playbook logic (which steps to follow, when to gate for human input)
-- Human can talk to it directly (`jean peek orchestrator`)
-- Stateless per-event: reads the board on every signal. Survives context compaction.
+- Updates the board via infrastructure HTTP API
+- Reads project KB (`.jean/kb/`) for context — team data, open threads, sprints
+- Human can talk to it directly (`jean peek sensei`)
+- Stateless per-event: reads the board on every signal. Catches up on history after restart via `GET /history`.
 
 **Infrastructure layer** — deterministic Bun/TypeScript process.
-- Channel server: manages channel connections between orchestrator and agents
-- Board persistence: reads/writes JSON task state
-- Stop hook receiver: agents' stop hooks signal here, forwarded to orchestrator
-- Agent lifecycle: starts/stops agent sessions in auto mode (later)
+- Channel server: WebSocket connections from channel plugins, transport-agnostic agent registry
+- Event store: append-only JSONL log, all state changes are events
+- Projections: board (task state) and pending (events for sensei to act on), derived from event stream
+- Stop hook receiver: agents' stop hooks signal here, forwarded to sensei
+- SSE endpoint: `GET /stream` for real-time event broadcast
+- Slack bridge: optional, registers Slack channel as a `user` role agent
 - No LLM — fast, reliable plumbing
 
-**Jean plugin** — installed per agent via `jean init agent`. Three things:
-- **Channel**: receives tasks and questions pushed by orchestrator
-- **Skills**: role-specific capabilities, extracted from the playbook
+**Jean plugin** — installed per agent via `jean agent add`. Three things:
+- **Channel**: receives tasks and questions pushed by sensei
+- **Skills**: role-specific capabilities, installed as SKILL.md files
 - **Stop hook**: notifies infrastructure when agent goes idle (back at `>` prompt)
 
-The agent is just Claude with skills. It doesn't have special outbound tools or communication protocols. When the orchestrator pings ("what happened?"), the agent replies naturally.
+The agent is just Claude with skills. It doesn't have special outbound tools or communication protocols. When the sensei pings ("what happened?"), the agent replies naturally.
 
 ---
 
 ## Abstractions
 
 ### Task
-A unit of work. Has a title, description, optional context, optional playbook type.
+A unit of work. Has a title, description, queue, optional agent assignment.
 States: `inbox → active → blocked | review → done | cancelled`.
-Can be freeform (no playbook) or structured (follows a playbook).
+Task descriptions contain the work itself — not agent environment details. The sensei routes tasks by matching agent tags to task requirements.
 
-### Playbook
-Single markdown file (YAML frontmatter + body). The source of truth for a flow. Contains:
-- **Frontmatter**: queue, model, budget, gates
-- **`## Skill` section**: extracted and installed as the agent's SKILL.md by `jean init`
-- **`## Flow` section**: steps the orchestrator follows
-- **`## Message Template`**: what the orchestrator sends the agent
+### Event
+All state changes are events, stored in an append-only JSONL log. Event types: `task-created`, `task-status`, `task-updated`, `reply`, `send`, `agent-idle`, `register`, `ack`, `nudge`, `start`. Each event has an ID, stream, type, timestamp, and data payload.
 
-Examples: `bug-repro`, `code-review`, `investigation`, `write-tests`.
+### Board
+A projection derived from the event stream. Task state is computed by applying board-related events in order (task-created, task-status, task-updated). Snapshots are taken periodically for fast startup. The board is not a file you edit — it's computed state.
 
-Tasks without a playbook are freeform — the orchestrator routes them and the agent works based on the message content alone.
+### Pending Events
+A second projection tracking events the sensei needs to act on: replies from agents, new tasks, agent-idle signals. Events are removed from pending when acknowledged. This is how the sensei knows what needs attention.
 
 ### Queue
 Groups tasks by folder/worktree. One queue = one folder = one active agent.
-Multiple queues run in parallel. Designed for future concurrency (N agents per queue).
+Multiple queues run in parallel.
 
-### Board
-JSON file. Single source of truth for task state. The orchestrator is the single writer (via infrastructure layer). `jean board` reads it for display.
+### Knowledge Base
+Project-specific data at `.jean/kb/` — team info, open threads, sprint data, scripts, research, design docs. The sensei reads KB for context when making decisions. Separate from skills (skills = how agents work, KB = what they should know about the project).
 
 ---
 
 ## Communication
 
-### Orchestrator → Agent
+### Sensei → Agent
 Channel push notification. Task descriptions, follow-up questions ("what's your status?"). Agent receives immediately, even when idle at `>` prompt. Validated Mar 27.
 
-### Agent → Orchestrator
-Passive. Agent works until it stops. Stop hook notifies infrastructure → infrastructure signals orchestrator → orchestrator pings agent via channel → agent replies naturally. The orchestrator is always the active party.
+### Agent → Sensei
+Passive. Agent works until it stops. Stop hook notifies infrastructure → infrastructure creates `agent-idle` event → sensei gets nudged → sensei pings agent via channel → agent replies naturally. The sensei is always the active party.
+
+### Human → Sensei
+Slack messages (bridged as `user` role agent), CLI commands (`jean board`, `jean send`), or direct interaction (`jean peek sensei`).
 
 ### Human → Agent
 Connect directly (`jean peek`) and interact. It's just a Claude session.
-
-### Human → Orchestrator
-CLI commands (`jean board`, `jean kick`, `jean ship`) or direct interaction (`jean peek orchestrator`).
 
 ---
 
@@ -137,18 +142,33 @@ A **dojo** is the root folder for a Jean project. It contains:
 
 ```
 work-dojo/                        ← dojo root
-  .jean/                          ← dojo data (board, events, snapshots)
-    board.json
-    history.jsonl
+  .jean/                          ← dojo data
+    board.json                    ← board snapshot (computed from events)
+    board-snapshot.json           ← periodic projection snapshot
+    history.jsonl                 ← append-only event log
+    kb/                           ← project knowledge base
+      team.yaml                   ← team structure
+      open-threads.md             ← current work items
+      scripts/                    ← automation scripts
+      sprints/                    ← sprint data
+      design/                     ← design docs
+      research/                   ← research notes
+      projects/                   ← project context
   .bare/                          ← bare git clone (optional, for worktree agents)
   scratch/                        ← worker agent (git worktree)
     .jean-agent.json              ← agent identity: name, role, tags
     .mcp.json                     ← channel plugin config
     .claude/settings.local.json   ← permissions, stop hook
+  review/                         ← worker agent (git worktree)
+    .jean-agent.json
+    .mcp.json
+    .claude/skills/review/        ← role-specific skill
+    .claude/settings.local.json
   sensei/                         ← orchestrator (plain directory)
     .jean-agent.json
     .mcp.json
     .claude/skills/jean-sensei/   ← orchestrator skill
+    .claude/skills/hub/           ← knowledge base gateway skill
     .claude/settings.local.json
 ```
 
@@ -260,19 +280,21 @@ $ jean peek orchestrator
 | Decision | Answer |
 |----------|--------|
 | Communication | Channels (validated: wakes idle sessions, bi-directional) |
-| Orchestrator → agent | Channel push (tasks, status checks) |
-| Agent → orchestrator | Passive: stop hook signals idle, orchestrator pings, agent replies |
-| Orchestrator | Always-running Claude session. Stateless per-event (reads board). |
-| Infrastructure | Bun/TypeScript. Channel server, board persistence, stop hook receiver. |
+| Sensei → agent | Channel push (tasks, status checks) |
+| Agent → sensei | Passive: stop hook signals idle, sensei pings, agent replies |
+| Sensei | Always-running Claude session. Stateless per-event (reads board). Catches up via history. |
+| Infrastructure | Bun/TypeScript. Event store, projections, channel server, stop hook receiver, SSE. |
 | Agent plugin | Channel + skills + stop hook. No outbound tools except `reply`. |
 | Agent identity | `.jean-agent.json` per agent: name, role, tags. Discovered by scanning dojo dirs. |
 | Agent creation | `jean agent add` — workers get worktrees by default, non-workers get plain dirs. |
 | Agent start | User runs Claude with `--channels` flag. Skills/hook load from `.claude/`. |
-| Task routing | Orchestrator routes by agent tags, not by name or queue. |
-| Board storage | Event-sourced. Board is a projection derived from events. |
+| Task routing | Sensei routes by agent tags, not by name or queue. |
+| State storage | Event-sourced (JSONL). Board and pending are projections. Snapshots for fast startup. |
+| External comms | Slack bridge: channel registered as `user` role agent. Optional. |
+| Knowledge base | `.jean/kb/` — project-specific data. Sensei reads, separate from skills. |
 | Dojo root | Identified by `.jean/` directory. `.bare/` optional (for worktree agents). |
 | UI | Building blocks: `jean peek`, `jean board`. Optional `jean ui` preset. |
-| Agent lifecycle | Manual first (user starts). Auto later (orchestrator starts). |
+| Agent lifecycle | Manual first (user starts). Auto later (sensei starts). |
 | Stack | Bun/TypeScript for infrastructure and channel plugins. |
 
 ---

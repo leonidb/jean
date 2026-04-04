@@ -2,13 +2,13 @@
 
 ## What This Is
 
-Jean is a framework for multi-agent execution with Claude Code. Agents work in parallel across separate folders, communicate through Claude Code channels, and are orchestrated by a central intelligent agent (the orchestrator). See `docs/concepts.md` for the full design.
+Jean is a framework for multi-agent execution with Claude Code. Agents work in parallel across separate folders, communicate through Claude Code channels, and are orchestrated by a central intelligent agent (the sensei). All state is event-sourced. See `docs/concepts.md` for the full design.
 
 ## Stack
 
 - **Runtime**: Bun (not Node.js)
 - **Language**: TypeScript
-- **Key dependency**: `@modelcontextprotocol/sdk` (for channel plugins)
+- **Key dependencies**: `@modelcontextprotocol/sdk` (channel plugins), `@slack/bolt` (Slack bridge)
 
 ## Commands
 
@@ -30,14 +30,15 @@ bun add <package>           # add dependency
 ```
 src/
   channel/          ← Jean channel plugin (MCP server for Claude Code)
-  infra/            ← Infrastructure layer (channel server, board, stop hook receiver)
-  cli/              ← CLI commands (jean board, jean peek, jean init)
+  infra/            ← Infrastructure layer (HTTP/WS server, event store, projections, Slack)
+  es/               ← Event sourcing primitives (store, projections, backends)
+  cli/              ← CLI commands (jean board, jean agent, jean send, jean status)
 docs/
-  concepts.md       ← Full architecture and design decisions
+  design.md         ← Project overview and core ideas
+  concepts.md       ← Full architecture, component design, communication patterns
   decisions.md      ← Alternatives considered and why they were rejected
   research.md       ← Validated findings (channels, hooks, CLI flags, reference code)
-  design.md         ← Project overview and core ideas
-  roadmap.md        ← Development milestones
+  roadmap.md        ← What's done, what's next
 ```
 
 ## Design Docs — Read Order
@@ -48,20 +49,21 @@ docs/
 4. `docs/research.md` — validated technical findings, reference implementation code
 5. `docs/roadmap.md` — what to build and in what order
 
-## Development Guide
+## Running
 
-### Where to start
-Milestone 1 in `docs/roadmap.md`: build the Jean channel plugin. Fork from fakechat's architecture. Reference code is in `docs/research.md`.
+```bash
+# Start the infrastructure service
+bun run src/infra/server.ts
+
+# Start an agent (from its directory)
+cd <agent-dir> && claude --dangerously-load-development-channels server:jean
+
+# CLI commands
+bun run src/cli/jean.ts board          # kanban view
+bun run src/cli/jean.ts agent list     # list agents
+bun run src/cli/jean.ts status         # infra status + recent events
+bun run src/cli/jean.ts send <agent> "message"
+```
 
 ### Key reference
-The fakechat plugin at `~/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/fakechat/server.ts` is the reference implementation to fork from. It's a working channel plugin with HTTP + WebSocket + MCP notification. Jean's plugin follows the same pattern but connects to the infrastructure service instead of a web UI.
-
-### Testing channels
-```bash
-# Test with fakechat first to verify channels work
-claude --channels plugin:fakechat@claude-plugins-official
-# Open http://localhost:8787, send a message — it should appear in the Claude session
-
-# Test custom channel plugin
-claude --dangerously-load-development-channels server:jean
-```
+The fakechat plugin at `~/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/fakechat/server.ts` is the reference implementation. Jean's channel plugin follows the same pattern but connects to the infrastructure service.
