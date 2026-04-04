@@ -19,11 +19,26 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import type { DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 
+import { existsSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE = process.env.JEAN_ROLE ?? 'worker'
 const INFRA_URL = process.env.JEAN_INFRA_URL ?? 'ws://127.0.0.1:8700/ws'
 const SESSION_ID = crypto.randomUUID()
 const SESSION_FILE = `/tmp/jean-session-${AGENT_NAME}.id`
+
+// Read tags from .jean-agent.json if it exists in the working directory
+const AGENT_TAGS: string[] = (() => {
+  try {
+    const file = resolve(process.cwd(), '.jean-agent.json')
+    if (existsSync(file)) {
+      const data = JSON.parse(readFileSync(file, 'utf8'))
+      return data.tags ?? []
+    }
+  } catch { /* no file or parse error */ }
+  return []
+})()
 
 // ── MCP Server ─────────────────────────────────────────────────────
 
@@ -129,7 +144,7 @@ function connectToInfra() {
 
     ws.addEventListener('open', () => {
       process.stderr.write(`[jean] connected to infra as "${AGENT_NAME}" session=${SESSION_ID}\n`)
-      sendToInfra({ type: 'register', agent: AGENT_NAME, role: AGENT_ROLE, sessionId: SESSION_ID })
+      sendToInfra({ type: 'register', agent: AGENT_NAME, role: AGENT_ROLE, sessionId: SESSION_ID, tags: AGENT_TAGS })
     })
 
     ws.addEventListener('message', (event) => {

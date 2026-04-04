@@ -131,33 +131,93 @@ CLI commands (`jean board`, `jean kick`, `jean ship`) or direct interaction (`je
 
 ## Setup & Lifecycle
 
-### Project init (once)
-```
-jean init ~/projects/myapp
-```
-Creates the project folder with `config.yaml`, `board.json`, `playbooks/`.
+### Dojo structure
 
-### Agent init (once per folder)
+A **dojo** is the root folder for a Jean project. It contains:
+
 ```
-jean init agent scratch ~/work/app-scratch --playbook bug-repro
+work-dojo/                        ← dojo root
+  .jean/                          ← dojo data (board, events, snapshots)
+    board.json
+    history.jsonl
+  .bare/                          ← bare git clone (optional, for worktree agents)
+  scratch/                        ← worker agent (git worktree)
+    .jean-agent.json              ← agent identity: name, role, tags
+    .mcp.json                     ← channel plugin config
+    .claude/settings.local.json   ← permissions, stop hook
+  sensei/                         ← orchestrator (plain directory)
+    .jean-agent.json
+    .mcp.json
+    .claude/skills/jean-sensei/   ← orchestrator skill
+    .claude/settings.local.json
 ```
-- Extracts `## Skill` from the playbook, installs as `.claude/skills/jean-bug-repro/SKILL.md`
-- Registers the Jean channel plugin config
-- Configures the stop hook
+
+The dojo is identified by `.jean/`. The `.bare/` directory is only needed for agents that use git worktrees.
+
+### Agent identity
+
+Each agent has a `.jean-agent.json` file in its root:
+
+```json
+{ "name": "scratch", "role": "worker", "tags": ["bug-repro", "investigation"] }
+```
+
+- **name**: agent identifier (matches folder name by convention)
+- **role**: `worker`, `sensei`, or `user`
+- **tags**: capabilities used by the orchestrator for routing tasks
+
+Tags are sent to the infrastructure service when the agent connects. The orchestrator sees tags via `GET /agents` and routes tasks to agents with matching capabilities.
+
+### Agent management
+
+```bash
+# Create a worker (gets a git worktree by default)
+jean agent add review --tags code-review
+
+# Create a non-worker (plain directory by default)
+jean agent add sensei --role sensei
+
+# Override defaults
+jean agent add monitor --role worker --no-worktree
+jean agent add sensei --role sensei --worktree
+
+# Configure an existing folder as an agent
+jean agent add --existing ./my-folder --role worker --tags investigation
+
+# List all agents (discovered by scanning dojo directories)
+jean agent list
+
+# Manage tags
+jean agent tag scratch testing --remove
+jean agent tag scratch code-changes
+
+# Remove an agent
+jean agent remove review           # fails if dirty
+jean agent remove review --force   # removes anyway
+jean agent remove review --keep    # removes jean config, keeps directory
+```
+
+Discovery scans all subdirectories of the dojo root for `.jean-agent.json`. If `.bare/` exists, branch info from `git worktree list` is shown alongside agents that are worktrees.
 
 ### Starting an agent
-User starts Claude in the folder with the `--channels` flag pointing to the Jean channel plugin. Skills and stop hook load automatically from the folder's `.claude/` config.
+
+```bash
+cd scratch && claude --dangerously-load-development-channels server:jean
+```
+
+The channel plugin reads `.jean-agent.json` and registers with the infrastructure service, including tags. Skills and stop hook load from `.claude/`.
 
 ### Two modes
-**Manual** (v1): User starts the agent, controls the window. Orchestrator communicates via channel.
 
-**Auto** (later): Orchestrator starts agents when work arrives. User can `jean peek` to connect.
+**Manual** (current): User starts the agent, controls the terminal. Orchestrator communicates via channel.
+
+**Auto** (future): Orchestrator starts agents when work arrives. User can `jean peek` to connect.
 
 ### Task flow
 ```
-Human kicks task (or orchestrator creates one)
+Human kicks task (via Slack or board)
   → Task added to board (inbox)
-  → Orchestrator picks agent based on queue/playbook
+  → Orchestrator picks agent based on tags
   → Orchestrator pushes task to agent via channel
   → Board updated (active)
   → Agent works using its skills
@@ -165,26 +225,9 @@ Human kicks task (or orchestrator creates one)
   → Stop hook fires → infrastructure notifies orchestrator
   → Orchestrator pings agent: "what's your status?"
   → Agent replies (done / stuck / needs input)
-  → Orchestrator updates board, follows playbook logic
-  → If gate: notify human, wait for approval
+  → Orchestrator updates board
   → If more inbox tasks: push next task to agent
 ```
-
----
-
-## Project Structure
-
-```
-~/projects/myapp/                 ← project root (explicit folder)
-  config.yaml                     ← agent registry, queue mapping
-  board.json                      ← task state
-  playbooks/
-    bug-repro.md                  ← playbook (flow + skill, one file)
-    code-review.md
-    investigation.md
-```
-
-Agent folders are registered paths, not subfolders. A project can span multiple repos.
 
 ---
 
@@ -221,11 +264,13 @@ $ jean peek orchestrator
 | Agent → orchestrator | Passive: stop hook signals idle, orchestrator pings, agent replies |
 | Orchestrator | Always-running Claude session. Stateless per-event (reads board). |
 | Infrastructure | Bun/TypeScript. Channel server, board persistence, stop hook receiver. |
-| Agent plugin | Channel + skills (from playbook) + stop hook. No outbound tools. |
+| Agent plugin | Channel + skills + stop hook. No outbound tools except `reply`. |
+| Agent identity | `.jean-agent.json` per agent: name, role, tags. Discovered by scanning dojo dirs. |
+| Agent creation | `jean agent add` — workers get worktrees by default, non-workers get plain dirs. |
 | Agent start | User runs Claude with `--channels` flag. Skills/hook load from `.claude/`. |
-| Playbook format | Single markdown: YAML frontmatter + `## Skill` + `## Flow` + `## Message Template`. Skill extracted on init. |
-| Board storage | JSON file, single writer (orchestrator). |
-| Project root | Explicit folder, user creates it. |
+| Task routing | Orchestrator routes by agent tags, not by name or queue. |
+| Board storage | Event-sourced. Board is a projection derived from events. |
+| Dojo root | Identified by `.jean/` directory. `.bare/` optional (for worktree agents). |
 | UI | Building blocks: `jean peek`, `jean board`. Optional `jean ui` preset. |
 | Agent lifecycle | Manual first (user starts). Auto later (orchestrator starts). |
 | Stack | Bun/TypeScript for infrastructure and channel plugins. |

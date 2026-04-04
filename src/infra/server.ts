@@ -94,6 +94,7 @@ type AgentEntry = {
   role: AgentRole
   idle: boolean
   sessionId?: string
+  tags: string[]
   deliver: (msg: DeliverMsg) => boolean
   close?: () => void
 }
@@ -242,6 +243,7 @@ async function initSlack() {
   agents.set(channelName, {
     role: 'user',
     idle: true,
+    tags: [],
     deliver: (msg) => {
       void app.client.chat.postMessage({
         channel: SLACK_CHANNEL!,
@@ -541,6 +543,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         name,
         role: entry.role,
         idle: entry.idle,
+        tags: entry.tags,
       }))
       return Response.json({ agents: list })
     }
@@ -613,6 +616,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
               role,
               idle,
               sessionId,
+              tags: msg.tags ?? [],
               deliver: wsDeliver(ws),
               close: () => { ws.data.agent = undefined; ws.close() },
             })

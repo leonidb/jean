@@ -14,6 +14,7 @@ export type RegisterMsg = {
   agent: string  // agent name, e.g. "scratch", "sensei"
   role: AgentRole
   sessionId?: string
+  tags?: string[]
 }
 
 /** Agent sends a reply (via the `reply` tool in the channel plugin) */
