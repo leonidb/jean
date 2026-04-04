@@ -35,7 +35,8 @@ A framework for multi-agent execution where autonomous coding agents work in par
               │    idle agents │
               │  - manages     │
               │    board/state │
-              │  - reads KB    │
+              │  - reads .jean/     │
+              │    context/        │
               │  - talks to    │
               │    human       │
               └───────┬────────┘
@@ -71,7 +72,7 @@ A framework for multi-agent execution where autonomous coding agents work in par
 - Gets notified when agents go idle (via stop hook → infrastructure)
 - Checks on idle agents ("what's your status?") and interprets the response
 - Updates the board via infrastructure HTTP API
-- Reads project KB (`.jean/kb/`) for context — team data, open threads, sprints
+- Reads `.jean/context/` for project data — team roster, open threads, sprints
 - Human can talk to it directly (`jean peek sensei`)
 - Stateless per-event: reads the board on every signal. Catches up on history after restart via `GET /history`.
 
@@ -113,8 +114,8 @@ A second projection tracking events the sensei needs to act on: replies from age
 Groups tasks by folder/worktree. One queue = one folder = one active agent.
 Multiple queues run in parallel.
 
-### Knowledge Base
-Project-specific data at `.jean/kb/` — team info, open threads, sprint data, scripts, research, design docs. The sensei reads KB for context when making decisions. Separate from skills (skills = how agents work, KB = what they should know about the project).
+### Context
+Live project data at `.jean/context/` — team info, open threads, sprint data, scripts, research, design docs. The sensei reads this for decision-making. Separate from skills (skills = how agents work, context = what they should know about the project).
 
 ---
 
@@ -146,7 +147,7 @@ work-dojo/                        ← dojo root
     board.json                    ← board snapshot (computed from events)
     board-snapshot.json           ← periodic projection snapshot
     history.jsonl                 ← append-only event log
-    kb/                           ← project knowledge base
+    context/                      ← live project context
       team.yaml                   ← team structure
       open-threads.md             ← current work items
       scripts/                    ← automation scripts
@@ -168,7 +169,7 @@ work-dojo/                        ← dojo root
     .jean-agent.json
     .mcp.json
     .claude/skills/jean-sensei/   ← orchestrator skill
-    .claude/skills/hub/           ← knowledge base gateway skill
+    .claude/skills/context/       ← project context gateway skill
     .claude/settings.local.json
 ```
 
@@ -291,7 +292,7 @@ $ jean peek orchestrator
 | Task routing | Sensei routes by agent tags, not by name or queue. |
 | State storage | Event-sourced (JSONL). Board and pending are projections. Snapshots for fast startup. |
 | External comms | Slack bridge: channel registered as `user` role agent. Optional. |
-| Knowledge base | `.jean/kb/` — project-specific data. Sensei reads, separate from skills. |
+| Project context | `.jean/context/` — live project data. Sensei reads, separate from skills. |
 | Dojo root | Identified by `.jean/` directory. `.bare/` optional (for worktree agents). |
 | UI | Building blocks: `jean peek`, `jean board`. Optional `jean ui` preset. |
 | Agent lifecycle | Manual first (user starts). Auto later (sensei starts). |

@@ -121,12 +121,12 @@ The infrastructure maintains a transport-agnostic agent registry — each agent 
 
 Why: Treating Slack as just another agent (with `user` role) means the sensei doesn't need special Slack-handling logic. It sends messages to "slack" the same way it sends to "scratch". The plumbing handles transport differences.
 
-## 13. Knowledge base: Dojo-level KB vs agent-level
+## 13. Project context: Dojo-level vs agent-level
 
-**Chosen: Shared KB at `.jean/kb/`, sensei reads it**
+**Chosen: Shared context at `.jean/context/`, sensei reads it**
 
 Alternatives considered:
-- **Per-agent KB**: Each agent has its own knowledge files. Rejected because: duplication, drift, agents need project-wide context not agent-specific data.
-- **Global skill with KB**: A global Claude skill that loads in every session. Rejected because: confuses workers with irrelevant context (e.g. team management data in a code review agent).
+- **Per-agent context**: Each agent has its own knowledge files. Rejected because: duplication, drift, agents need project-wide context not agent-specific data.
+- **Global skill with context**: A global Claude skill that loads in every session. Rejected because: confuses workers with irrelevant context (e.g. team management data in a code review agent).
 
-Why dojo-level won: Project knowledge belongs to the project, not to individual agents. The sensei reads KB for context when making routing and communication decisions. Workers get task descriptions that contain what they need — they don't need to browse the KB themselves.
+Why dojo-level won: Project context belongs to the project, not to individual agents. The sensei reads context for routing and communication decisions. Workers get task descriptions that contain what they need — they don't need to browse the context themselves.
