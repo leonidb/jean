@@ -12,6 +12,7 @@
  *   jean agent list                             List agents
  *   jean agent tag <name> [tags..] [--remove]   View or manage tags
  *   jean agent remove <name> [--force] [--keep] Remove an agent
+ *   jean permissions [agent]                    Show permission requests
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs'
@@ -43,6 +44,9 @@ switch (command) {
     break
   case 'agent':
     cmdAgent(args.slice(1))
+    break
+  case 'permissions':
+    await cmdPermissions(args[1])
     break
   default:
     printUsage()
@@ -159,6 +163,56 @@ async function cmdStatus() {
     console.error('Could not connect to Jean infrastructure.')
     process.exit(1)
   }
+}
+
+async function cmdPermissions(agent?: string) {
+  try {
+    const qs = agent ? `?agent=${encodeURIComponent(agent)}` : ''
+    const res = await fetch(`${INFRA_URL}/permissions${qs}`)
+    const { permissions } = (await res.json()) as {
+      permissions: Record<string, Record<string, { count: number; samples: Record<string, unknown>[] }>>
+    }
+
+    if (Object.keys(permissions).length === 0) {
+      console.log('No permission requests recorded yet.')
+      return
+    }
+
+    for (const [agentName, tools] of Object.entries(permissions)) {
+      console.log(`\n${BOLD}${agentName}${RESET}`)
+      const sorted = Object.entries(tools).sort((a, b) => b[1].count - a[1].count)
+      for (const [tool, { count, samples }] of sorted) {
+        const details = summarizeSamples(tool, samples)
+        const detail = details ? `  ${DIM}(${details})${RESET}` : ''
+        console.log(`  ${tool.padEnd(16)} ${String(count).padStart(3)}x${detail}`)
+      }
+    }
+    console.log()
+  } catch {
+    console.error('Could not connect to Jean infrastructure.')
+    process.exit(1)
+  }
+}
+
+function summarizeSamples(tool: string, samples: Record<string, unknown>[]): string {
+  if (tool === 'Bash') {
+    const cmds: Record<string, number> = {}
+    for (const s of samples) {
+      const cmd = String(s.command ?? '').split(' ').slice(0, 3).join(' ')
+      if (cmd) cmds[cmd] = (cmds[cmd] ?? 0) + 1
+    }
+    return Object.entries(cmds)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([cmd, n]) => `${cmd} x${n}`)
+      .join(', ')
+  }
+  if (tool === 'Edit' || tool === 'Write') {
+    const paths = new Set(samples.map(s => String(s.file_path ?? '')).filter(Boolean))
+    if (paths.size <= 3) return [...paths].join(', ')
+    return `${paths.size} files`
+  }
+  return ''
 }
 
 // ── Agent subcommands ─────────────────────────────────────────────
@@ -456,6 +510,13 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
             command: `curl -s -X POST http://127.0.0.1:8700/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat /tmp/jean-session-${name}.id 2>/dev/null)\\"}"`,
           }],
         }],
+        PermissionRequest: [{
+          hooks: [{
+            type: 'command',
+            command: `bun -e 'const d=JSON.parse(await Bun.stdin.text());fetch("http://127.0.0.1:8700/permissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({agent:"${name}",tool:d.tool_name,input:d.tool_input})})'`,
+            async: true,
+          }],
+        }],
       },
     }, null, 2) + '\n')
   } else {
@@ -615,6 +676,7 @@ Commands:
   jean peek <agent>                           How to connect to an agent
   jean send <agent> <msg>                     Send a message to an agent
   jean status                                 Infrastructure status
+  jean permissions [agent]                    Show permission requests by agent
 
   jean agent add <name> [options]             Create a new agent
     --role <role>     Agent role (default: worker)

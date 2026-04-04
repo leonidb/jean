@@ -61,6 +61,12 @@ export type NudgeData = {
   pendingCount: number
 }
 
+export type PermissionRequestData = {
+  agent: string
+  tool: string
+  input: Record<string, unknown>
+}
+
 export type StartData = {
   port: number
 }

@@ -25,7 +25,7 @@ import {
   toApiEvent,
   type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
   type SendData, type AgentIdleData, type RegisterData, type AckData,
-  type ReplyData, type NudgeData, type StartData,
+  type ReplyData, type NudgeData, type StartData, type PermissionRequestData,
   type PendingState,
 } from './reducers.ts'
 import type {
@@ -38,7 +38,7 @@ const PORT = Number(process.env.JEAN_PORT ?? 8700)
 const BOARD_PATH = process.env.JEAN_BOARD ?? './board.json'
 const HISTORY_PATH = process.env.JEAN_HISTORY ?? `${dirname(BOARD_PATH)}/history.jsonl`
 
-// Slack config (optional)
+// Slack config (optional) — loaded from .env in cwd (the .jean/ directory)
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN
 const SLACK_CHANNEL = process.env.SLACK_CHANNEL
@@ -441,6 +441,44 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         }
 
         return Response.json({ ok: true })
+      })()
+    }
+
+    // ── Permission tracking ──────────────────────────────────────
+
+    if (path === '/permissions' && req.method === 'POST') {
+      return (async () => {
+        const body = (await req.json()) as { agent: string; tool: string; input?: Record<string, unknown> }
+        if (!body.agent || !body.tool) {
+          return Response.json({ error: 'missing agent or tool' }, { status: 400 })
+        }
+        await record('permission-request', agentStream(body.agent), {
+          agent: body.agent,
+          tool: body.tool,
+          input: body.input ?? {},
+        } satisfies PermissionRequestData)
+        return Response.json({ ok: true })
+      })()
+    }
+
+    if (path === '/permissions' && req.method === 'GET') {
+      return (async () => {
+        const agentFilter = url.searchParams.get('agent') ?? undefined
+        const permEvents = await store.read({
+          types: ['permission-request'],
+          ...(agentFilter && { stream: agentStream(agentFilter) }),
+        })
+
+        const byAgent: Record<string, Record<string, { count: number; samples: Record<string, unknown>[] }>> = {}
+        for (const e of permEvents) {
+          const d = e.data as PermissionRequestData
+          const agentMap = byAgent[d.agent] ??= {}
+          const entry = agentMap[d.tool] ??= { count: 0, samples: [] }
+          entry.count++
+          if (entry.samples.length < 5) entry.samples.push(d.input)
+        }
+
+        return Response.json({ permissions: byAgent })
       })()
     }
 
