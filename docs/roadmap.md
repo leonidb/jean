@@ -20,11 +20,48 @@
 
 **Goal**: Streamlined agent creation and dojo structure.
 
-**Completed** (Apr). `jean agent add/list/tag/remove/start` CLI. Workers default to git worktrees, non-workers to plain directories. Agent identity via `.jean-agent.json` (name, role, tags). Directory-based agent discovery. Tags flow from agent → channel plugin → infra → sensei for routing. Slack integration as a `user` role agent. KB directory (`.jean/kb/`) for shared project knowledge. Sensei skills migrated from global hub.
+**Completed** (Apr). `jean agent add/list/tag/remove/start` CLI. Workers default to git worktrees, non-workers to plain directories. Agent identity via `.jean-agent.json` (name, role, tags). Directory-based agent discovery. Tags flow from agent → channel plugin → infra → sensei for routing. Slack integration as a `user` role agent. Context directory (`.jean/context/`) for live project data. Sensei skills migrated from global hub.
 
 ---
 
-## Milestone 3: Human Interaction & Polish
+## Milestone 3: Triggers & Proactive Workflows
+
+**Goal**: Sensei acts on its own — checking PRs, nudging the human, running scheduled flows.
+
+### To build
+1. **Periodic triggers in infra** — cron-like scheduler. Config: time + agent + prompt. Stored in `.jean/triggers.json`, managed via `jean trigger add/list/remove`.
+2. **PR review workflow** — trigger prompt that tells sensei to check PRs, route reviews to the review agent, and send consolidated summaries to Slack.
+3. **Read-only permission profiles** — granular `gh`/`git` permissions (view, diff, list — no merge, push, create). Already started for review agent.
+
+### Deliverable
+Daily trigger fires → sensei checks PRs → review agent summarizes each → sensei sends consolidated Slack message. Human wakes up to actionable PR summaries.
+
+---
+
+## Milestone 4: Living Context
+
+**Goal**: The dojo's context auto-maintains itself — agents capture observations, the system consolidates them into structured knowledge.
+
+Inspired by [Karpathy's LLM knowledge bases](https://x.com/karpathy/status/2039805659525644595): raw sources compiled into a wiki of `.md` files, auto-maintained by the LLM. No RAG, no graph database — just markdown and an agent that keeps it coherent.
+
+### Design
+- `.jean/context/raw/` — agents write observations here during work (findings, decisions, patterns noticed)
+- Consolidation: sensei (or a dedicated agent) periodically reads `raw/`, distills into structured context files (`research/`, `open-threads.md`, etc.), clears processed raw notes
+- Index maintenance: auto-generated summaries and cross-references across context files
+- Agents reference context for decisions; their work produces new raw observations — a feedback loop
+
+### To build
+1. **Raw capture convention** — how agents write to `raw/` (format, naming, via reply tool or direct file write)
+2. **Consolidation flow** — trigger or manual prompt that processes `raw/` into structured context
+3. **Index/summary generation** — auto-maintained overview of what's in context
+4. **Agent instructions** — update skills to tell agents to capture observations in `raw/`
+
+### Deliverable
+Agents work → observations accumulate in `raw/` → consolidation distills into structured context → sensei reads better context → makes better decisions. Knowledge compounds over time without manual curation.
+
+---
+
+## Milestone 5: Human Interaction & Polish
 
 **Goal**: The human can interact with the system naturally.
 
@@ -34,14 +71,13 @@
 3. **`/jean ship`** — approve a task in review state
 4. **`jean board` polish** — status indicators, timestamps, agent state
 5. **Desktop notifications** — notify human when tasks need attention
-6. **Broader default permissions** — role-based permission profiles so workers don't block on approvals
 
 ### Deliverable
 Full manual-mode workflow: kick from working session → agent handles → get notified → peek/approve → done.
 
 ---
 
-## Milestone 4: Dojo Init & Distribution
+## Milestone 6: Dojo Init & Distribution
 
 **Goal**: Ready for other people to use.
 
