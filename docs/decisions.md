@@ -130,3 +130,19 @@ Alternatives considered:
 - **Global skill with context**: A global Claude skill that loads in every session. Rejected because: confuses workers with irrelevant context (e.g. team management data in a code review agent).
 
 Why dojo-level won: Project context belongs to the project, not to individual agents. The sensei reads context for routing and communication decisions. Workers get task descriptions that contain what they need — they don't need to browse the context themselves.
+
+## 14. Agent workspaces: Persistent directories vs ephemeral
+
+**Chosen (current): Persistent directories with git worktrees**
+
+Each agent has a permanent directory (worktree for workers, plain dir for sensei). Skills, permissions, and the working directory persist across tasks.
+
+**Alternative considered: Ephemeral workspaces with persistent roles**
+
+Roles (skills + permissions + tags) defined in `.jean/roles/`, workspaces created per task (worktree on a task branch), destroyed when done. Agents have no cross-task state — all continuity lives in the event log, sensei, git, and `.jean/context/`.
+
+Conceptually cleaner: an agent is really just a role stamped onto a temporary workspace. No stale files between tasks, no branch conflicts, natural scaling (spin up N agents for N tasks). Sensei stays persistent as the exception.
+
+**Why not adopted yet**: Environment setup cost. Real projects have fragile setups (wrong Python version, missing deps, Poetry quirks). With persistent directories, you fix once. With ephemeral workspaces, you pay setup cost per task — a 5-minute dep install to answer a quick Slack question is unacceptable.
+
+**Revisit when**: Fast, reliable workspace provisioning is solved — e.g. containerized environments, cached dependency layers, or project-specific setup scripts that work first try.

@@ -535,7 +535,9 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         const last = url.searchParams.get('last')
         const raw = url.searchParams.get('raw') === 'true'
         const stream = url.searchParams.get('stream') ?? (taskId ? taskStream(taskId) : undefined)
+        const includeDiagnostics = url.searchParams.get('diagnostics') === 'true'
         let events = await store.read({ stream })
+        if (!includeDiagnostics) events = events.filter(e => e.type !== 'permission-request')
         if (last) events = events.slice(-Number(last))
         return Response.json({ events: raw ? events : events.map(toApiEvent) })
       })()
