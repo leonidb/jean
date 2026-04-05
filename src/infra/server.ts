@@ -19,13 +19,16 @@ import {
   type StoredEvent, type EventStore,
 } from '../es/index.ts'
 import { canTransition, type Board, type TaskStatus } from './board.ts'
+import { Cron } from 'croner'
 import {
-  boardReducer, pendingReducer,
-  taskStream, agentStream, SYSTEM_STREAM, taskIdFromStream, agentFromEvent,
+  boardReducer, pendingReducer, triggerReducer,
+  taskStream, agentStream, SYSTEM_STREAM, TRIGGERS_STREAM, taskIdFromStream, agentFromEvent,
   toApiEvent,
   type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
   type SendData, type AgentIdleData, type RegisterData, type AckData,
   type ReplyData, type NudgeData, type StartData, type PermissionRequestData,
+  type TriggerCreatedData, type TriggerUpdatedData, type TriggerRemovedData, type TriggerFiredData,
+  type Trigger, type TriggerState,
   type PendingState,
 } from './reducers.ts'
 import type {
@@ -62,7 +65,7 @@ const pendingProjection = createProjection<PendingState>({
   store,
   reducer: pendingReducer,
   initial: [],
-  filter: { types: ['reply', 'agent-idle', 'task-created', 'ack'] },
+  filter: { types: ['reply', 'agent-idle', 'task-created', 'trigger-fired', 'ack'] },
 })
 
 const lastTaskContext = createProjection<Map<string, string>>({
@@ -84,9 +87,20 @@ const lastTaskContext = createProjection<Map<string, string>>({
   filter: { types: ['send'] },
 })
 
+const triggerProjection = createProjection<TriggerState>({
+  name: 'triggers',
+  store,
+  reducer: triggerReducer,
+  initial: { triggers: [] },
+  filter: { stream: TRIGGERS_STREAM },
+  snapshots: fileSnapshotBackend(dirname(BOARD_PATH)),
+  snapshotEvery: 20,
+})
+
 await boardProjection.catchUp()
 await pendingProjection.catchUp()
 await lastTaskContext.catchUp()
+await triggerProjection.catchUp()
 
 // ── Agent registry (transport-agnostic) ──────────────────────────
 
@@ -148,6 +162,7 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
   const event = await store.append({ stream, type, data })
   boardProjection.apply(event)
   pendingProjection.apply(event)
+  triggerProjection.apply(event)
 
   const taskId = taskIdFromStream(stream)
   const agent = (data as Record<string, unknown>)?.agent as string | undefined
@@ -217,6 +232,75 @@ function nudgeSenseiIfIdle(force = false) {
   })
   void record('nudge', SYSTEM_STREAM, { pendingCount: pendingProjection.state.length } satisfies NudgeData)
 }
+
+// ── Trigger scheduler ───────────────────────────────────────────
+
+async function checkTriggers() {
+  const now = new Date()
+  const activeTriggers = triggerProjection.state.triggers.filter(t => t.status === 'active')
+
+  for (const trigger of activeTriggers) {
+    let shouldFire = false
+
+    if (trigger.cron) {
+      try {
+        const job = new Cron(trigger.cron)
+        const prev = job.previousRun(now)
+        if (prev) {
+          const prevMs = prev.getTime()
+          const lastFired = trigger.lastFiredAt ? new Date(trigger.lastFiredAt).getTime() : 0
+          if (now.getTime() - prevMs < 60_000 && lastFired < prevMs) {
+            shouldFire = true
+          }
+        }
+      } catch {
+        process.stderr.write(`[jean] invalid cron for trigger ${trigger.id}: ${trigger.cron}\n`)
+      }
+    }
+
+    if (trigger.at) {
+      const atTime = new Date(trigger.at).getTime()
+      if (atTime <= now.getTime()) {
+        shouldFire = true
+      }
+    }
+
+    if (shouldFire) {
+      await fireTrigger(trigger)
+    }
+  }
+}
+
+async function fireTrigger(trigger: Trigger) {
+  await record('trigger-fired', TRIGGERS_STREAM, {
+    triggerId: trigger.id,
+    agent: trigger.agent,
+    prompt: trigger.prompt,
+  } satisfies TriggerFiredData)
+
+  const delivered = deliverToAgent(trigger.agent, {
+    type: 'deliver',
+    from: 'trigger',
+    text: trigger.prompt,
+  })
+  if (delivered) {
+    const entry = agents.get(trigger.agent)
+    if (entry && entry.role === 'worker') entry.idle = false
+  }
+
+  const taskId = inferTaskId(trigger.agent)
+  const stream = taskId ? taskStream(taskId) : agentStream(trigger.agent)
+  void record('send', stream, {
+    agent: trigger.agent,
+    from: `trigger:${trigger.id}`,
+    text: trigger.prompt,
+    delivered,
+  } satisfies SendData)
+
+  process.stderr.write(`[jean] trigger ${trigger.id} fired → ${trigger.agent}\n`)
+}
+
+setInterval(checkTriggers, 60_000)
 
 // ── Slack integration (optional) ─────────────────────────────────
 
@@ -482,6 +566,100 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       })()
     }
 
+    // ── Trigger CRUD ────────────────────────────────────────────
+
+    if (path === '/triggers' && req.method === 'POST') {
+      return (async () => {
+        const body = (await req.json()) as {
+          id?: string; cron?: string; at?: string; agent: string
+          prompt: string; createdBy?: string; metadata?: Record<string, unknown>
+        }
+        if (!body.agent || !body.prompt) {
+          return Response.json({ error: 'missing agent or prompt' }, { status: 400 })
+        }
+        if (!body.cron && !body.at) {
+          return Response.json({ error: 'must specify cron or at' }, { status: 400 })
+        }
+        if (body.cron && body.at) {
+          return Response.json({ error: 'cron and at are mutually exclusive' }, { status: 400 })
+        }
+        if (body.cron) {
+          try { new Cron(body.cron) }
+          catch { return Response.json({ error: 'invalid cron expression' }, { status: 400 }) }
+        }
+        if (body.at) {
+          const d = new Date(body.at)
+          if (isNaN(d.getTime())) {
+            return Response.json({ error: 'invalid datetime for at' }, { status: 400 })
+          }
+        }
+
+        const id = body.id ?? crypto.randomUUID().slice(0, 8)
+        if (triggerProjection.state.triggers.some(t => t.id === id)) {
+          return Response.json({ error: 'trigger ID already exists' }, { status: 409 })
+        }
+
+        await record('trigger-created', TRIGGERS_STREAM, {
+          id,
+          cron: body.cron,
+          at: body.at,
+          agent: body.agent,
+          prompt: body.prompt,
+          createdBy: body.createdBy ?? 'api',
+          metadata: body.metadata,
+        } satisfies TriggerCreatedData)
+
+        const trigger = triggerProjection.state.triggers.find(t => t.id === id)
+        return Response.json(trigger, { status: 201 })
+      })()
+    }
+
+    if (path === '/triggers' && req.method === 'GET') {
+      let triggers = triggerProjection.state.triggers
+      const status = url.searchParams.get('status')
+      if (status) triggers = triggers.filter(t => t.status === status)
+      const agent = url.searchParams.get('agent')
+      if (agent) triggers = triggers.filter(t => t.agent === agent)
+      return Response.json({ triggers })
+    }
+
+    const triggerMatch = path.match(/^\/triggers\/([^/]+)$/)
+
+    if (triggerMatch && req.method === 'GET') {
+      const trigger = triggerProjection.state.triggers.find(t => t.id === triggerMatch[1])
+      if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
+      return Response.json(trigger)
+    }
+
+    if (triggerMatch && req.method === 'PATCH') {
+      return (async () => {
+        const body = (await req.json()) as Omit<TriggerUpdatedData, 'id'>
+        const trigger = triggerProjection.state.triggers.find(t => t.id === triggerMatch[1])
+        if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
+        if (body.cron) {
+          try { new Cron(body.cron) }
+          catch { return Response.json({ error: 'invalid cron expression' }, { status: 400 }) }
+        }
+        await record('trigger-updated', TRIGGERS_STREAM, {
+          id: triggerMatch[1],
+          ...body,
+        } satisfies TriggerUpdatedData)
+        const updated = triggerProjection.state.triggers.find(t => t.id === triggerMatch[1])
+        return Response.json(updated)
+      })()
+    }
+
+    if (triggerMatch && req.method === 'DELETE') {
+      return (async () => {
+        const trigger = triggerProjection.state.triggers.find(t => t.id === triggerMatch[1])
+        if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
+        await record('trigger-removed', TRIGGERS_STREAM, {
+          id: triggerMatch[1],
+        } satisfies TriggerRemovedData)
+        return Response.json({ ok: true })
+      })()
+    }
+
     // ── Event endpoints ─────────────────────────────────────────
 
     if (path === '/events' && req.method === 'GET') {
@@ -595,6 +773,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         agents: [...agents.entries()].map(([n, e]) => ({ name: n, role: e.role })),
         sensei: sensei ? { connected: true, idle: sensei.idle } : { connected: false },
         pendingEvents: pendingProjection.state.length,
+        activeTriggers: triggerProjection.state.triggers.filter(t => t.status === 'active').length,
         slack: SLACK_APP_TOKEN
           ? { configured: true, connected: slackConnected, channel: SLACK_CHANNEL }
           : { configured: false },
@@ -707,3 +886,6 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
 void record('start', SYSTEM_STREAM, { port: PORT } satisfies StartData)
 await initSlack()
+
+// Check triggers on startup (catch any missed while server was down)
+setTimeout(checkTriggers, 1000)

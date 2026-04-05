@@ -1,10 +1,12 @@
 import { describe, test, expect } from 'bun:test'
 import type { StoredEvent } from '../es/index.ts'
 import {
-  boardReducer, pendingReducer, toApiEvent,
-  taskStream, agentStream, SYSTEM_STREAM,
+  boardReducer, pendingReducer, triggerReducer, toApiEvent,
+  taskStream, agentStream, SYSTEM_STREAM, TRIGGERS_STREAM,
   type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
   type AckData, type AgentIdleData,
+  type TriggerCreatedData, type TriggerUpdatedData, type TriggerRemovedData, type TriggerFiredData,
+  type TriggerState,
 } from './reducers.ts'
 import type { Board } from './board.ts'
 
@@ -122,10 +124,115 @@ describe('pendingReducer', () => {
     expect(state[0]!.id).toBe(3)
   })
 
+  test('trigger-fired adds to pending', () => {
+    const e = makeEvent(1, 'trigger-fired', TRIGGERS_STREAM, {
+      triggerId: 'morning', agent: 'sensei', prompt: 'Run brief',
+    } satisfies TriggerFiredData)
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(1)
+    expect(state[0]!.type).toBe('trigger-fired')
+  })
+
   test('ignores unrelated events', () => {
     const e = makeEvent(1, 'nudge', SYSTEM_STREAM, { pendingCount: 1 })
     const state = pendingReducer([], e)
     expect(state.length).toBe(0)
+  })
+})
+
+// ── Trigger reducer ──────────────────────────────────────────────
+
+describe('triggerReducer', () => {
+  const empty: TriggerState = { triggers: [] }
+
+  test('trigger-created adds a trigger', () => {
+    const e = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
+      id: 'morning', cron: '0 8 * * 1-5', agent: 'sensei',
+      prompt: 'Run brief', createdBy: 'cli',
+    } satisfies TriggerCreatedData)
+    const state = triggerReducer(empty, e)
+    expect(state.triggers.length).toBe(1)
+    expect(state.triggers[0]!.id).toBe('morning')
+    expect(state.triggers[0]!.status).toBe('active')
+    expect(state.triggers[0]!.cron).toBe('0 8 * * 1-5')
+    expect(state.triggers[0]!.createdAt).toBe(e.ts)
+  })
+
+  test('trigger-created with one-off at', () => {
+    const e = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
+      id: 'reminder', at: '2026-04-07T10:00:00Z', agent: 'sensei',
+      prompt: 'Check PR', createdBy: 'sensei',
+    } satisfies TriggerCreatedData)
+    const state = triggerReducer(empty, e)
+    expect(state.triggers[0]!.at).toBe('2026-04-07T10:00:00Z')
+    expect(state.triggers[0]!.cron).toBeUndefined()
+  })
+
+  test('trigger-updated updates fields', () => {
+    const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
+      id: 'morning', cron: '0 8 * * 1-5', agent: 'sensei',
+      prompt: 'Run brief', createdBy: 'cli',
+    } satisfies TriggerCreatedData)
+    const e2 = makeEvent(2, 'trigger-updated', TRIGGERS_STREAM, {
+      id: 'morning', prompt: 'Run morning brief and post to Slack',
+    } satisfies TriggerUpdatedData)
+    const state = triggerReducer(triggerReducer(empty, e1), e2)
+    expect(state.triggers[0]!.prompt).toBe('Run morning brief and post to Slack')
+    expect(state.triggers[0]!.cron).toBe('0 8 * * 1-5') // unchanged
+  })
+
+  test('trigger-updated can disable', () => {
+    const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
+      id: 'x', cron: '* * * * *', agent: 'a', prompt: 'p', createdBy: 'cli',
+    } satisfies TriggerCreatedData)
+    const e2 = makeEvent(2, 'trigger-updated', TRIGGERS_STREAM, {
+      id: 'x', status: 'disabled',
+    } satisfies TriggerUpdatedData)
+    const state = triggerReducer(triggerReducer(empty, e1), e2)
+    expect(state.triggers[0]!.status).toBe('disabled')
+  })
+
+  test('trigger-removed deletes trigger', () => {
+    const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
+      id: 'x', cron: '* * * * *', agent: 'a', prompt: 'p', createdBy: 'cli',
+    } satisfies TriggerCreatedData)
+    const e2 = makeEvent(2, 'trigger-removed', TRIGGERS_STREAM, {
+      id: 'x',
+    } satisfies TriggerRemovedData)
+    const state = triggerReducer(triggerReducer(empty, e1), e2)
+    expect(state.triggers.length).toBe(0)
+  })
+
+  test('trigger-fired sets lastFiredAt on cron trigger, keeps active', () => {
+    const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
+      id: 'morning', cron: '0 8 * * 1-5', agent: 'sensei',
+      prompt: 'Run brief', createdBy: 'cli',
+    } satisfies TriggerCreatedData)
+    const e2 = makeEvent(2, 'trigger-fired', TRIGGERS_STREAM, {
+      triggerId: 'morning', agent: 'sensei', prompt: 'Run brief',
+    } satisfies TriggerFiredData)
+    const state = triggerReducer(triggerReducer(empty, e1), e2)
+    expect(state.triggers[0]!.lastFiredAt).toBe(e2.ts)
+    expect(state.triggers[0]!.status).toBe('active')
+  })
+
+  test('trigger-fired sets status to fired on one-off trigger', () => {
+    const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
+      id: 'reminder', at: '2026-04-07T10:00:00Z', agent: 'sensei',
+      prompt: 'Check PR', createdBy: 'sensei',
+    } satisfies TriggerCreatedData)
+    const e2 = makeEvent(2, 'trigger-fired', TRIGGERS_STREAM, {
+      triggerId: 'reminder', agent: 'sensei', prompt: 'Check PR',
+    } satisfies TriggerFiredData)
+    const state = triggerReducer(triggerReducer(empty, e1), e2)
+    expect(state.triggers[0]!.status).toBe('fired')
+    expect(state.triggers[0]!.lastFiredAt).toBe(e2.ts)
+  })
+
+  test('ignores unrelated events', () => {
+    const e = makeEvent(1, 'reply', agentStream('scratch'), { text: 'hello' })
+    const state = triggerReducer(empty, e)
+    expect(state.triggers.length).toBe(0)
   })
 })
 

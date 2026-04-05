@@ -71,11 +71,42 @@ export type StartData = {
   port: number
 }
 
+export type TriggerCreatedData = {
+  id: string
+  cron?: string
+  at?: string
+  agent: string
+  prompt: string
+  createdBy: string
+  metadata?: Record<string, unknown>
+}
+
+export type TriggerUpdatedData = {
+  id: string
+  cron?: string
+  at?: string
+  agent?: string
+  prompt?: string
+  status?: 'active' | 'disabled'
+  metadata?: Record<string, unknown>
+}
+
+export type TriggerRemovedData = {
+  id: string
+}
+
+export type TriggerFiredData = {
+  triggerId: string
+  agent: string
+  prompt: string
+}
+
 // ── Stream helpers ───────────────────────────────────────────────
 
 export function taskStream(taskId: string): string { return `task-${taskId}` }
 export function agentStream(agent: string): string { return `agent-${agent}` }
 export const SYSTEM_STREAM = 'system'
+export const TRIGGERS_STREAM = 'triggers'
 
 export function taskIdFromStream(stream: string): string | undefined {
   return stream.startsWith('task-') ? stream.slice(5) : undefined
@@ -158,6 +189,7 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
   switch (event.type) {
     case 'reply':
     case 'task-created':
+    case 'trigger-fired':
       return [...state, event]
 
     case 'agent-idle': {
@@ -170,6 +202,84 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
       const d = event.data as AckData
       const acked = new Set(d.eventIds)
       return state.filter(e => !acked.has(e.id))
+    }
+
+    default:
+      return state
+  }
+}
+
+// ── Trigger reducer ──────────────────────────────────────────────
+
+export type Trigger = {
+  id: string
+  cron?: string
+  at?: string
+  agent: string
+  prompt: string
+  status: 'active' | 'fired' | 'disabled'
+  createdBy: string
+  createdAt: string
+  lastFiredAt?: string
+  metadata?: Record<string, unknown>
+}
+
+export type TriggerState = { triggers: Trigger[] }
+
+export const triggerReducer: Reducer<TriggerState> = (state, event) => {
+  switch (event.type) {
+    case 'trigger-created': {
+      const d = event.data as TriggerCreatedData
+      const trigger: Trigger = {
+        id: d.id,
+        cron: d.cron,
+        at: d.at,
+        agent: d.agent,
+        prompt: d.prompt,
+        status: 'active',
+        createdBy: d.createdBy,
+        createdAt: event.ts,
+        metadata: d.metadata,
+      }
+      return { triggers: [...state.triggers, trigger] }
+    }
+
+    case 'trigger-updated': {
+      const d = event.data as TriggerUpdatedData
+      return {
+        triggers: state.triggers.map(t =>
+          t.id === d.id
+            ? {
+                ...t,
+                ...(d.cron !== undefined && { cron: d.cron }),
+                ...(d.at !== undefined && { at: d.at }),
+                ...(d.agent !== undefined && { agent: d.agent }),
+                ...(d.prompt !== undefined && { prompt: d.prompt }),
+                ...(d.status !== undefined && { status: d.status }),
+                ...(d.metadata !== undefined && { metadata: d.metadata }),
+              }
+            : t,
+        ),
+      }
+    }
+
+    case 'trigger-removed': {
+      const d = event.data as TriggerRemovedData
+      return { triggers: state.triggers.filter(t => t.id !== d.id) }
+    }
+
+    case 'trigger-fired': {
+      const d = event.data as TriggerFiredData
+      return {
+        triggers: state.triggers.map(t => {
+          if (t.id !== d.triggerId) return t
+          return {
+            ...t,
+            lastFiredAt: event.ts,
+            ...(t.at && !t.cron ? { status: 'fired' as const } : {}),
+          }
+        }),
+      }
     }
 
     default:

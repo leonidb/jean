@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.28.0",
-    "@slack/bolt": "^4.6.0"
+    "@slack/bolt": "^4.6.0",
+    "croner": "^10.0.1"
   }
 }

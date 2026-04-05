@@ -7,12 +7,15 @@
  *   jean peek <agent>                           Connect to an agent
  *   jean send <agent> <msg>                     Send a message to an agent
  *   jean status                                 Infrastructure status
+ *   jean permissions [agent]                    Show permission requests
+ *   jean trigger add [options]                  Create a scheduled trigger
+ *   jean trigger list                           List triggers
+ *   jean trigger remove <id>                    Remove a trigger
  *   jean agent add <name> [options]             Create a new agent
  *   jean agent add --existing <path> [options]  Configure existing folder
  *   jean agent list                             List agents
  *   jean agent tag <name> [tags..] [--remove]   View or manage tags
  *   jean agent remove <name> [--force] [--keep] Remove an agent
- *   jean permissions [agent]                    Show permission requests
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs'
@@ -47,6 +50,9 @@ switch (command) {
     break
   case 'permissions':
     await cmdPermissions(args[1])
+    break
+  case 'trigger':
+    await cmdTrigger(args.slice(1))
     break
   default:
     printUsage()
@@ -213,6 +219,117 @@ function summarizeSamples(tool: string, samples: Record<string, unknown>[]): str
     return `${paths.size} files`
   }
   return ''
+}
+
+// ── Trigger subcommands ───────────────────────────────────────────
+
+async function cmdTrigger(args: string[]) {
+  const sub = args[0]
+  switch (sub) {
+    case 'add':    await cmdTriggerAdd(args.slice(1)); break
+    case 'list':   await cmdTriggerList(); break
+    case 'remove': await cmdTriggerRemove(args[1]); break
+    default:
+      console.error('Usage: jean trigger <add|list|remove>')
+      process.exit(1)
+  }
+}
+
+async function cmdTriggerAdd(args: string[]) {
+  const cron = flagValue(args, '--cron')
+  const at = flagValue(args, '--at')
+  const agent = flagValue(args, '--agent')
+  const prompt = flagValue(args, '--prompt')
+  const id = flagValue(args, '--id')
+
+  if (!agent || !prompt) {
+    console.error('Usage: jean trigger add --agent <name> --prompt "..." [--cron "..."|--at "..."] [--id <id>]')
+    process.exit(1)
+  }
+  if (!cron && !at) {
+    console.error('Must specify --cron or --at')
+    process.exit(1)
+  }
+
+  try {
+    const res = await fetch(`${INFRA_URL}/triggers`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...(id && { id }),
+        ...(cron && { cron }),
+        ...(at && { at }),
+        agent,
+        prompt,
+        createdBy: 'cli',
+      }),
+    })
+    if (!res.ok) {
+      const err = (await res.json()) as { error: string }
+      console.error(`Error: ${err.error}`)
+      process.exit(1)
+    }
+    const trigger = (await res.json()) as { id: string; cron?: string; at?: string }
+    console.log(`${GREEN}Trigger "${trigger.id}" created.${RESET}`)
+    if (trigger.cron) console.log(`  Schedule: ${trigger.cron}`)
+    if (trigger.at) console.log(`  Fires at: ${trigger.at}`)
+    console.log(`  Agent:    ${agent}`)
+  } catch {
+    console.error('Could not connect to Jean infrastructure.')
+    process.exit(1)
+  }
+}
+
+async function cmdTriggerList() {
+  try {
+    const res = await fetch(`${INFRA_URL}/triggers`)
+    const { triggers } = (await res.json()) as {
+      triggers: Array<{
+        id: string; cron?: string; at?: string; agent: string
+        prompt: string; status: string; createdBy: string; lastFiredAt?: string
+      }>
+    }
+
+    if (triggers.length === 0) {
+      console.log('No triggers configured.')
+      return
+    }
+
+    console.log()
+    for (const t of triggers) {
+      const schedule = t.cron ? `cron: ${t.cron}` : `at: ${t.at}`
+      const statusColor = t.status === 'active' ? GREEN : DIM
+      const lastFired = t.lastFiredAt
+        ? ` ${DIM}(last: ${t.lastFiredAt.slice(0, 19)})${RESET}`
+        : ''
+      console.log(`  ${BOLD}${t.id}${RESET} ${statusColor}${t.status}${RESET} ${DIM}${schedule}${RESET}${lastFired}`)
+      console.log(`    → ${t.agent}: "${t.prompt}"`)
+    }
+    console.log()
+  } catch {
+    console.error('Could not connect to Jean infrastructure.')
+    process.exit(1)
+  }
+}
+
+async function cmdTriggerRemove(id?: string) {
+  if (!id) {
+    console.error('Usage: jean trigger remove <id>')
+    process.exit(1)
+  }
+
+  try {
+    const res = await fetch(`${INFRA_URL}/triggers/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const err = (await res.json()) as { error: string }
+      console.error(`Error: ${err.error}`)
+      process.exit(1)
+    }
+    console.log(`Trigger "${id}" removed.`)
+  } catch {
+    console.error('Could not connect to Jean infrastructure.')
+    process.exit(1)
+  }
 }
 
 // ── Agent subcommands ─────────────────────────────────────────────
@@ -677,6 +794,15 @@ Commands:
   jean send <agent> <msg>                     Send a message to an agent
   jean status                                 Infrastructure status
   jean permissions [agent]                    Show permission requests by agent
+
+  jean trigger add [options]                  Create a scheduled trigger
+    --cron "expr"     Cron schedule (recurring)
+    --at "datetime"   ISO datetime (one-off)
+    --agent <name>    Target agent
+    --prompt "text"   Message to deliver
+    --id <id>         Optional trigger ID
+  jean trigger list                           List triggers
+  jean trigger remove <id>                    Remove a trigger
 
   jean agent add <name> [options]             Create a new agent
     --role <role>     Agent role (default: worker)
