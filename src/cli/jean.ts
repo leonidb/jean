@@ -417,7 +417,11 @@ async function cmdTaskLog(id?: string) {
         detail = parts.join(', ')
       } else if (e.type === 'send' || e.type === 'reply' || e.type === 'human-interaction') {
         const text = e.data.text ?? ''
-        detail = text.length > 120 ? text.slice(0, 117) + '...' : text
+        // Show first 3 lines, truncate each at 120 chars
+        const lines = text.split('\n').filter((l: string) => l.trim()).slice(0, 3)
+        const truncated = lines.map((l: string) => l.length > 120 ? l.slice(0, 117) + '...' : l)
+        if (text.split('\n').filter((l: string) => l.trim()).length > 3) truncated.push('...')
+        detail = truncated.join('\n')
       } else if (e.type === 'permission-request') {
         detail = `${e.data.tool ?? '?'}`
       }
