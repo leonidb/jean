@@ -229,8 +229,9 @@ async function cmdTrigger(args: string[]) {
     case 'add':    await cmdTriggerAdd(args.slice(1)); break
     case 'list':   await cmdTriggerList(); break
     case 'remove': await cmdTriggerRemove(args[1]); break
+    case 'fire':   await cmdTriggerFire(args[1]); break
     default:
-      console.error('Usage: jean trigger <add|list|remove>')
+      console.error('Usage: jean trigger <add|list|remove|fire>')
       process.exit(1)
   }
 }
@@ -326,6 +327,26 @@ async function cmdTriggerRemove(id?: string) {
       process.exit(1)
     }
     console.log(`Trigger "${id}" removed.`)
+  } catch {
+    console.error('Could not connect to Jean infrastructure.')
+    process.exit(1)
+  }
+}
+
+async function cmdTriggerFire(id?: string) {
+  if (!id) {
+    console.error('Usage: jean trigger fire <id>')
+    process.exit(1)
+  }
+
+  try {
+    const res = await fetch(`${INFRA_URL}/triggers/${encodeURIComponent(id)}/fire`, { method: 'POST' })
+    if (!res.ok) {
+      const err = (await res.json()) as { error: string }
+      console.error(`Error: ${err.error}`)
+      process.exit(1)
+    }
+    console.log(`Trigger "${id}" fired.`)
   } catch {
     console.error('Could not connect to Jean infrastructure.')
     process.exit(1)
@@ -802,6 +823,7 @@ Commands:
     --prompt "text"   Message to deliver
     --id <id>         Optional trigger ID
   jean trigger list                           List triggers
+  jean trigger fire <id>                      Fire a trigger now
   jean trigger remove <id>                    Remove a trigger
 
   jean agent add <name> [options]             Create a new agent

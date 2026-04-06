@@ -666,6 +666,16 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       })()
     }
 
+    const triggerFireMatch = path.match(/^\/triggers\/([^/]+)\/fire$/)
+    if (triggerFireMatch && req.method === 'POST') {
+      return (async () => {
+        const trigger = triggerProjection.state.triggers.find(t => t.id === triggerFireMatch[1])
+        if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
+        await fireTrigger(trigger)
+        return Response.json({ ok: true, triggerId: trigger.id })
+      })()
+    }
+
     // ── Event endpoints ─────────────────────────────────────────
 
     if (path === '/events' && req.method === 'GET') {
