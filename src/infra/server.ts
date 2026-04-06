@@ -163,6 +163,7 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
   boardProjection.apply(event)
   pendingProjection.apply(event)
   triggerProjection.apply(event)
+  if (stream === TRIGGERS_STREAM) syncTriggerJobs()
 
   const taskId = taskIdFromStream(stream)
   const agent = (data as Record<string, unknown>)?.agent as string | undefined
@@ -235,39 +236,46 @@ function nudgeSenseiIfIdle(force = false) {
 
 // ── Trigger scheduler ───────────────────────────────────────────
 
-async function checkTriggers() {
-  const now = new Date()
-  const activeTriggers = triggerProjection.state.triggers.filter(t => t.status === 'active')
+const cronJobs = new Map<string, Cron>()
 
-  for (const trigger of activeTriggers) {
-    let shouldFire = false
+function startTriggerJob(trigger: Trigger) {
+  if (cronJobs.has(trigger.id)) return
+  const callback = () => { void fireTrigger(trigger) }
+  const job = trigger.cron
+    ? new Cron(trigger.cron, { catch: true }, callback)
+    : new Cron(new Date(trigger.at!), { catch: true }, callback)
+  cronJobs.set(trigger.id, job)
+  process.stderr.write(`[jean] trigger ${trigger.id} scheduled${trigger.cron ? ` (${trigger.cron})` : ` (at ${trigger.at})`}\n`)
+}
 
-    if (trigger.cron) {
-      try {
-        const job = new Cron(trigger.cron)
-        const prev = job.previousRun(now)
-        if (prev) {
-          const prevMs = prev.getTime()
-          const lastFired = trigger.lastFiredAt ? new Date(trigger.lastFiredAt).getTime() : 0
-          if (now.getTime() - prevMs < 60_000 && lastFired < prevMs) {
-            shouldFire = true
-          }
-        }
-      } catch {
-        process.stderr.write(`[jean] invalid cron for trigger ${trigger.id}: ${trigger.cron}\n`)
-      }
+function stopTriggerJob(id: string) {
+  const job = cronJobs.get(id)
+  if (job) {
+    job.stop()
+    cronJobs.delete(id)
+  }
+}
+
+function syncTriggerJobs() {
+  const active = new Set<string>()
+  for (const trigger of triggerProjection.state.triggers) {
+    if (trigger.status !== 'active') continue
+    active.add(trigger.id)
+
+    if (cronJobs.has(trigger.id)) continue
+
+    // One-off trigger whose time has passed — fire immediately
+    if (trigger.at && new Date(trigger.at).getTime() <= Date.now()) {
+      void fireTrigger(trigger)
+      continue
     }
 
-    if (trigger.at) {
-      const atTime = new Date(trigger.at).getTime()
-      if (atTime <= now.getTime()) {
-        shouldFire = true
-      }
-    }
+    startTriggerJob(trigger)
+  }
 
-    if (shouldFire) {
-      await fireTrigger(trigger)
-    }
+  // Stop jobs for triggers no longer active
+  for (const id of cronJobs.keys()) {
+    if (!active.has(id)) stopTriggerJob(id)
   }
 }
 
@@ -299,8 +307,6 @@ async function fireTrigger(trigger: Trigger) {
 
   process.stderr.write(`[jean] trigger ${trigger.id} fired → ${trigger.agent}\n`)
 }
-
-setInterval(checkTriggers, 60_000)
 
 // ── Slack integration (optional) ─────────────────────────────────
 
@@ -887,5 +893,5 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 void record('start', SYSTEM_STREAM, { port: PORT } satisfies StartData)
 await initSlack()
 
-// Check triggers on startup (catch any missed while server was down)
-setTimeout(checkTriggers, 1000)
+// Start scheduled trigger jobs from projection state
+syncTriggerJobs()
