@@ -98,11 +98,13 @@ The agent is just Claude with skills. It doesn't have special outbound tools or 
 
 ### Task
 A unit of work. Has a title, description, queue, optional agent assignment.
-States: `inbox → active → blocked | review → done | cancelled`.
-Task descriptions contain the work itself — not agent environment details. The sensei routes tasks by matching agent tags to task requirements.
+States: `todo → assigned → in-progress ↔ waiting → done`. Simple tasks can go directly `in-progress → done`. The `waiting` state covers tasks paused for external input (human feedback, PR review cycles, dependency on another task). Task descriptions contain the work itself — not agent environment details. The sensei routes tasks by matching agent tags to task requirements.
+
+### Playbook
+A flow definition that tells sensei how to handle a specific type of work. Not routing (tags handle that), but process: what to do at each lifecycle stage, what to verify, when to ask the human, when to close. Lives in `.jean/playbooks/` as markdown files. Examples: `review.md` (tracks PR lifecycle), `dev.md` (tracks dev work lifecycle). Playbooks are customizable per project/user — Jean is a framework, the actual flows are project-specific.
 
 ### Event
-All state changes are events, stored in an append-only JSONL log. Event types: `task-created`, `task-status`, `task-updated`, `reply`, `send`, `agent-idle`, `register`, `ack`, `nudge`, `start`. Each event has an ID, stream, type, timestamp, and data payload.
+All state changes are events, stored in an append-only JSONL log. Event types: `task-created`, `task-status`, `task-updated`, `reply`, `send`, `agent-idle`, `register`, `ack`, `nudge`, `start`, `trigger-created`, `trigger-fired`, `trigger-removed`, `permission-request`. Future: `human-interaction` (agent summaries of direct human interaction), `task-feedback` (quality signals). Each event has an ID, stream, type, timestamp, and data payload.
 
 ### Board
 A projection derived from the event stream. Task state is computed by applying board-related events in order (task-created, task-status, task-updated). Snapshots are taken periodically for fast startup. The board is not a file you edit — it's computed state.

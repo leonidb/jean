@@ -26,6 +26,8 @@ export type ProjectionOpts<S> = {
   filter?: Pick<ReadOpts, 'stream' | 'types'>
   snapshots?: SnapshotBackend<S>
   snapshotEvery?: number
+  /** Optional migration for snapshot state (e.g. legacy field renames). */
+  migrate?: (state: S) => S
 }
 
 export function createProjection<S>(opts: ProjectionOpts<S>): Projection<S> {
@@ -48,7 +50,7 @@ export function createProjection<S>(opts: ProjectionOpts<S>): Projection<S> {
       if (opts.snapshots && version === 0) {
         const snap = await opts.snapshots.load(opts.name)
         if (snap) {
-          state = snap.state
+          state = opts.migrate ? opts.migrate(snap.state) : snap.state
           version = snap.lastEventId
         }
       }

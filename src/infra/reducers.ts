@@ -7,6 +7,7 @@
 
 import type { Reducer, StoredEvent } from '../es/index.ts'
 import type { Board, Task, TaskStatus } from './board.ts'
+import { migrateStatus } from './board.ts'
 import type { AgentRole } from './protocol.ts'
 
 // ── Event data shapes ────────────────────────────────────────────
@@ -134,7 +135,7 @@ export const boardReducer: Reducer<Board> = (state, event) => {
         id: taskId,
         title: d.title,
         description: d.description,
-        status: 'inbox',
+        status: 'todo',
         queue: d.queue,
         playbook: d.playbook,
         createdAt: event.ts,
@@ -147,12 +148,13 @@ export const boardReducer: Reducer<Board> = (state, event) => {
       const d = event.data as TaskStatusData
       const taskId = taskIdFromStream(event.stream)
       if (!taskId) return state
+      const to = migrateStatus(d.to)
       return {
         tasks: state.tasks.map(t => {
           if (t.id !== taskId) return t
-          const updated = { ...t, status: d.to, updatedAt: event.ts }
-          // When activating a task, ensure agent is set (default to queue)
-          if (d.to === 'active' && !updated.agent) updated.agent = t.queue
+          const updated = { ...t, status: to, updatedAt: event.ts }
+          // When starting a task, ensure agent is set (default to queue)
+          if (to === 'in-progress' && !updated.agent) updated.agent = t.queue
           return updated
         }),
       }
@@ -179,6 +181,20 @@ export const boardReducer: Reducer<Board> = (state, event) => {
     default:
       return state
   }
+}
+
+/** Migrate board snapshot with legacy status names to current names. */
+export function migrateBoard(board: Board): Board {
+  let changed = false
+  const tasks = board.tasks.map(t => {
+    const migrated = migrateStatus(t.status)
+    if (migrated !== t.status) {
+      changed = true
+      return { ...t, status: migrated }
+    }
+    return t
+  })
+  return changed ? { tasks } : board
 }
 
 // ── Pending reducer ──────────────────────────────────────────────

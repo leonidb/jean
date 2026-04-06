@@ -82,7 +82,7 @@ describe('full lifecycle', () => {
     })
     expect(createRes.status).toBe(201)
     const task = (await createRes.json()) as { id: string; status: string }
-    expect(task.status).toBe('inbox')
+    expect(task.status).toBe('todo')
 
     // 3. Verify task-created event is queued
     await Bun.sleep(100)
@@ -102,19 +102,24 @@ describe('full lifecycle', () => {
     expect(nudge).toBeDefined()
     expect(nudge!.text).toContain('Events pending')
 
-    // 5. Assign task to worker and mark active
+    // 5. Assign task to worker: todo → assigned → in-progress
     await fetch(`${BASE}/tasks/${task.id}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: 'flow-worker' }),
     })
+    await fetch(`${BASE}/tasks/${task.id}/status`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'assigned' }),
+    })
     const activateRes = await fetch(`${BASE}/tasks/${task.id}/status`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ status: 'active' }),
+      body: JSON.stringify({ status: 'in-progress' }),
     })
     const activeTask = (await activateRes.json()) as { status: string; agent: string }
-    expect(activeTask.status).toBe('active')
+    expect(activeTask.status).toBe('in-progress')
     expect(activeTask.agent).toBe('flow-worker')
 
     // 6. Send task to worker via /send → worker receives it
@@ -159,13 +164,13 @@ describe('full lifecycle', () => {
     const newNudge = senseiMsgs.slice(senseiMsgsBefore).find(m => m.type === 'deliver' && m.from === 'infra')
     expect(newNudge).toBeDefined()
 
-    // 11. Mark task done
-    const doneRes = await fetch(`${BASE}/tasks/${task.id}/status`, {
+    // 11. Mark task waiting then done
+    const waitRes = await fetch(`${BASE}/tasks/${task.id}/status`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ status: 'review' }),
+      body: JSON.stringify({ status: 'waiting' }),
     })
-    expect((await doneRes.json() as { status: string }).status).toBe('review')
+    expect((await waitRes.json() as { status: string }).status).toBe('waiting')
     const finalRes = await fetch(`${BASE}/tasks/${task.id}/status`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
@@ -227,7 +232,7 @@ describe('history', () => {
     })
     const task = (await createRes.json()) as { id: string }
 
-    // Assign and activate
+    // Assign and start
     await fetch(`${BASE}/tasks/${task.id}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
@@ -236,7 +241,12 @@ describe('history', () => {
     await fetch(`${BASE}/tasks/${task.id}/status`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ status: 'active' }),
+      body: JSON.stringify({ status: 'assigned' }),
+    })
+    await fetch(`${BASE}/tasks/${task.id}/status`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'in-progress' }),
     })
 
     // Worker replies — taskId should be inferred

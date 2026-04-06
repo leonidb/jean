@@ -21,7 +21,7 @@ import {
 import { canTransition, type Board, type TaskStatus } from './board.ts'
 import { Cron } from 'croner'
 import {
-  boardReducer, pendingReducer, triggerReducer,
+  boardReducer, migrateBoard, pendingReducer, triggerReducer,
   taskStream, agentStream, SYSTEM_STREAM, TRIGGERS_STREAM, taskIdFromStream, agentFromEvent,
   toApiEvent,
   type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
@@ -58,6 +58,7 @@ const boardProjection = createProjection<Board>({
   filter: { types: ['task-created', 'task-status', 'task-updated'] },
   snapshots: fileSnapshotBackend(dirname(BOARD_PATH)),
   snapshotEvery: 50,
+  migrate: migrateBoard,
 })
 
 const pendingProjection = createProjection<PendingState>({
@@ -183,7 +184,7 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
 function inferTaskId(agentName?: string): string | undefined {
   if (!agentName) return undefined
   const task = boardProjection.state.tasks.find(
-    t => (t.agent === agentName || t.queue === agentName) && (t.status === 'active' || t.status === 'blocked'),
+    t => (t.agent === agentName || t.queue === agentName) && (t.status === 'in-progress' || t.status === 'waiting'),
   )
   if (task) return task.id
   return lastTaskContext.state.get(agentName)
@@ -843,7 +844,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             ws.data.agent = msg.agent
             ws.data.role = msg.role
             const hasActiveTask = boardProjection.state.tasks.some(
-              t => t.agent === msg.agent && (t.status === 'active' || t.status === 'blocked'),
+              t => t.agent === msg.agent && (t.status === 'in-progress' || t.status === 'waiting'),
             )
             const idle = !hasActiveTask
             const sessionId = msg.sessionId
@@ -871,7 +872,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
                 nudgeSenseiIfIdle()
               } else {
                 const hasWork = boardProjection.state.tasks.some(
-                  t => t.status === 'inbox' || t.status === 'active' || t.status === 'blocked',
+                  t => t.status === 'todo' || t.status === 'assigned' || t.status === 'in-progress' || t.status === 'waiting',
                 )
                 if (hasWork) nudgeSenseiIfIdle(true)
               }

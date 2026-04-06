@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test'
 import type { StoredEvent } from '../es/index.ts'
 import {
-  boardReducer, pendingReducer, triggerReducer, toApiEvent,
+  boardReducer, migrateBoard, pendingReducer, triggerReducer, toApiEvent,
   taskStream, agentStream, SYSTEM_STREAM, TRIGGERS_STREAM,
   type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
   type AckData, type AgentIdleData,
@@ -27,7 +27,7 @@ describe('boardReducer', () => {
     expect(board.tasks.length).toBe(1)
     expect(board.tasks[0]!.id).toBe('001')
     expect(board.tasks[0]!.title).toBe('Fix bug')
-    expect(board.tasks[0]!.status).toBe('inbox')
+    expect(board.tasks[0]!.status).toBe('todo')
     expect(board.tasks[0]!.queue).toBe('scratch')
   })
 
@@ -36,10 +36,10 @@ describe('boardReducer', () => {
       title: 'T', description: '', queue: 'q',
     } satisfies TaskCreatedData)
     const e2 = makeEvent(2, 'task-status', taskStream('001'), {
-      from: 'inbox', to: 'active',
+      from: 'todo', to: 'in-progress',
     } satisfies TaskStatusData)
     const board = boardReducer(boardReducer(empty, e1), e2)
-    expect(board.tasks[0]!.status).toBe('active')
+    expect(board.tasks[0]!.status).toBe('in-progress')
   })
 
   test('task-updated updates fields', () => {
@@ -52,6 +52,17 @@ describe('boardReducer', () => {
     const board = boardReducer(boardReducer(empty, e1), e2)
     expect(board.tasks[0]!.agent).toBe('scratch')
     expect(board.tasks[0]!.description).toBe('Updated desc')
+  })
+
+  test('migrates legacy status names in task-status events', () => {
+    const e1 = makeEvent(1, 'task-created', taskStream('001'), {
+      title: 'T', description: '', queue: 'q',
+    } satisfies TaskCreatedData)
+    const e2 = makeEvent(2, 'task-status', taskStream('001'), {
+      from: 'inbox', to: 'active',
+    } satisfies TaskStatusData)
+    const board = boardReducer(boardReducer(empty, e1), e2)
+    expect(board.tasks[0]!.status).toBe('in-progress')
   })
 
   test('ignores unrelated events', () => {
@@ -69,11 +80,39 @@ describe('boardReducer', () => {
       title: 'B', description: '', queue: 'q',
     } satisfies TaskCreatedData))
     board = boardReducer(board, makeEvent(3, 'task-status', taskStream('001'), {
-      from: 'inbox', to: 'active',
+      from: 'todo', to: 'in-progress',
     } satisfies TaskStatusData))
     expect(board.tasks.length).toBe(2)
-    expect(board.tasks[0]!.status).toBe('active')
-    expect(board.tasks[1]!.status).toBe('inbox')
+    expect(board.tasks[0]!.status).toBe('in-progress')
+    expect(board.tasks[1]!.status).toBe('todo')
+  })
+})
+
+// ── Board migration ─────────────────────────────────────────────
+
+describe('migrateBoard', () => {
+  test('migrates legacy statuses in snapshot', () => {
+    const board: Board = {
+      tasks: [
+        { id: '001', title: 'A', description: '', status: 'inbox' as any, queue: 'q', createdAt: '', updatedAt: '' },
+        { id: '002', title: 'B', description: '', status: 'active' as any, queue: 'q', createdAt: '', updatedAt: '' },
+        { id: '003', title: 'C', description: '', status: 'done', queue: 'q', createdAt: '', updatedAt: '' },
+      ],
+    }
+    const migrated = migrateBoard(board)
+    expect(migrated.tasks[0]!.status).toBe('todo')
+    expect(migrated.tasks[1]!.status).toBe('in-progress')
+    expect(migrated.tasks[2]!.status).toBe('done')
+  })
+
+  test('returns same object if no migration needed', () => {
+    const board: Board = {
+      tasks: [
+        { id: '001', title: 'A', description: '', status: 'todo', queue: 'q', createdAt: '', updatedAt: '' },
+      ],
+    }
+    const migrated = migrateBoard(board)
+    expect(migrated).toBe(board)
   })
 })
 

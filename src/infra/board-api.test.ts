@@ -26,7 +26,7 @@ afterAll(() => { server.kill() })
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 
 describe('board CRUD', () => {
-  test('POST /tasks creates a task with inbox status', async () => {
+  test('POST /tasks creates a task with todo status', async () => {
     const res = await fetch(`${BASE}/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -35,7 +35,7 @@ describe('board CRUD', () => {
     expect(res.status).toBe(201)
     const task = (await res.json()) as { id: string; status: string; title: string; queue: string; createdAt: string }
     expect(task.id).toBeDefined()
-    expect(task.status).toBe('inbox')
+    expect(task.status).toBe('todo')
     expect(task.title).toBe('Fix bug')
     expect(task.queue).toBe('scratch')
     expect(task.createdAt).toBeDefined()
@@ -69,7 +69,7 @@ describe('board CRUD', () => {
     const res = await fetch(`${BASE}/tasks?status=inbox`)
     const data = (await res.json()) as { tasks: Array<{ status: string }> }
     for (const t of data.tasks) {
-      expect(t.status).toBe('inbox')
+      expect(t.status).toBe('todo')
     }
   })
 
@@ -112,11 +112,11 @@ describe('board CRUD', () => {
     const res = await fetch(`${BASE}/tasks/${created.id}/status`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ status: 'active' }),
+      body: JSON.stringify({ status: 'assigned' }),
     })
     expect(res.status).toBe(200)
     const updated = (await res.json()) as { status: string; updatedAt: string }
-    expect(updated.status).toBe('active')
+    expect(updated.status).toBe('assigned')
   })
 
   test('PATCH /tasks/:id/status invalid transition returns 400', async () => {
@@ -165,7 +165,7 @@ describe('board CRUD', () => {
     const res = await fetch(`${BASE}/tasks/${created.id}/status`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ status: 'active' }),
+      body: JSON.stringify({ status: 'assigned' }),
     })
     const updated = (await res.json()) as { updatedAt: string }
     expect(updated.updatedAt).not.toBe(created.updatedAt)

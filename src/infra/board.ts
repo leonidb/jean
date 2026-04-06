@@ -8,10 +8,10 @@
 // ── Types ──────────────────────────────────────────────────────────
 
 export type TaskStatus =
-  | 'inbox'
-  | 'active'
-  | 'blocked'
-  | 'review'
+  | 'todo'
+  | 'assigned'
+  | 'in-progress'
+  | 'waiting'
   | 'done'
   | 'cancelled'
 
@@ -34,12 +34,23 @@ export type Board = {
 // ── Valid transitions ──────────────────────────────────────────────
 
 const transitions: Record<TaskStatus, TaskStatus[]> = {
-  inbox:     ['active', 'cancelled'],
-  active:    ['blocked', 'review', 'done', 'cancelled'],
-  blocked:   ['active', 'cancelled'],
-  review:    ['done', 'active', 'cancelled'],
-  done:      [],
-  cancelled: [],
+  todo:            ['assigned', 'in-progress', 'cancelled'],
+  assigned:        ['in-progress', 'cancelled'],
+  'in-progress':   ['waiting', 'done', 'cancelled'],
+  waiting:         ['in-progress', 'done', 'cancelled'],
+  done:            [],
+  cancelled:       [],
+}
+
+/** Map legacy state names from old snapshots/events to current names. */
+export function migrateStatus(status: string): TaskStatus {
+  const legacy: Record<string, TaskStatus> = {
+    inbox: 'todo',
+    active: 'in-progress',
+    blocked: 'waiting',
+    review: 'waiting',
+  }
+  return legacy[status] ?? status as TaskStatus
 }
 
 export function canTransition(from: TaskStatus, to: TaskStatus): boolean {

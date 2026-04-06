@@ -24,44 +24,87 @@
 
 ---
 
-## Milestone 3: Triggers & Proactive Workflows
+## Milestone 3: Triggers & Proactive Workflows ✓
 
 **Goal**: Sensei acts on its own — checking PRs, nudging the human, running scheduled flows.
 
-### To build
-1. **Periodic triggers in infra** — cron-like scheduler. Config: time + agent + prompt. Stored in `.jean/triggers.json`, managed via `jean trigger add/list/remove`.
-2. **PR review workflow** — trigger prompt that tells sensei to check PRs, route reviews to the review agent, and send consolidated summaries to Slack.
-3. **Read-only permission profiles** — granular `gh`/`git` permissions (view, diff, list — no merge, push, create). Already started for review agent.
+**Completed** (Apr 4–6). Event-sourced triggers with cron and one-off scheduling. Croner-based scheduler syncs from trigger projection. Full CRUD API + fire-on-demand. CLI commands: `jean trigger add/list/remove/fire`. PR review workflow operational: daily trigger fires → sensei checks PRs → review agent reviews → results sent to Slack. Morning brief trigger running daily.
 
-### Deliverable
-Daily trigger fires → sensei checks PRs → review agent summarizes each → sensei sends consolidated Slack message. Human wakes up to actionable PR summaries.
+### What was built
+1. ✓ **Event-sourced triggers** — `trigger-created`, `trigger-updated`, `trigger-removed`, `trigger-fired` events on a `triggers` stream. State derived via projection.
+2. ✓ **Croner-based scheduler** — long-lived `Cron` instances managed in a `Map`, synced from projection. Handles cron and one-off triggers. Startup catch-up fires missed one-off triggers.
+3. ✓ **Trigger API + CLI** — CRUD endpoints, fire-on-demand (`POST /triggers/:id/fire`), CLI for all operations.
+4. ✓ **PR review workflow** — `review-pending-prs` cron trigger at 9:00 weekdays. Morning brief at 9:30.
+5. ✗ **Permission profiles** — deferred, moved to M3.5 (now urgent based on operational feedback).
 
 ---
 
-## Milestone 4: Living Context
+## Milestone 3.5: Task Lifecycle & Agent Autonomy
 
-**Goal**: The dojo's context auto-maintains itself — agents capture observations, the system consolidates them into structured knowledge.
+**Goal**: Tasks have meaningful lifecycles. Agents don't block on permissions for routine operations.
 
-Inspired by [Karpathy's LLM knowledge bases](https://x.com/karpathy/status/2039805659525644595): raw sources compiled into a wiki of `.md` files, auto-maintained by the LLM. No RAG, no graph database — just markdown and an agent that keeps it coherent.
+### To build
+1. **Task states** — add `waiting` state: `todo → assigned → in-progress ↔ waiting → done`. Tasks can still go `in-progress → done` for simple work. The key: tasks don't have to close after one exchange.
+2. **Task event log CLI** — `jean task <id> log` showing full event history for a task. Endpoint exists (`/history?taskId=X`), needs CLI formatting.
+3. **Permission profiles** — pre-configured per role via `jean agent add`. Workers get `Bash(git:*)`, `Edit`, `Write`, `Read`. Review gets `Bash(gh:*)`. Sensei gets `Bash(curl:*)`, `Bash(gh api:*)`. Eliminates the 76-permission-request problem.
+
+### Deliverable
+Tasks stay open through multi-round work. Agents operate without permission friction for routine operations. Human can see full task conversation history via CLI.
+
+---
+
+## Milestone 4: Playbooks & Interaction Logging
+
+**Goal**: Sensei follows defined processes for different work types. Human-agent interactions are visible in the event log.
 
 ### Design
-- `.jean/context/raw/` — agents write observations here during work (findings, decisions, patterns noticed)
-- Consolidation: sensei (or a dedicated agent) periodically reads `raw/`, distills into structured context files (`research/`, `open-threads.md`, etc.), clears processed raw notes
-- Index maintenance: auto-generated summaries and cross-references across context files
-- Agents reference context for decisions; their work produces new raw observations — a feedback loop
+
+**Playbooks** — flow definitions that tell sensei how to handle a type of work. Not routing (tags handle that), but process: what to do at each stage, what to verify, when to ask the human, when to close.
+
+Live in `.jean/playbooks/`. Each playbook is a markdown file describing the flow. Sensei loads them at startup. Examples:
+- `review.md` — review task follows PR lifecycle. Design review first, then iterative rounds. Wait for assigned reviewer unless asked for preliminary review. Track PR comments. Task closes when PR is merged/approved/explicitly closed by human.
+- `dev.md` — dev task follows work lifecycle. May involve multiple repos. Lifecycle customizable (until PR merged, or until human says done). Human often works directly with agent.
+- `research.md` — scout/investigate tasks. Single-shot or recurring via triggers. Quality assessed by human feedback.
+
+**Interaction logging** — when an agent has a direct interaction with the human (outside the task system), the agent posts a summary to the task. Sensei mentions this expectation during task handoff. These summaries are events with a dedicated type (`human-interaction`), searchable and usable for self-reflection.
 
 ### To build
-1. **Raw capture convention** — how agents write to `raw/` (format, naming, via reply tool or direct file write)
-2. **Consolidation flow** — trigger or manual prompt that processes `raw/` into structured context
-3. **Index/summary generation** — auto-maintained overview of what's in context
-4. **Agent instructions** — update skills to tell agents to capture observations in `raw/`
+1. **Playbook format** — markdown with structured sections: lifecycle states, sensei behavior at each transition, verification requirements, tracking expectations
+2. **Playbook loading** — sensei reads `.jean/playbooks/` on startup, references playbook when dispatching tasks
+3. **Sensei handoff instructions** — when dispatching a task, sensei includes playbook-derived instructions (e.g. "log any direct interactions with the human")
+4. **Interaction summary events** — `human-interaction` event type. Agent posts summary when it detects multi-turn direct interaction ended
+5. **Idle pattern detection** — multiple rapid idle events from a worker suggest human is working with it. Sensei can use this signal to prompt the agent for a summary
 
 ### Deliverable
-Agents work → observations accumulate in `raw/` → consolidation distills into structured context → sensei reads better context → makes better decisions. Knowledge compounds over time without manual curation.
+Sensei follows consistent processes for reviews and dev work. Direct human-agent iterations are captured as events. Task history shows the full picture, not just the sensei-mediated exchanges.
 
 ---
 
-## Milestone 5: Human Interaction & Polish
+## Milestone 5: Quality Feedback & Living Context
+
+**Goal**: The dojo learns from its own work. Quality feedback drives self-improvement through shared context.
+
+Combines the original M4 (Living Context) with the quality feedback loop concept from the operational review.
+
+### Design
+- **Quality feedback events** — `task-feedback` event type. From human (explicit rating/comment) or sensei (assessment). Captures whether the outcome was good, what could improve.
+- **Context distillation** — periodic process reads quality feedback, human interaction summaries, and task outcomes. Distills into `.jean/context/` as structured learnings.
+- **Permission profile suggestions** — based on permission-request events, system suggests new allow rules for agents that repeatedly need the same permissions.
+- **Sensei assertiveness from day 1** — baked into skill/playbook defaults: verify deliverables, ask pointed questions, don't accept vague "done" signals.
+
+### To build
+1. **`task-feedback` event type** — API endpoint + CLI command (`jean task <id> feedback`)
+2. **Raw observation capture** — agents write findings to `.jean/context/raw/` during work
+3. **Consolidation flow** — trigger that processes raw observations + feedback into structured context
+4. **Permission suggestion CLI** — `jean permissions suggest` analyzes permission-request events and proposes updates
+5. **Sensei defaults** — update sensei skill with assertive verification behavior
+
+### Deliverable
+Work produces feedback → feedback feeds context → context improves future work. Permission friction decreases over time. Sensei verifies deliverables by default.
+
+---
+
+## Milestone 6: Human Interaction & Polish
 
 **Goal**: The human can interact with the system naturally.
 
@@ -77,7 +120,7 @@ Full manual-mode workflow: kick from working session → agent handles → get n
 
 ---
 
-## Milestone 6: Dojo Init & Distribution
+## Milestone 7: Dojo Init & Distribution
 
 **Goal**: Ready for other people to use.
 
@@ -92,10 +135,10 @@ Full manual-mode workflow: kick from working session → agent handles → get n
 ## Future (not scoped)
 
 - Auto mode: orchestrator starts agents when tasks arrive
-- SQLite event store backend (replace JSONL)
-- Knowledge base agent: dedicated agent for recording/retrieving findings across the dojo
+- SQLite event store backend (replace JSONL) — enables query layer for self-reflection
 - Monitoring/meta agent: observes events, proposes improvements to skills and configs
 - Idle/busy reconciliation: agent state should reflect actual activity, not just board state
 - Multiple agents per queue (concurrent worktrees)
 - Permission proxy: explore if sensei can approve permissions on behalf of human
 - `jean ui` opinionated layout preset
+- Programmatic context compaction for long-running agents

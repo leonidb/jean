@@ -48,6 +48,8 @@ Alternatives considered:
 
 Why tags won: Simple, declarative, flexible. Agent says "I can do code-review and investigation." Sensei matches tasks to capabilities. No parser, no extraction step, no template language.
 
+**Update (Apr 7)**: Playbooks return, but for a different purpose. Tags still handle routing. Playbooks now define *flow logic* — how sensei manages the lifecycle of a review task vs dev task vs research task. Not "which agent handles this?" but "what does sensei do at each stage?" Lives in `.jean/playbooks/` as markdown files. See roadmap M4.
+
 ## 5. State storage: Event sourcing (JSONL)
 
 **Chosen: Event sourcing with JSONL backend**

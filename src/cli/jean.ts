@@ -16,6 +16,7 @@
  *   jean agent list                             List agents
  *   jean agent tag <name> [tags..] [--remove]   View or manage tags
  *   jean agent remove <name> [--force] [--keep] Remove an agent
+ *   jean task log <id>                          Show task event history
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs'
@@ -54,6 +55,9 @@ switch (command) {
   case 'trigger':
     await cmdTrigger(args.slice(1))
     break
+  case 'task':
+    await cmdTask(args.slice(1))
+    break
   default:
     printUsage()
 }
@@ -76,7 +80,7 @@ async function cmdBoard() {
       ;(groups[status] ??= []).push(task)
     }
 
-    const statusOrder = ['inbox', 'active', 'blocked', 'review', 'done', 'cancelled']
+    const statusOrder = ['todo', 'assigned', 'in-progress', 'waiting', 'done', 'cancelled']
     for (const status of statusOrder) {
       const tasks = groups[status]
       if (!tasks?.length) continue
@@ -353,6 +357,99 @@ async function cmdTriggerFire(id?: string) {
   }
 }
 
+// ── Task subcommands ─────────────────────────────────────────────
+
+async function cmdTask(args: string[]) {
+  const sub = args[0]
+  switch (sub) {
+    case 'log': await cmdTaskLog(args[1]); break
+    default:
+      console.error('Usage: jean task <log> <id>')
+      process.exit(1)
+  }
+}
+
+async function cmdTaskLog(id?: string) {
+  if (!id) {
+    console.error('Usage: jean task log <id>')
+    process.exit(1)
+  }
+
+  // Pad to 3 digits if numeric
+  const taskId = /^\d+$/.test(id) ? id.padStart(3, '0') : id
+
+  try {
+    const res = await fetch(`${INFRA_URL}/history?taskId=${encodeURIComponent(taskId)}&diagnostics=true`)
+    const { events } = (await res.json()) as {
+      events: Array<{
+        id: number; type: string; ts: string; agent?: string
+        data: { text?: string; from?: string; to?: string; status?: string; [k: string]: unknown }
+      }>
+    }
+
+    if (events.length === 0) {
+      console.log(`No events for task ${taskId}.`)
+      return
+    }
+
+    // Filter to meaningful events
+    const meaningful = events.filter(e =>
+      ['task-created', 'task-status', 'task-updated', 'send', 'reply', 'human-interaction', 'permission-request'].includes(e.type),
+    )
+
+    console.log(`\n${BOLD}Task ${taskId}${RESET} — ${meaningful.length} events\n`)
+
+    for (const e of meaningful) {
+      const time = e.ts.slice(0, 16).replace('T', ' ')
+      const color = eventColor(e.type)
+      const label = e.type.padEnd(18)
+      const agent = e.agent ? ` ${DIM}${e.agent}${RESET}` : ''
+
+      let detail = ''
+      if (e.type === 'task-created') {
+        detail = e.data.title as string ?? ''
+      } else if (e.type === 'task-status') {
+        detail = `${e.data.from} → ${e.data.to}`
+      } else if (e.type === 'task-updated') {
+        const parts: string[] = []
+        if (e.data.agent) parts.push(`agent=${e.data.agent}`)
+        if (e.data.description) parts.push('description updated')
+        detail = parts.join(', ')
+      } else if (e.type === 'send' || e.type === 'reply' || e.type === 'human-interaction') {
+        const text = e.data.text ?? ''
+        detail = text.length > 120 ? text.slice(0, 117) + '...' : text
+      } else if (e.type === 'permission-request') {
+        detail = `${e.data.tool ?? '?'}`
+      }
+
+      console.log(`  ${DIM}${time}${RESET} ${color}${label}${RESET}${agent}`)
+      if (detail) {
+        // Indent multi-line detail
+        const lines = detail.split('\n').slice(0, 3)
+        for (const line of lines) {
+          console.log(`  ${DIM}  ${line}${RESET}`)
+        }
+      }
+    }
+    console.log()
+  } catch {
+    console.error('Could not connect to Jean infrastructure.')
+    process.exit(1)
+  }
+}
+
+function eventColor(type: string): string {
+  switch (type) {
+    case 'task-created':   return '\x1b[36m'  // cyan
+    case 'task-status':    return '\x1b[33m'  // yellow
+    case 'send':           return '\x1b[34m'  // blue
+    case 'reply':          return '\x1b[32m'  // green
+    case 'human-interaction': return '\x1b[35m' // magenta
+    case 'permission-request': return '\x1b[31m' // red
+    default:               return ''
+  }
+}
+
 // ── Agent subcommands ─────────────────────────────────────────────
 
 function cmdAgent(args: string[]) {
@@ -610,6 +707,27 @@ function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
   console.log(`  cd ${targetPath} && claude --dangerously-load-development-channels server:jean`)
 }
 
+function defaultPermissions(role: AgentRole): string[] {
+  const base = ['mcp__jean__reply']
+  if (role === 'sensei') {
+    return [
+      ...base,
+      'Bash(curl:*)',
+      'Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)',
+      'Bash(git status:*)',
+      'Bash(gh api:*)', 'Bash(gh pr view:*)', 'Bash(gh pr diff:*)', 'Bash(gh pr list:*)',
+      'Bash(gh issue list:*)', 'Bash(gh issue view:*)',
+    ]
+  }
+  // worker and user
+  return [
+    ...base,
+    'Read', 'Edit', 'Write',
+    'Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)',
+    'Bash(git status:*)', 'Bash(git branch:*)',
+  ]
+}
+
 function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: string[]) {
   writeAgentMeta(agentDir, { name, tags, role })
 
@@ -638,7 +756,7 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
     mkdirSync(settingsDir, { recursive: true })
     writeFileSync(settingsPath, JSON.stringify({
       permissions: {
-        allow: ['mcp__jean__reply'],
+        allow: defaultPermissions(role),
       },
       enabledMcpjsonServers: ['jean'],
       hooks: {
@@ -837,18 +955,20 @@ Commands:
   jean agent remove <name> [--force] [--keep] Remove an agent
   jean agent start <name>                     Start an agent
 
+  jean task log <id>                          Show task event history
+
 Environment:
   JEAN_INFRA_URL          Infrastructure URL (default: http://127.0.0.1:8700)`)
 }
 
 function statusColor(status: string): string {
   switch (status) {
-    case 'inbox':     return '\x1b[36m'  // cyan
-    case 'active':    return '\x1b[33m'  // yellow
-    case 'blocked':   return '\x1b[31m'  // red
-    case 'review':    return '\x1b[35m'  // magenta
-    case 'done':      return '\x1b[32m'  // green
-    case 'cancelled': return '\x1b[2m'   // dim
-    default:          return ''
+    case 'todo':        return '\x1b[36m'  // cyan
+    case 'assigned':    return '\x1b[34m'  // blue
+    case 'in-progress': return '\x1b[33m'  // yellow
+    case 'waiting':     return '\x1b[35m'  // magenta
+    case 'done':        return '\x1b[32m'  // green
+    case 'cancelled':   return '\x1b[2m'   // dim
+    default:            return ''
   }
 }
