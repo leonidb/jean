@@ -490,6 +490,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           description: body.description ?? '',
           queue: body.queue,
           playbook: body.playbook,
+          actor: body.actor ?? 'api',
         } satisfies TaskCreatedData)
         const task = boardProjection.state.tasks.find(t => t.id === taskId)
         return Response.json(task, { status: 201 })
@@ -530,6 +531,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         await record('task-status', taskStream(task.id), {
           from: task.status,
           to: body.status,
+          actor: body.actor ?? 'api',
         } satisfies TaskStatusData)
         const updated = boardProjection.state.tasks.find(t => t.id === task.id)
         return Response.json(updated)
@@ -545,6 +547,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         await record('task-updated', taskStream(task.id), {
           ...(body.agent !== undefined && { agent: body.agent }),
           ...(body.description !== undefined && { description: body.description }),
+          actor: body.actor ?? 'api',
         } satisfies TaskUpdatedData)
         const updated = boardProjection.state.tasks.find(t => t.id === task.id)
         return Response.json(updated)
@@ -676,7 +679,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       return (async () => {
         const body = (await req.json()) as {
           id?: string; cron?: string; at?: string; agent: string
-          prompt: string; createdBy?: string; metadata?: Record<string, unknown>
+          prompt: string; actor?: string; metadata?: Record<string, unknown>
         }
         if (!body.agent || !body.prompt) {
           return Response.json({ error: 'missing agent or prompt' }, { status: 400 })
@@ -709,7 +712,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           at: body.at,
           agent: body.agent,
           prompt: body.prompt,
-          createdBy: body.createdBy ?? 'api',
+          actor: body.actor ?? 'api',
           metadata: body.metadata,
         } satisfies TriggerCreatedData)
 

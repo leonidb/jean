@@ -63,15 +63,18 @@ export type CreateTaskRequest = {
   description: string
   queue: string
   playbook?: string
+  actor?: string
 }
 
 export type UpdateTaskRequest = {
   agent?: string
   description?: string
+  actor?: string
 }
 
 export type UpdateStatusRequest = {
   status: string
+  actor?: string
 }
 
 // ── Union types ───────────────────────────────────────────────────

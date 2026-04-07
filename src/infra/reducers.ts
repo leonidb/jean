@@ -18,16 +18,19 @@ export type TaskCreatedData = {
   description: string
   queue: string
   playbook?: string
+  actor?: string
 }
 
 export type TaskStatusData = {
   from: TaskStatus
   to: TaskStatus
+  actor?: string
 }
 
 export type TaskUpdatedData = {
   agent?: string
   description?: string
+  actor?: string
 }
 
 export type ReplyData = {
@@ -78,7 +81,7 @@ export type TriggerCreatedData = {
   at?: string
   agent: string
   prompt: string
-  createdBy: string
+  actor: string
   metadata?: Record<string, unknown>
 }
 
@@ -258,7 +261,7 @@ export type Trigger = {
   agent: string
   prompt: string
   status: 'active' | 'fired' | 'disabled'
-  createdBy: string
+  actor: string
   createdAt: string
   lastFiredAt?: string
   metadata?: Record<string, unknown>
@@ -277,7 +280,8 @@ export const triggerReducer: Reducer<TriggerState> = (state, event) => {
         agent: d.agent,
         prompt: d.prompt,
         status: 'active',
-        createdBy: d.createdBy,
+        // TODO: remove createdBy fallback once legacy events are cleaned from all dojos
+        actor: d.actor ?? ((d as Record<string, unknown>).createdBy as string | undefined) ?? 'unknown',
         createdAt: event.ts,
         metadata: d.metadata,
       }

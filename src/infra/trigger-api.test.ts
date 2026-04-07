@@ -35,7 +35,7 @@ describe('trigger CRUD', () => {
   test('POST /triggers creates a cron trigger', async () => {
     const res = await fetch(`${BASE}/triggers`, {
       method: 'POST', headers: json,
-      body: JSON.stringify({ id: 'morning', cron: '0 8 * * 1-5', agent: 'sensei', prompt: 'Run brief', createdBy: 'cli' }),
+      body: JSON.stringify({ id: 'morning', cron: '0 8 * * 1-5', agent: 'sensei', prompt: 'Run brief', actor: 'cli' }),
     })
     expect(res.status).toBe(201)
     const trigger = (await res.json()) as { id: string; status: string; cron: string; createdAt: string }

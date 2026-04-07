@@ -259,7 +259,7 @@ async function cmdTriggerAdd(args: string[]) {
       ...(at && { at }),
       agent,
       prompt,
-      createdBy: 'cli',
+      actor: 'cli',
     }),
   })
   if (!res.ok) {
@@ -279,7 +279,7 @@ async function cmdTriggerList() {
   const { triggers } = (await res.json()) as {
     triggers: Array<{
       id: string; cron?: string; at?: string; agent: string
-      prompt: string; status: string; createdBy: string; lastFiredAt?: string
+      prompt: string; status: string; actor: string; lastFiredAt?: string
     }>
   }
 
@@ -379,13 +379,16 @@ async function cmdTaskLog(id?: string) {
 
     let detail = ''
     if (e.type === 'task-created') {
-      detail = e.data.title as string ?? ''
+      const actor = e.data.actor ? ` (by ${e.data.actor})` : ''
+      detail = (e.data.title as string ?? '') + actor
     } else if (e.type === 'task-status') {
-      detail = `${e.data.from} → ${e.data.to}`
+      const actor = e.data.actor ? ` by ${e.data.actor}` : ''
+      detail = `${e.data.from} → ${e.data.to}${actor}`
     } else if (e.type === 'task-updated') {
       const parts: string[] = []
       if (e.data.agent) parts.push(`agent=${e.data.agent}`)
       if (e.data.description) parts.push('description updated')
+      if (e.data.actor) parts.push(`by ${e.data.actor}`)
       detail = parts.join(', ')
     } else if (e.type === 'send' || e.type === 'reply' || e.type === 'human-interaction') {
       const text = e.data.text ?? ''

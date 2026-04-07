@@ -189,7 +189,7 @@ describe('triggerReducer', () => {
   test('trigger-created adds a trigger', () => {
     const e = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
       id: 'morning', cron: '0 8 * * 1-5', agent: 'sensei',
-      prompt: 'Run brief', createdBy: 'cli',
+      prompt: 'Run brief', actor: 'cli',
     } satisfies TriggerCreatedData)
     const state = triggerReducer(empty, e)
     expect(state.triggers.length).toBe(1)
@@ -202,7 +202,7 @@ describe('triggerReducer', () => {
   test('trigger-created with one-off at', () => {
     const e = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
       id: 'reminder', at: '2026-04-07T10:00:00Z', agent: 'sensei',
-      prompt: 'Check PR', createdBy: 'sensei',
+      prompt: 'Check PR', actor: 'sensei',
     } satisfies TriggerCreatedData)
     const state = triggerReducer(empty, e)
     expect(state.triggers[0]!.at).toBe('2026-04-07T10:00:00Z')
@@ -212,7 +212,7 @@ describe('triggerReducer', () => {
   test('trigger-updated updates fields', () => {
     const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
       id: 'morning', cron: '0 8 * * 1-5', agent: 'sensei',
-      prompt: 'Run brief', createdBy: 'cli',
+      prompt: 'Run brief', actor: 'cli',
     } satisfies TriggerCreatedData)
     const e2 = makeEvent(2, 'trigger-updated', TRIGGERS_STREAM, {
       id: 'morning', prompt: 'Run morning brief and post to Slack',
@@ -224,7 +224,7 @@ describe('triggerReducer', () => {
 
   test('trigger-updated can disable', () => {
     const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
-      id: 'x', cron: '* * * * *', agent: 'a', prompt: 'p', createdBy: 'cli',
+      id: 'x', cron: '* * * * *', agent: 'a', prompt: 'p', actor: 'cli',
     } satisfies TriggerCreatedData)
     const e2 = makeEvent(2, 'trigger-updated', TRIGGERS_STREAM, {
       id: 'x', status: 'disabled',
@@ -235,7 +235,7 @@ describe('triggerReducer', () => {
 
   test('trigger-removed deletes trigger', () => {
     const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
-      id: 'x', cron: '* * * * *', agent: 'a', prompt: 'p', createdBy: 'cli',
+      id: 'x', cron: '* * * * *', agent: 'a', prompt: 'p', actor: 'cli',
     } satisfies TriggerCreatedData)
     const e2 = makeEvent(2, 'trigger-removed', TRIGGERS_STREAM, {
       id: 'x',
@@ -247,7 +247,7 @@ describe('triggerReducer', () => {
   test('trigger-fired sets lastFiredAt on cron trigger, keeps active', () => {
     const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
       id: 'morning', cron: '0 8 * * 1-5', agent: 'sensei',
-      prompt: 'Run brief', createdBy: 'cli',
+      prompt: 'Run brief', actor: 'cli',
     } satisfies TriggerCreatedData)
     const e2 = makeEvent(2, 'trigger-fired', TRIGGERS_STREAM, {
       triggerId: 'morning', agent: 'sensei', prompt: 'Run brief',
@@ -260,7 +260,7 @@ describe('triggerReducer', () => {
   test('trigger-fired sets status to fired on one-off trigger', () => {
     const e1 = makeEvent(1, 'trigger-created', TRIGGERS_STREAM, {
       id: 'reminder', at: '2026-04-07T10:00:00Z', agent: 'sensei',
-      prompt: 'Check PR', createdBy: 'sensei',
+      prompt: 'Check PR', actor: 'sensei',
     } satisfies TriggerCreatedData)
     const e2 = makeEvent(2, 'trigger-fired', TRIGGERS_STREAM, {
       triggerId: 'reminder', agent: 'sensei', prompt: 'Check PR',
