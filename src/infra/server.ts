@@ -12,7 +12,8 @@
  * No LLM — fast, deterministic plumbing.
  */
 
-import { dirname } from 'path'
+import { dirname, resolve, basename } from 'path'
+import { watch, existsSync, mkdirSync, readdirSync } from 'node:fs'
 import type { ServerWebSocket } from 'bun'
 import {
   createStore, jsonlBackend, createProjection, fileSnapshotBackend,
@@ -21,14 +22,16 @@ import {
 import { canTransition, type Board, type TaskStatus } from './board.ts'
 import { Cron } from 'croner'
 import {
-  boardReducer, migrateBoard, pendingReducer, triggerReducer,
-  taskStream, agentStream, SYSTEM_STREAM, TRIGGERS_STREAM, taskIdFromStream, agentFromEvent,
+  boardReducer, migrateBoard, pendingReducer, triggerReducer, playbookReducer,
+  taskStream, agentStream, SYSTEM_STREAM, TRIGGERS_STREAM, PLAYBOOKS_STREAM, taskIdFromStream, agentFromEvent,
   toApiEvent,
   type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
   type SendData, type AgentIdleData, type RegisterData, type AckData,
   type ReplyData, type NudgeData, type StartData, type PermissionRequestData,
   type TriggerCreatedData, type TriggerUpdatedData, type TriggerRemovedData, type TriggerFiredData,
   type Trigger, type TriggerState,
+  type PlaybookCreatedData, type PlaybookUpdatedData, type PlaybookRemovedData,
+  type PlaybookState,
   type PendingState,
 } from './reducers.ts'
 import type {
@@ -66,7 +69,7 @@ const pendingProjection = createProjection<PendingState>({
   store,
   reducer: pendingReducer,
   initial: [],
-  filter: { types: ['reply', 'agent-idle', 'task-created', 'trigger-fired', 'ack'] },
+  filter: { types: ['reply', 'agent-idle', 'task-created', 'trigger-fired', 'playbook-created', 'playbook-updated', 'playbook-removed', 'ack'] },
 })
 
 const lastTaskContext = createProjection<Map<string, string>>({
@@ -98,10 +101,19 @@ const triggerProjection = createProjection<TriggerState>({
   snapshotEvery: 20,
 })
 
+const playbookProjection = createProjection<PlaybookState>({
+  name: 'playbooks',
+  store,
+  reducer: playbookReducer,
+  initial: { playbooks: [] },
+  filter: { stream: PLAYBOOKS_STREAM },
+})
+
 await boardProjection.catchUp()
 await pendingProjection.catchUp()
 await lastTaskContext.catchUp()
 await triggerProjection.catchUp()
+await playbookProjection.catchUp()
 
 // ── Agent registry (transport-agnostic) ──────────────────────────
 
@@ -164,6 +176,7 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
   boardProjection.apply(event)
   pendingProjection.apply(event)
   triggerProjection.apply(event)
+  playbookProjection.apply(event)
   if (stream === TRIGGERS_STREAM) syncTriggerJobs()
 
   const taskId = taskIdFromStream(stream)
@@ -307,6 +320,90 @@ async function fireTrigger(trigger: Trigger) {
   } satisfies SendData)
 
   process.stderr.write(`[jean] trigger ${trigger.id} fired → ${trigger.agent}\n`)
+}
+
+// ── Playbook file watcher ────────────────────────────────────────
+
+const PLAYBOOKS_DIR = resolve(dirname(BOARD_PATH), 'playbooks')
+
+function playbookIdFromFilename(filename: string): string | null {
+  if (!filename.endsWith('.md')) return null
+  return basename(filename, '.md')
+}
+
+function hashContent(content: string): string {
+  return new Bun.CryptoHasher('sha256').update(content).digest('hex').slice(0, 12)
+}
+
+async function readPlaybookFile(id: string): Promise<{ content: string; hash: string } | null> {
+  try {
+    const content = await Bun.file(resolve(PLAYBOOKS_DIR, `${id}.md`)).text()
+    return { content, hash: hashContent(content) }
+  } catch {
+    return null
+  }
+}
+
+let reconciling = false
+
+/** Scan playbook files and reconcile with projection state. */
+async function reconcilePlaybooks() {
+  if (reconciling) return
+  reconciling = true
+  try {
+    if (!existsSync(PLAYBOOKS_DIR)) {
+      mkdirSync(PLAYBOOKS_DIR, { recursive: true })
+      process.stderr.write(`[jean] created ${PLAYBOOKS_DIR}\n`)
+    }
+
+    const dir = readdirSync(PLAYBOOKS_DIR)
+    const ids = dir.map(playbookIdFromFilename).filter((id): id is string => id !== null)
+    const entries = await Promise.all(ids.map(async id => {
+      const data = await readPlaybookFile(id)
+      return data ? [id, data] as const : null
+    }))
+
+    const files = new Map<string, { content: string; hash: string }>()
+    for (const entry of entries) {
+      if (entry) files.set(entry[0], entry[1])
+    }
+
+    const known = new Map(playbookProjection.state.playbooks.map(p => [p.id, p]))
+
+    for (const [id, { content, hash }] of files) {
+      const existing = known.get(id)
+      if (!existing) {
+        await record('playbook-created', PLAYBOOKS_STREAM, { id, content, hash } satisfies PlaybookCreatedData)
+        process.stderr.write(`[jean] playbook created: ${id}\n`)
+      } else if (existing.hash !== hash) {
+        await record('playbook-updated', PLAYBOOKS_STREAM, { id, content, hash, prevHash: existing.hash } satisfies PlaybookUpdatedData)
+        process.stderr.write(`[jean] playbook updated: ${id}\n`)
+      }
+    }
+
+    for (const [id, playbook] of known) {
+      if (!files.has(id)) {
+        await record('playbook-removed', PLAYBOOKS_STREAM, { id, lastHash: playbook.hash } satisfies PlaybookRemovedData)
+        process.stderr.write(`[jean] playbook removed: ${id}\n`)
+      }
+    }
+  } finally {
+    reconciling = false
+  }
+}
+
+/** Watch playbook directory for changes. */
+function watchPlaybooks() {
+  if (!existsSync(PLAYBOOKS_DIR)) return
+
+  let debounce: ReturnType<typeof setTimeout> | null = null
+  watch(PLAYBOOKS_DIR, (_eventType, filename) => {
+    if (!filename || !filename.endsWith('.md')) return
+    // Debounce — editors often fire multiple events for one save
+    if (debounce) clearTimeout(debounce)
+    debounce = setTimeout(() => { void reconcilePlaybooks() }, 200)
+  })
+  process.stderr.write(`[jean] watching ${PLAYBOOKS_DIR} for changes\n`)
 }
 
 // ── Slack integration (optional) ─────────────────────────────────
@@ -677,6 +774,26 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       })()
     }
 
+    // ── Playbook endpoints ──────────────────────────────────────
+
+    if (path === '/playbooks' && req.method === 'GET') {
+      const playbooks = playbookProjection.state.playbooks.map(p => ({
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        hash: p.hash,
+        updatedAt: p.updatedAt,
+      }))
+      return Response.json({ playbooks })
+    }
+
+    const playbookMatch = path.match(/^\/playbooks\/([^/]+)$/)
+    if (playbookMatch && req.method === 'GET') {
+      const playbook = playbookProjection.state.playbooks.find(p => p.id === playbookMatch[1])
+      if (!playbook) return Response.json({ error: 'not found' }, { status: 404 })
+      return Response.json(playbook)
+    }
+
     // ── Event endpoints ─────────────────────────────────────────
 
     if (path === '/events' && req.method === 'GET') {
@@ -906,3 +1023,7 @@ await initSlack()
 
 // Start scheduled trigger jobs from projection state
 syncTriggerJobs()
+
+// Reconcile playbooks with files on disk, then watch for changes
+await reconcilePlaybooks()
+watchPlaybooks()

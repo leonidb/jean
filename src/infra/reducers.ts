@@ -102,12 +102,33 @@ export type TriggerFiredData = {
   prompt: string
 }
 
+// ── Playbook event data ─────────────────────────────────────────
+
+export type PlaybookCreatedData = {
+  id: string
+  content: string
+  hash: string
+}
+
+export type PlaybookUpdatedData = {
+  id: string
+  content: string
+  hash: string
+  prevHash: string
+}
+
+export type PlaybookRemovedData = {
+  id: string
+  lastHash: string
+}
+
 // ── Stream helpers ───────────────────────────────────────────────
 
 export function taskStream(taskId: string): string { return `task-${taskId}` }
 export function agentStream(agent: string): string { return `agent-${agent}` }
 export const SYSTEM_STREAM = 'system'
 export const TRIGGERS_STREAM = 'triggers'
+export const PLAYBOOKS_STREAM = 'playbooks'
 
 export function taskIdFromStream(stream: string): string | undefined {
   return stream.startsWith('task-') ? stream.slice(5) : undefined
@@ -206,6 +227,9 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
     case 'reply':
     case 'task-created':
     case 'trigger-fired':
+    case 'playbook-created':
+    case 'playbook-updated':
+    case 'playbook-removed':
       return [...state, event]
 
     case 'agent-idle': {
@@ -296,6 +320,84 @@ export const triggerReducer: Reducer<TriggerState> = (state, event) => {
           }
         }),
       }
+    }
+
+    default:
+      return state
+  }
+}
+
+// ── Playbook reducer ────────────────────────────────────────────
+
+export type Playbook = {
+  id: string
+  name: string
+  description: string
+  content: string
+  hash: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type PlaybookState = { playbooks: Playbook[] }
+
+/** Parse YAML-ish frontmatter from markdown. Only extracts name and description. */
+function parseFrontmatter(content: string): { name: string; description: string } {
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---/)
+  if (!match) return { name: '', description: '' }
+  const fm = match[1]
+  const fmLines = fm.split('\n')
+  const name = fm.match(/^name:\s*(.+)/m)?.[1]?.trim() ?? ''
+  let description = ''
+  const descLineIdx = fmLines.findIndex(l => /^description:/.test(l))
+  if (descLineIdx >= 0) {
+    const afterColon = fmLines[descLineIdx]!.replace(/^description:\s*/, '')
+    if (afterColon === '>' || afterColon === '') {
+      const indented: string[] = []
+      for (const l of fmLines.slice(descLineIdx + 1)) {
+        if (/^\s+/.test(l)) indented.push(l.trim())
+        else break
+      }
+      description = indented.filter(Boolean).join(' ')
+    } else {
+      description = afterColon
+    }
+  }
+  return { name, description }
+}
+
+export const playbookReducer: Reducer<PlaybookState> = (state, event) => {
+  switch (event.type) {
+    case 'playbook-created': {
+      const d = event.data as PlaybookCreatedData
+      const { name, description } = parseFrontmatter(d.content)
+      const playbook: Playbook = {
+        id: d.id,
+        name: name || d.id,
+        description,
+        content: d.content,
+        hash: d.hash,
+        createdAt: event.ts,
+        updatedAt: event.ts,
+      }
+      return { playbooks: [...state.playbooks, playbook] }
+    }
+
+    case 'playbook-updated': {
+      const d = event.data as PlaybookUpdatedData
+      const { name, description } = parseFrontmatter(d.content)
+      return {
+        playbooks: state.playbooks.map(p =>
+          p.id === d.id
+            ? { ...p, name: name || d.id, description, content: d.content, hash: d.hash, updatedAt: event.ts }
+            : p,
+        ),
+      }
+    }
+
+    case 'playbook-removed': {
+      const d = event.data as PlaybookRemovedData
+      return { playbooks: state.playbooks.filter(p => p.id !== d.id) }
     }
 
     default:

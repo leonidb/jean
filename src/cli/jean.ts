@@ -17,6 +17,7 @@
  *   jean agent tag <name> [tags..] [--remove]   View or manage tags
  *   jean agent remove <name> [--force] [--keep] Remove an agent
  *   jean task log <id>                          Show task event history
+ *   jean playbook list                          List loaded playbooks
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs'
@@ -26,6 +27,17 @@ const args = process.argv.slice(2)
 const command = args[0]
 
 const INFRA_URL = process.env.JEAN_INFRA_URL ?? 'http://127.0.0.1:8700'
+
+async function infraFetch(path: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`${INFRA_URL}${path}`, init)
+  } catch {
+    console.error('Could not connect to Jean infrastructure. Is it running?')
+    console.error(`  Expected at: ${INFRA_URL}`)
+    console.error(`  Start with:  bun run src/infra/server.ts`)
+    process.exit(1)
+  }
+}
 
 // ── Terminal colors ────────────────────────────────────────────────
 const RESET = '\x1b[0m'
@@ -58,6 +70,9 @@ switch (command) {
   case 'task':
     await cmdTask(args.slice(1))
     break
+  case 'playbook':
+    await cmdPlaybook(args.slice(1))
+    break
   default:
     printUsage()
 }
@@ -65,43 +80,37 @@ switch (command) {
 // ── Commands ───────────────────────────────────────────────────────
 
 async function cmdBoard() {
-  try {
-    const res = await fetch(`${INFRA_URL}/board`)
-    const board = (await res.json()) as { tasks: Array<Record<string, string>> }
+  const res = await infraFetch('/board')
+  const board = (await res.json()) as { tasks: Array<Record<string, string>> }
 
-    if (board.tasks.length === 0) {
-      console.log('Board is empty.')
-      return
-    }
-
-    const groups: Record<string, Array<Record<string, string>>> = {}
-    for (const task of board.tasks) {
-      const status = task.status ?? 'unknown'
-      ;(groups[status] ??= []).push(task)
-    }
-
-    const statusOrder = ['todo', 'assigned', 'in-progress', 'waiting', 'done', 'cancelled']
-    for (const status of statusOrder) {
-      const tasks = groups[status]
-      if (!tasks?.length) continue
-
-      const label = status.toUpperCase()
-      const color = statusColor(status)
-      console.log(`\n${color}── ${label} ${'─'.repeat(Math.max(0, 40 - label.length))}${RESET}`)
-
-      for (const t of tasks) {
-        const agent = t.agent ? ` (${t.agent})` : ''
-        const queue = t.queue ? ` [${t.queue}]` : ''
-        console.log(`  ${DIM}${t.id}${RESET} ${t.title}${DIM}${agent}${queue}${RESET}`)
-      }
-    }
-    console.log()
-  } catch {
-    console.error('Could not connect to Jean infrastructure. Is it running?')
-    console.error(`  Expected at: ${INFRA_URL}`)
-    console.error(`  Start with:  bun run src/infra/server.ts`)
-    process.exit(1)
+  if (board.tasks.length === 0) {
+    console.log('Board is empty.')
+    return
   }
+
+  const groups: Record<string, Array<Record<string, string>>> = {}
+  for (const task of board.tasks) {
+    const status = task.status ?? 'unknown'
+    ;(groups[status] ??= []).push(task)
+  }
+
+  const statusOrder = ['todo', 'assigned', 'in-progress', 'waiting', 'done', 'cancelled']
+  for (const status of statusOrder) {
+    const tasks = groups[status]
+    if (!tasks?.length) continue
+
+    const label = status.toUpperCase()
+    const color = statusColor(status)
+    console.log(`\n${color}── ${label} ${'─'.repeat(Math.max(0, 40 - label.length))}${RESET}`)
+
+    for (const t of tasks) {
+      const agent = t.agent ? ` (${t.agent})` : ''
+      const queue = t.queue ? ` [${t.queue}]` : ''
+      const playbook = t.playbook ? ` 📋${t.playbook}` : ''
+      console.log(`  ${DIM}${t.id}${RESET} ${t.title}${DIM}${agent}${queue}${playbook}${RESET}`)
+    }
+  }
+  console.log()
 }
 
 function cmdPeek(agent?: string) {
@@ -124,84 +133,69 @@ async function cmdSend(agent?: string, text?: string) {
     process.exit(1)
   }
 
-  try {
-    const res = await fetch(`${INFRA_URL}/send`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ to: agent, from: 'cli', text }),
-    })
-    const result = (await res.json()) as { delivered: boolean }
+  const res = await infraFetch('/send', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ to: agent, from: 'cli', text }),
+  })
+  const result = (await res.json()) as { delivered: boolean }
 
-    if (result.delivered) {
-      console.log(`Message sent to "${agent}".`)
-    } else {
-      console.log(`Agent "${agent}" is not connected. Message dropped.`)
-    }
-  } catch {
-    console.error('Could not connect to Jean infrastructure.')
-    process.exit(1)
+  if (result.delivered) {
+    console.log(`Message sent to "${agent}".`)
+  } else {
+    console.log(`Agent "${agent}" is not connected. Message dropped.`)
   }
 }
 
 async function cmdStatus() {
-  try {
-    const [infoRes, eventsRes] = await Promise.all([
-      fetch(`${INFRA_URL}/`),
-      fetch(`${INFRA_URL}/events`),
-    ])
-    const info = (await infoRes.json()) as { agents: string[] }
-    const eventsData = (await eventsRes.json()) as {
-      events: Array<{ ts: string; type: string; agent?: string; detail?: string }>
-    }
-
-    console.log(`\n${BOLD}Jean Infrastructure${RESET}`)
-    console.log(`  URL: ${INFRA_URL}`)
-    console.log(`  Connected agents: ${info.agents.length ? info.agents.join(', ') : '(none)'}`)
-
-    if (eventsData.events.length) {
-      console.log(`\n${BOLD}Recent Events${RESET}`)
-      const recent = eventsData.events.slice(-10)
-      for (const e of recent) {
-        const time = e.ts.slice(11, 19)
-        const agent = e.agent ? ` ${e.agent}` : ''
-        const detail = e.detail ? ` — ${e.detail}` : ''
-        console.log(`  ${DIM}${time}${RESET} ${e.type}${agent}${detail}`)
-      }
-    }
-    console.log()
-  } catch {
-    console.error('Could not connect to Jean infrastructure.')
-    process.exit(1)
+  const [infoRes, eventsRes] = await Promise.all([
+    infraFetch('/'),
+    infraFetch('/events'),
+  ])
+  const info = (await infoRes.json()) as { agents: string[] }
+  const eventsData = (await eventsRes.json()) as {
+    events: Array<{ ts: string; type: string; agent?: string; detail?: string }>
   }
+
+  console.log(`\n${BOLD}Jean Infrastructure${RESET}`)
+  console.log(`  URL: ${INFRA_URL}`)
+  console.log(`  Connected agents: ${info.agents.length ? info.agents.join(', ') : '(none)'}`)
+
+  if (eventsData.events.length) {
+    console.log(`\n${BOLD}Recent Events${RESET}`)
+    const recent = eventsData.events.slice(-10)
+    for (const e of recent) {
+      const time = e.ts.slice(11, 19)
+      const agent = e.agent ? ` ${e.agent}` : ''
+      const detail = e.detail ? ` — ${e.detail}` : ''
+      console.log(`  ${DIM}${time}${RESET} ${e.type}${agent}${detail}`)
+    }
+  }
+  console.log()
 }
 
 async function cmdPermissions(agent?: string) {
-  try {
-    const qs = agent ? `?agent=${encodeURIComponent(agent)}` : ''
-    const res = await fetch(`${INFRA_URL}/permissions${qs}`)
-    const { permissions } = (await res.json()) as {
-      permissions: Record<string, Record<string, { count: number; samples: Record<string, unknown>[] }>>
-    }
-
-    if (Object.keys(permissions).length === 0) {
-      console.log('No permission requests recorded yet.')
-      return
-    }
-
-    for (const [agentName, tools] of Object.entries(permissions)) {
-      console.log(`\n${BOLD}${agentName}${RESET}`)
-      const sorted = Object.entries(tools).sort((a, b) => b[1].count - a[1].count)
-      for (const [tool, { count, samples }] of sorted) {
-        const details = summarizeSamples(tool, samples)
-        const detail = details ? `  ${DIM}(${details})${RESET}` : ''
-        console.log(`  ${tool.padEnd(16)} ${String(count).padStart(3)}x${detail}`)
-      }
-    }
-    console.log()
-  } catch {
-    console.error('Could not connect to Jean infrastructure.')
-    process.exit(1)
+  const qs = agent ? `?agent=${encodeURIComponent(agent)}` : ''
+  const res = await infraFetch(`/permissions${qs}`)
+  const { permissions } = (await res.json()) as {
+    permissions: Record<string, Record<string, { count: number; samples: Record<string, unknown>[] }>>
   }
+
+  if (Object.keys(permissions).length === 0) {
+    console.log('No permission requests recorded yet.')
+    return
+  }
+
+  for (const [agentName, tools] of Object.entries(permissions)) {
+    console.log(`\n${BOLD}${agentName}${RESET}`)
+    const sorted = Object.entries(tools).sort((a, b) => b[1].count - a[1].count)
+    for (const [tool, { count, samples }] of sorted) {
+      const details = summarizeSamples(tool, samples)
+      const detail = details ? `  ${DIM}(${details})${RESET}` : ''
+      console.log(`  ${tool.padEnd(16)} ${String(count).padStart(3)}x${detail}`)
+    }
+  }
+  console.log()
 }
 
 function summarizeSamples(tool: string, samples: Record<string, unknown>[]): string {
@@ -256,65 +250,55 @@ async function cmdTriggerAdd(args: string[]) {
     process.exit(1)
   }
 
-  try {
-    const res = await fetch(`${INFRA_URL}/triggers`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        ...(id && { id }),
-        ...(cron && { cron }),
-        ...(at && { at }),
-        agent,
-        prompt,
-        createdBy: 'cli',
-      }),
-    })
-    if (!res.ok) {
-      const err = (await res.json()) as { error: string }
-      console.error(`Error: ${err.error}`)
-      process.exit(1)
-    }
-    const trigger = (await res.json()) as { id: string; cron?: string; at?: string }
-    console.log(`${GREEN}Trigger "${trigger.id}" created.${RESET}`)
-    if (trigger.cron) console.log(`  Schedule: ${trigger.cron}`)
-    if (trigger.at) console.log(`  Fires at: ${trigger.at}`)
-    console.log(`  Agent:    ${agent}`)
-  } catch {
-    console.error('Could not connect to Jean infrastructure.')
+  const res = await infraFetch('/triggers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      ...(id && { id }),
+      ...(cron && { cron }),
+      ...(at && { at }),
+      agent,
+      prompt,
+      createdBy: 'cli',
+    }),
+  })
+  if (!res.ok) {
+    const err = (await res.json()) as { error: string }
+    console.error(`Error: ${err.error}`)
     process.exit(1)
   }
+  const trigger = (await res.json()) as { id: string; cron?: string; at?: string }
+  console.log(`${GREEN}Trigger "${trigger.id}" created.${RESET}`)
+  if (trigger.cron) console.log(`  Schedule: ${trigger.cron}`)
+  if (trigger.at) console.log(`  Fires at: ${trigger.at}`)
+  console.log(`  Agent:    ${agent}`)
 }
 
 async function cmdTriggerList() {
-  try {
-    const res = await fetch(`${INFRA_URL}/triggers`)
-    const { triggers } = (await res.json()) as {
-      triggers: Array<{
-        id: string; cron?: string; at?: string; agent: string
-        prompt: string; status: string; createdBy: string; lastFiredAt?: string
-      }>
-    }
-
-    if (triggers.length === 0) {
-      console.log('No triggers configured.')
-      return
-    }
-
-    console.log()
-    for (const t of triggers) {
-      const schedule = t.cron ? `cron: ${t.cron}` : `at: ${t.at}`
-      const statusColor = t.status === 'active' ? GREEN : DIM
-      const lastFired = t.lastFiredAt
-        ? ` ${DIM}(last: ${t.lastFiredAt.slice(0, 19)})${RESET}`
-        : ''
-      console.log(`  ${BOLD}${t.id}${RESET} ${statusColor}${t.status}${RESET} ${DIM}${schedule}${RESET}${lastFired}`)
-      console.log(`    → ${t.agent}: "${t.prompt}"`)
-    }
-    console.log()
-  } catch {
-    console.error('Could not connect to Jean infrastructure.')
-    process.exit(1)
+  const res = await infraFetch('/triggers')
+  const { triggers } = (await res.json()) as {
+    triggers: Array<{
+      id: string; cron?: string; at?: string; agent: string
+      prompt: string; status: string; createdBy: string; lastFiredAt?: string
+    }>
   }
+
+  if (triggers.length === 0) {
+    console.log('No triggers configured.')
+    return
+  }
+
+  console.log()
+  for (const t of triggers) {
+    const schedule = t.cron ? `cron: ${t.cron}` : `at: ${t.at}`
+    const statusColor = t.status === 'active' ? GREEN : DIM
+    const lastFired = t.lastFiredAt
+      ? ` ${DIM}(last: ${t.lastFiredAt.slice(0, 19)})${RESET}`
+      : ''
+    console.log(`  ${BOLD}${t.id}${RESET} ${statusColor}${t.status}${RESET} ${DIM}${schedule}${RESET}${lastFired}`)
+    console.log(`    → ${t.agent}: "${t.prompt}"`)
+  }
+  console.log()
 }
 
 async function cmdTriggerRemove(id?: string) {
@@ -323,18 +307,13 @@ async function cmdTriggerRemove(id?: string) {
     process.exit(1)
   }
 
-  try {
-    const res = await fetch(`${INFRA_URL}/triggers/${encodeURIComponent(id)}`, { method: 'DELETE' })
-    if (!res.ok) {
-      const err = (await res.json()) as { error: string }
-      console.error(`Error: ${err.error}`)
-      process.exit(1)
-    }
-    console.log(`Trigger "${id}" removed.`)
-  } catch {
-    console.error('Could not connect to Jean infrastructure.')
+  const res = await infraFetch(`/triggers/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const err = (await res.json()) as { error: string }
+    console.error(`Error: ${err.error}`)
     process.exit(1)
   }
+  console.log(`Trigger "${id}" removed.`)
 }
 
 async function cmdTriggerFire(id?: string) {
@@ -343,18 +322,13 @@ async function cmdTriggerFire(id?: string) {
     process.exit(1)
   }
 
-  try {
-    const res = await fetch(`${INFRA_URL}/triggers/${encodeURIComponent(id)}/fire`, { method: 'POST' })
-    if (!res.ok) {
-      const err = (await res.json()) as { error: string }
-      console.error(`Error: ${err.error}`)
-      process.exit(1)
-    }
-    console.log(`Trigger "${id}" fired.`)
-  } catch {
-    console.error('Could not connect to Jean infrastructure.')
+  const res = await infraFetch(`/triggers/${encodeURIComponent(id)}/fire`, { method: 'POST' })
+  if (!res.ok) {
+    const err = (await res.json()) as { error: string }
+    console.error(`Error: ${err.error}`)
     process.exit(1)
   }
+  console.log(`Trigger "${id}" fired.`)
 }
 
 // ── Task subcommands ─────────────────────────────────────────────
@@ -378,68 +352,60 @@ async function cmdTaskLog(id?: string) {
   // Pad to 3 digits if numeric
   const taskId = /^\d+$/.test(id) ? id.padStart(3, '0') : id
 
-  try {
-    const res = await fetch(`${INFRA_URL}/history?taskId=${encodeURIComponent(taskId)}&diagnostics=true`)
-    const { events } = (await res.json()) as {
-      events: Array<{
-        id: number; type: string; ts: string; agent?: string
-        data: { text?: string; from?: string; to?: string; status?: string; [k: string]: unknown }
-      }>
-    }
-
-    if (events.length === 0) {
-      console.log(`No events for task ${taskId}.`)
-      return
-    }
-
-    // Filter to meaningful events
-    const meaningful = events.filter(e =>
-      ['task-created', 'task-status', 'task-updated', 'send', 'reply', 'human-interaction', 'permission-request'].includes(e.type),
-    )
-
-    console.log(`\n${BOLD}Task ${taskId}${RESET} — ${meaningful.length} events\n`)
-
-    for (const e of meaningful) {
-      const time = e.ts.slice(0, 16).replace('T', ' ')
-      const color = eventColor(e.type)
-      const label = e.type.padEnd(18)
-      const agent = e.agent ? ` ${DIM}${e.agent}${RESET}` : ''
-
-      let detail = ''
-      if (e.type === 'task-created') {
-        detail = e.data.title as string ?? ''
-      } else if (e.type === 'task-status') {
-        detail = `${e.data.from} → ${e.data.to}`
-      } else if (e.type === 'task-updated') {
-        const parts: string[] = []
-        if (e.data.agent) parts.push(`agent=${e.data.agent}`)
-        if (e.data.description) parts.push('description updated')
-        detail = parts.join(', ')
-      } else if (e.type === 'send' || e.type === 'reply' || e.type === 'human-interaction') {
-        const text = e.data.text ?? ''
-        // Show first 3 lines, truncate each at 120 chars
-        const lines = text.split('\n').filter((l: string) => l.trim()).slice(0, 3)
-        const truncated = lines.map((l: string) => l.length > 120 ? l.slice(0, 117) + '...' : l)
-        if (text.split('\n').filter((l: string) => l.trim()).length > 3) truncated.push('...')
-        detail = truncated.join('\n')
-      } else if (e.type === 'permission-request') {
-        detail = `${e.data.tool ?? '?'}`
-      }
-
-      console.log(`  ${DIM}${time}${RESET} ${color}${label}${RESET}${agent}`)
-      if (detail) {
-        // Indent multi-line detail
-        const lines = detail.split('\n').slice(0, 3)
-        for (const line of lines) {
-          console.log(`  ${DIM}  ${line}${RESET}`)
-        }
-      }
-    }
-    console.log()
-  } catch {
-    console.error('Could not connect to Jean infrastructure.')
-    process.exit(1)
+  const res = await infraFetch(`/history?taskId=${encodeURIComponent(taskId)}&diagnostics=true`)
+  const { events } = (await res.json()) as {
+    events: Array<{
+      id: number; type: string; ts: string; agent?: string
+      data: { text?: string; from?: string; to?: string; status?: string; [k: string]: unknown }
+    }>
   }
+
+  if (events.length === 0) {
+    console.log(`No events for task ${taskId}.`)
+    return
+  }
+
+  const meaningful = events.filter(e =>
+    ['task-created', 'task-status', 'task-updated', 'send', 'reply', 'human-interaction', 'permission-request'].includes(e.type),
+  )
+
+  console.log(`\n${BOLD}Task ${taskId}${RESET} — ${meaningful.length} events\n`)
+
+  for (const e of meaningful) {
+    const time = e.ts.slice(0, 16).replace('T', ' ')
+    const color = eventColor(e.type)
+    const label = e.type.padEnd(18)
+    const agent = e.agent ? ` ${DIM}${e.agent}${RESET}` : ''
+
+    let detail = ''
+    if (e.type === 'task-created') {
+      detail = e.data.title as string ?? ''
+    } else if (e.type === 'task-status') {
+      detail = `${e.data.from} → ${e.data.to}`
+    } else if (e.type === 'task-updated') {
+      const parts: string[] = []
+      if (e.data.agent) parts.push(`agent=${e.data.agent}`)
+      if (e.data.description) parts.push('description updated')
+      detail = parts.join(', ')
+    } else if (e.type === 'send' || e.type === 'reply' || e.type === 'human-interaction') {
+      const text = e.data.text ?? ''
+      const lines = text.split('\n').filter((l: string) => l.trim()).slice(0, 3)
+      const truncated = lines.map((l: string) => l.length > 120 ? l.slice(0, 117) + '...' : l)
+      if (text.split('\n').filter((l: string) => l.trim()).length > 3) truncated.push('...')
+      detail = truncated.join('\n')
+    } else if (e.type === 'permission-request') {
+      detail = `${e.data.tool ?? '?'}`
+    }
+
+    console.log(`  ${DIM}${time}${RESET} ${color}${label}${RESET}${agent}`)
+    if (detail) {
+      const lines = detail.split('\n').slice(0, 3)
+      for (const line of lines) {
+        console.log(`  ${DIM}  ${line}${RESET}`)
+      }
+    }
+  }
+  console.log()
 }
 
 function eventColor(type: string): string {
@@ -452,6 +418,41 @@ function eventColor(type: string): string {
     case 'permission-request': return '\x1b[31m' // red
     default:               return ''
   }
+}
+
+// ── Playbook subcommands ─────────────────────────────────────────
+
+async function cmdPlaybook(args: string[]) {
+  const sub = args[0]
+  switch (sub) {
+    case 'list': await cmdPlaybookList(); break
+    default:
+      console.error('Usage: jean playbook <list>')
+      process.exit(1)
+  }
+}
+
+async function cmdPlaybookList() {
+  const res = await infraFetch('/playbooks')
+  const { playbooks } = (await res.json()) as {
+    playbooks: Array<{
+      id: string; name: string; description: string; hash: string; updatedAt: string
+    }>
+  }
+
+  if (playbooks.length === 0) {
+    console.log('No playbooks loaded.')
+    return
+  }
+
+  console.log(`\n${BOLD}Playbooks${RESET}\n`)
+  for (const p of playbooks) {
+    const updated = p.updatedAt.slice(0, 16).replace('T', ' ')
+    console.log(`  ${BOLD}${p.id}${RESET} ${DIM}(${p.hash})${RESET}`)
+    if (p.description) console.log(`    ${p.description}`)
+    console.log(`    ${DIM}updated: ${updated}${RESET}`)
+  }
+  console.log()
 }
 
 // ── Agent subcommands ─────────────────────────────────────────────

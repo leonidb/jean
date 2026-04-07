@@ -1,12 +1,14 @@
 import { describe, test, expect } from 'bun:test'
 import type { StoredEvent } from '../es/index.ts'
 import {
-  boardReducer, migrateBoard, pendingReducer, triggerReducer, toApiEvent,
-  taskStream, agentStream, SYSTEM_STREAM, TRIGGERS_STREAM,
+  boardReducer, migrateBoard, pendingReducer, triggerReducer, playbookReducer, toApiEvent,
+  taskStream, agentStream, SYSTEM_STREAM, TRIGGERS_STREAM, PLAYBOOKS_STREAM,
   type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
   type AckData, type AgentIdleData,
   type TriggerCreatedData, type TriggerUpdatedData, type TriggerRemovedData, type TriggerFiredData,
   type TriggerState,
+  type PlaybookCreatedData, type PlaybookUpdatedData, type PlaybookRemovedData,
+  type PlaybookState,
 } from './reducers.ts'
 import type { Board } from './board.ts'
 
@@ -272,6 +274,100 @@ describe('triggerReducer', () => {
     const e = makeEvent(1, 'reply', agentStream('scratch'), { text: 'hello' })
     const state = triggerReducer(empty, e)
     expect(state.triggers.length).toBe(0)
+  })
+})
+
+// ── Playbook reducer ────────────────────────────────────────────
+
+describe('playbookReducer', () => {
+  const empty: PlaybookState = { playbooks: [] }
+
+  const sampleContent = `---
+name: review
+description: >
+  PR code review lifecycle.
+---
+
+# Review
+
+One task per PR.`
+
+  test('playbook-created adds a playbook', () => {
+    const e = makeEvent(1, 'playbook-created', PLAYBOOKS_STREAM, {
+      id: 'review', content: sampleContent, hash: 'abc123',
+    } satisfies PlaybookCreatedData)
+    const state = playbookReducer(empty, e)
+    expect(state.playbooks.length).toBe(1)
+    expect(state.playbooks[0]!.id).toBe('review')
+    expect(state.playbooks[0]!.name).toBe('review')
+    expect(state.playbooks[0]!.description).toBe('PR code review lifecycle.')
+    expect(state.playbooks[0]!.hash).toBe('abc123')
+    expect(state.playbooks[0]!.content).toBe(sampleContent)
+  })
+
+  test('playbook-created with no frontmatter uses id as name', () => {
+    const e = makeEvent(1, 'playbook-created', PLAYBOOKS_STREAM, {
+      id: 'dev', content: '# Dev\n\nJust markdown.', hash: 'def456',
+    } satisfies PlaybookCreatedData)
+    const state = playbookReducer(empty, e)
+    expect(state.playbooks[0]!.name).toBe('dev')
+    expect(state.playbooks[0]!.description).toBe('')
+  })
+
+  test('playbook-updated updates content and metadata', () => {
+    const e1 = makeEvent(1, 'playbook-created', PLAYBOOKS_STREAM, {
+      id: 'review', content: sampleContent, hash: 'abc123',
+    } satisfies PlaybookCreatedData)
+    const newContent = sampleContent.replace('One task per PR.', 'One task per PR. Updated.')
+    const e2 = makeEvent(2, 'playbook-updated', PLAYBOOKS_STREAM, {
+      id: 'review', content: newContent, hash: 'def789', prevHash: 'abc123',
+    } satisfies PlaybookUpdatedData)
+    const state = playbookReducer(playbookReducer(empty, e1), e2)
+    expect(state.playbooks[0]!.hash).toBe('def789')
+    expect(state.playbooks[0]!.content).toContain('Updated.')
+  })
+
+  test('playbook-removed deletes playbook', () => {
+    const e1 = makeEvent(1, 'playbook-created', PLAYBOOKS_STREAM, {
+      id: 'review', content: sampleContent, hash: 'abc123',
+    } satisfies PlaybookCreatedData)
+    const e2 = makeEvent(2, 'playbook-removed', PLAYBOOKS_STREAM, {
+      id: 'review', lastHash: 'abc123',
+    } satisfies PlaybookRemovedData)
+    const state = playbookReducer(playbookReducer(empty, e1), e2)
+    expect(state.playbooks.length).toBe(0)
+  })
+
+  test('ignores unrelated events', () => {
+    const e = makeEvent(1, 'reply', agentStream('scratch'), { text: 'hello' })
+    const state = playbookReducer(empty, e)
+    expect(state.playbooks.length).toBe(0)
+  })
+})
+
+describe('pendingReducer — playbook events', () => {
+  test('playbook-created adds to pending', () => {
+    const e = makeEvent(1, 'playbook-created', PLAYBOOKS_STREAM, {
+      id: 'review', content: '# Review', hash: 'abc',
+    })
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(1)
+  })
+
+  test('playbook-updated adds to pending', () => {
+    const e = makeEvent(1, 'playbook-updated', PLAYBOOKS_STREAM, {
+      id: 'review', content: '# Review v2', hash: 'def', prevHash: 'abc',
+    })
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(1)
+  })
+
+  test('playbook-removed adds to pending', () => {
+    const e = makeEvent(1, 'playbook-removed', PLAYBOOKS_STREAM, {
+      id: 'review', lastHash: 'abc',
+    })
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(1)
   })
 })
 
