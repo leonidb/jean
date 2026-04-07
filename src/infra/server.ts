@@ -12,8 +12,8 @@
  * No LLM — fast, deterministic plumbing.
  */
 
-import { dirname, resolve, basename } from 'path'
-import { watch, existsSync, mkdirSync, readdirSync } from 'node:fs'
+import { resolve, basename } from 'path'
+import { watch, existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import type { ServerWebSocket } from 'bun'
 import {
   createStore, jsonlBackend, createProjection, fileSnapshotBackend,
@@ -40,11 +40,11 @@ import type {
   CreateTaskRequest, UpdateTaskRequest, UpdateStatusRequest,
 } from './protocol.ts'
 
-const PORT = Number(process.env.JEAN_PORT ?? 8700)
-const BOARD_PATH = process.env.JEAN_BOARD ?? './board.json'
-const HISTORY_PATH = process.env.JEAN_HISTORY ?? `${dirname(BOARD_PATH)}/history.jsonl`
+const DATA_DIR = resolve(process.env.JEAN_DATA_DIR ?? '.')
+const HISTORY_PATH = resolve(DATA_DIR, 'history.jsonl')
+const SNAPSHOT_DIR = DATA_DIR
 
-// Slack config (optional) — loaded from .env in cwd (the .jean/ directory)
+// Slack config (optional) — loaded from .env in the data directory
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN
 const SLACK_CHANNEL = process.env.SLACK_CHANNEL
@@ -59,7 +59,7 @@ const boardProjection = createProjection<Board>({
   reducer: boardReducer,
   initial: { tasks: [] },
   filter: { types: ['task-created', 'task-status', 'task-updated'] },
-  snapshots: fileSnapshotBackend(dirname(BOARD_PATH)),
+  snapshots: fileSnapshotBackend(SNAPSHOT_DIR),
   snapshotEvery: 50,
   migrate: migrateBoard,
 })
@@ -97,7 +97,7 @@ const triggerProjection = createProjection<TriggerState>({
   reducer: triggerReducer,
   initial: { triggers: [] },
   filter: { stream: TRIGGERS_STREAM },
-  snapshots: fileSnapshotBackend(dirname(BOARD_PATH)),
+  snapshots: fileSnapshotBackend(SNAPSHOT_DIR),
   snapshotEvery: 20,
 })
 
@@ -324,7 +324,7 @@ async function fireTrigger(trigger: Trigger) {
 
 // ── Playbook file watcher ────────────────────────────────────────
 
-const PLAYBOOKS_DIR = resolve(dirname(BOARD_PATH), 'playbooks')
+const PLAYBOOKS_DIR = resolve(DATA_DIR, 'playbooks')
 
 function playbookIdFromFilename(filename: string): string | null {
   if (!filename.endsWith('.md')) return null
@@ -460,6 +460,41 @@ async function initSlack() {
   process.stderr.write(`[jean] slack connected: #${channelName} (${SLACK_CHANNEL})\n`)
   void record('register', agentStream(channelName), { agent: channelName, role: 'user', idle: true } satisfies RegisterData)
 }
+
+// ── Port selection ───────────────────────────────────────────────
+
+const PREFERRED_PORT = Number(process.env.JEAN_PORT ?? 8700)
+const PORT_FILE = resolve(DATA_DIR, 'infra.port')
+const PID_FILE = resolve(DATA_DIR, 'infra.pid')
+
+function findFreePort(start: number, maxAttempts = 100): number {
+  for (let port = start; port < start + maxAttempts; port++) {
+    try {
+      const testServer = Bun.serve({ port, hostname: '127.0.0.1', fetch: () => new Response() })
+      testServer.stop(true)
+      return port
+    } catch {
+      continue
+    }
+  }
+  throw new Error(`No free port found in range ${start}-${start + maxAttempts}`)
+}
+
+const PORT = process.env.JEAN_PORT ? PREFERRED_PORT : findFreePort(PREFERRED_PORT)
+
+function writeRuntimeFiles() {
+  writeFileSync(PORT_FILE, String(PORT))
+  writeFileSync(PID_FILE, String(process.pid))
+}
+
+function cleanupRuntimeFiles() {
+  try { unlinkSync(PORT_FILE) } catch {}
+  try { unlinkSync(PID_FILE) } catch {}
+}
+
+process.on('exit', cleanupRuntimeFiles)
+process.on('SIGINT', () => process.exit(0))
+process.on('SIGTERM', () => process.exit(0))
 
 // ── HTTP + WebSocket server ───────────────────────────────────────
 
@@ -1020,6 +1055,9 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 })
 
 // ── Startup ──────────────────────────────────────────────────────
+
+writeRuntimeFiles()
+process.stderr.write(`[jean] listening on port ${PORT} (data: ${DATA_DIR})\n`)
 
 void record('start', SYSTEM_STREAM, { port: PORT } satisfies StartData)
 await initSlack()

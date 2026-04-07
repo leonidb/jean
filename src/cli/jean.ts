@@ -18,15 +18,33 @@
  *   jean agent remove <name> [--force] [--keep] Remove an agent
  *   jean task log <id>                          Show task event history
  *   jean playbook list                          List loaded playbooks
+ *   jean infra start                            Start infrastructure server
+ *   jean infra stop                             Stop infrastructure server
+ *   jean infra status                           Show infrastructure status
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, unlinkSync } from 'node:fs'
 import { resolve, dirname, basename } from 'node:path'
 
 const args = process.argv.slice(2)
 const command = args[0]
 
-const INFRA_URL = process.env.JEAN_INFRA_URL ?? 'http://127.0.0.1:8700'
+function discoverInfraUrl(): string {
+  if (process.env.JEAN_INFRA_URL) return process.env.JEAN_INFRA_URL
+  // Walk up to find .jean/infra.port
+  let dir = process.cwd()
+  while (dir !== dirname(dir)) {
+    const portFile = resolve(dir, '.jean', 'infra.port')
+    if (existsSync(portFile)) {
+      const port = readFileSync(portFile, 'utf8').trim()
+      return `http://127.0.0.1:${port}`
+    }
+    dir = dirname(dir)
+  }
+  return 'http://127.0.0.1:8700' // fallback
+}
+
+const INFRA_URL = discoverInfraUrl()
 
 async function infraFetch(path: string, init?: RequestInit): Promise<Response> {
   try {
@@ -34,7 +52,7 @@ async function infraFetch(path: string, init?: RequestInit): Promise<Response> {
   } catch {
     console.error('Could not connect to Jean infrastructure. Is it running?')
     console.error(`  Expected at: ${INFRA_URL}`)
-    console.error(`  Start with:  bun run src/infra/server.ts`)
+    console.error(`  Start with:  jean infra start`)
     process.exit(1)
   }
 }
@@ -57,6 +75,9 @@ switch (command) {
     break
   case 'status':
     await cmdStatus()
+    break
+  case 'infra':
+    await cmdInfra(args.slice(1))
     break
   case 'agent':
     cmdAgent(args.slice(1))
@@ -423,6 +444,121 @@ function eventColor(type: string): string {
   }
 }
 
+// ── Infra subcommands ────────────────────────────────────────────
+
+async function cmdInfra(args: string[]) {
+  const sub = args[0]
+  switch (sub) {
+    case 'start': await cmdInfraStart(); break
+    case 'stop':  await cmdInfraStop(); break
+    case 'status': await cmdInfraStatus(); break
+    default:
+      console.error('Usage: jean infra <start|stop|status>')
+      process.exit(1)
+  }
+}
+
+async function cmdInfraStart() {
+  const dojoRoot = findDojoRoot()
+  const dataDir = resolve(dojoRoot, '.jean')
+  const pidFile = resolve(dataDir, 'infra.pid')
+
+  // Check if already running
+  if (existsSync(pidFile)) {
+    const pid = Number(readFileSync(pidFile, 'utf8').trim())
+    try {
+      process.kill(pid, 0) // test if process exists
+      console.error(`Infrastructure already running (pid ${pid}).`)
+      console.error('Use "jean infra stop" first.')
+      process.exit(1)
+    } catch {
+      // Stale PID file — process is gone
+    }
+  }
+
+  // Find the server entrypoint
+  const serverPath = resolve(dirname(new URL(import.meta.url).pathname), '../infra/server.ts')
+
+  const child = Bun.spawn(['bun', 'run', serverPath], {
+    cwd: dataDir,
+    env: { ...process.env, JEAN_DATA_DIR: dataDir },
+    stdio: ['ignore', 'ignore', 'inherit'],
+  })
+
+  // Wait briefly for the port file to appear
+  const portFile = resolve(dataDir, 'infra.port')
+  for (let i = 0; i < 30; i++) {
+    await Bun.sleep(200)
+    if (existsSync(portFile)) break
+  }
+
+  if (existsSync(portFile)) {
+    const port = readFileSync(portFile, 'utf8').trim()
+    console.log(`${GREEN}Infrastructure started.${RESET}`)
+    console.log(`  PID:  ${child.pid}`)
+    console.log(`  Port: ${port}`)
+    console.log(`  Data: ${dataDir}`)
+  } else {
+    console.error('Infrastructure started but port file not found. Check stderr for errors.')
+  }
+
+  // Detach — don't wait for child
+  child.unref()
+}
+
+async function cmdInfraStop() {
+  const dojoRoot = findDojoRoot()
+  const dataDir = resolve(dojoRoot, '.jean')
+  const pidFile = resolve(dataDir, 'infra.pid')
+
+  if (!existsSync(pidFile)) {
+    console.log('Infrastructure is not running (no PID file).')
+    return
+  }
+
+  const pid = Number(readFileSync(pidFile, 'utf8').trim())
+  try {
+    process.kill(pid, 'SIGTERM')
+    console.log(`Infrastructure stopped (pid ${pid}).`)
+  } catch {
+    console.log(`Process ${pid} not found. Cleaning up stale PID file.`)
+  }
+
+  // Clean up in case signal handler didn't
+  try { unlinkSync(pidFile) } catch {}
+  try { unlinkSync(resolve(dataDir, 'infra.port')) } catch {}
+}
+
+async function cmdInfraStatus() {
+  const dojoRoot = findDojoRoot()
+  const dataDir = resolve(dojoRoot, '.jean')
+  const pidFile = resolve(dataDir, 'infra.pid')
+  const portFile = resolve(dataDir, 'infra.port')
+
+  if (!existsSync(pidFile)) {
+    console.log('Infrastructure is not running.')
+    return
+  }
+
+  const pid = Number(readFileSync(pidFile, 'utf8').trim())
+  let running = false
+  try {
+    process.kill(pid, 0)
+    running = true
+  } catch {}
+
+  if (!running) {
+    console.log(`Infrastructure is not running (stale PID ${pid}).`)
+    return
+  }
+
+  const port = existsSync(portFile) ? readFileSync(portFile, 'utf8').trim() : '?'
+  console.log(`${GREEN}Infrastructure is running.${RESET}`)
+  console.log(`  PID:  ${pid}`)
+  console.log(`  Port: ${port}`)
+  console.log(`  Data: ${dataDir}`)
+}
+
 // ── Playbook subcommands ─────────────────────────────────────────
 
 async function cmdPlaybook(args: string[]) {
@@ -482,13 +618,14 @@ type AgentMeta = { name: string; tags: string[]; role: AgentRole }
 type AgentInfo = AgentMeta & { path: string; branch?: string }
 
 function findDojoRoot(): string {
-  const dojoRoot = process.cwd()
-  if (!existsSync(resolve(dojoRoot, '.jean'))) {
-    console.error('Not a Jean dojo. No .jean/ directory found.')
-    console.error('Run this command from the dojo root.')
-    process.exit(1)
+  let dir = process.cwd()
+  while (dir !== dirname(dir)) {
+    if (existsSync(resolve(dir, '.jean'))) return dir
+    dir = dirname(dir)
   }
-  return dojoRoot
+  console.error('Not a Jean dojo. No .jean/ directory found.')
+  console.error('Run this command from within a dojo tree.')
+  process.exit(1)
 }
 
 function findBareRepo(dojoRoot: string): string | null {
@@ -749,7 +886,7 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
           env: {
             JEAN_AGENT: name,
             JEAN_ROLE: role,
-            JEAN_INFRA_URL: 'ws://127.0.0.1:8700/ws',
+            JEAN_INFRA_URL: INFRA_URL.replace('http://', 'ws://') + '/ws',
           },
         },
       },
@@ -936,11 +1073,17 @@ function printUsage() {
   console.log(`jean — multi-agent orchestration
 
 Commands:
+  jean infra start                            Start infrastructure server
+  jean infra stop                             Stop infrastructure server
+  jean infra status                           Show infrastructure status
+
   jean board                                  Show the kanban board
-  jean peek <agent>                           How to connect to an agent
   jean send <agent> <msg>                     Send a message to an agent
-  jean status                                 Infrastructure status
+  jean status                                 Infrastructure status + recent events
   jean permissions [agent]                    Show permission requests by agent
+
+  jean task log <id>                          Show task event history
+  jean playbook list                          List loaded playbooks
 
   jean trigger add [options]                  Create a scheduled trigger
     --cron "expr"     Cron schedule (recurring)
@@ -963,10 +1106,12 @@ Commands:
   jean agent remove <name> [--force] [--keep] Remove an agent
   jean agent start <name>                     Start an agent
 
-  jean task log <id>                          Show task event history
+  jean peek <agent>                           How to connect to an agent
 
 Environment:
-  JEAN_INFRA_URL          Infrastructure URL (default: http://127.0.0.1:8700)`)
+  JEAN_INFRA_URL          Infrastructure URL (overrides port discovery)
+  JEAN_PORT               Fixed port for infra server (default: auto-select from 8700)
+  JEAN_DATA_DIR           Data directory (default: .jean/ in dojo root)`)
 }
 
 function statusColor(status: string): string {

@@ -1,17 +1,16 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import type { Subprocess } from 'bun'
-import { unlinkSync } from 'fs'
+import { rmSync, mkdirSync } from 'node:fs'
 
 const TEST_PORT = 8799
-const BOARD_PATH = '/tmp/jean-test-board.json'
-const HISTORY_PATH = '/tmp/jean-test-history.jsonl'
+const DATA_DIR = '/tmp/jean-test-server'
 let server: Subprocess
 
 beforeAll(async () => {
-  try { unlinkSync(BOARD_PATH) } catch {}
-  try { unlinkSync(HISTORY_PATH) } catch {}
+  try { rmSync(DATA_DIR, { recursive: true }) } catch {}
+  mkdirSync(DATA_DIR, { recursive: true })
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
-    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_BOARD: BOARD_PATH, JEAN_HISTORY: HISTORY_PATH },
+    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_DATA_DIR: DATA_DIR },
     stdout: 'ignore',
     stderr: 'pipe',
   })
