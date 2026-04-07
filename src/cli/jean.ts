@@ -468,23 +468,8 @@ function cmdDojoInit(targetPath?: string) {
     process.exit(1)
   }
 
-  // Create directory structure
   mkdirSync(resolve(jeanDir, 'playbooks'), { recursive: true })
   mkdirSync(resolve(jeanDir, 'context'), { recursive: true })
-
-  // Write .env template
-  writeFileSync(resolve(jeanDir, '.env'), `# Jean infrastructure config
-# Uncomment and configure for Slack integration:
-# SLACK_APP_TOKEN=xapp-...
-# SLACK_BOT_TOKEN=xoxb-...
-# SLACK_CHANNEL=C...
-`)
-
-  // Write .gitignore for runtime files
-  writeFileSync(resolve(jeanDir, '.gitignore'), `infra.pid
-infra.port
-*.snapshot.json
-`)
 
   console.log(`${GREEN}Dojo initialized at ${dojoRoot}${RESET}`)
   console.log()
@@ -492,8 +477,6 @@ infra.port
   console.log(`    .jean/`)
   console.log(`      playbooks/      ${DIM}← flow definitions${RESET}`)
   console.log(`      context/        ${DIM}← shared project context${RESET}`)
-  console.log(`      .env            ${DIM}← infrastructure config${RESET}`)
-  console.log(`      .gitignore      ${DIM}← excludes runtime files${RESET}`)
   console.log()
   console.log(`Next steps:`)
   console.log(`  jean infra start    ${DIM}← start infrastructure${RESET}`)
