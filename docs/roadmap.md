@@ -57,23 +57,20 @@ Tasks stay open through multi-round work. Agents operate without permission fric
 
 **Goal**: Sensei follows defined processes for different work types. Human-agent interactions are visible in the event log.
 
-### Design
+### What's done
+1. ✓ **Event-sourced playbooks** — `playbook-created`, `playbook-updated`, `playbook-removed` events on a `playbooks` stream. Files in `.jean/playbooks/` are input; infrastructure watches the directory, emits events on changes, derives runtime state via projection.
+2. ✓ **Playbook API** — `GET /playbooks` (list with name + description), `GET /playbooks/:id` (full content). Read from projection.
+3. ✓ **Task playbook field** — tasks carry an explicit `playbook` field set at creation time. Visible on board.
+4. ✓ **CLI** — `jean playbook list`, board shows playbook on tasks.
+5. ✓ **Sensei skill updated** — playbook section with API reference, event types, lifecycle guidance.
+6. ✓ **First playbook** — `review.md` (PR review lifecycle: owner/secondary review, output rules, iteration, closure).
+7. ✓ **Actor field** — `actor` on all task and trigger events for audit trails.
+8. ✓ **Infrastructure CLI** — `jean infra start/stop/status`, `JEAN_DATA_DIR`, auto-port selection, PID/port files.
 
-**Playbooks** — flow definitions that tell sensei how to handle a type of work. Not routing (tags handle that), but process: what to do at each stage, what to verify, when to ask the human, when to close.
-
-Live in `.jean/playbooks/`. Each playbook is a markdown file describing the flow. Sensei loads them at startup. Examples:
-- `review.md` — review task follows PR lifecycle. Design review first, then iterative rounds. Wait for assigned reviewer unless asked for preliminary review. Track PR comments. Task closes when PR is merged/approved/explicitly closed by human.
-- `dev.md` — dev task follows work lifecycle. May involve multiple repos. Lifecycle customizable (until PR merged, or until human says done). Human often works directly with agent.
-- `research.md` — scout/investigate tasks. Single-shot or recurring via triggers. Quality assessed by human feedback.
-
-**Interaction logging** — when an agent has a direct interaction with the human (outside the task system), the agent posts a summary to the task. Sensei mentions this expectation during task handoff. These summaries are events with a dedicated type (`human-interaction`), searchable and usable for self-reflection.
-
-### To build
-1. **Playbook format** — markdown with structured sections: lifecycle states, sensei behavior at each transition, verification requirements, tracking expectations
-2. **Playbook loading** — sensei reads `.jean/playbooks/` on startup, references playbook when dispatching tasks
-3. **Sensei handoff instructions** — when dispatching a task, sensei includes playbook-derived instructions (e.g. "log any direct interactions with the human")
-4. **Interaction summary events** — `human-interaction` event type. Agent posts summary when it detects multi-turn direct interaction ended
-5. **Idle pattern detection** — multiple rapid idle events from a worker suggest human is working with it. Sensei can use this signal to prompt the agent for a summary
+### Remaining
+1. **Interaction summary events** — `human-interaction` event type. Agent posts summary when it detects multi-turn direct interaction ended.
+2. **Idle pattern detection** — multiple rapid idle events from a worker suggest human is working with it. Sensei can use this signal to prompt the agent for a summary.
+3. **Sensei handoff instructions** — when dispatching a task with a playbook, sensei includes playbook-derived instructions (e.g. "log any direct interactions with the human").
 
 ### Deliverable
 Sensei follows consistent processes for reviews and dev work. Direct human-agent iterations are captured as events. Task history shows the full picture, not just the sensei-mediated exchanges.

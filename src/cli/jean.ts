@@ -76,6 +76,9 @@ switch (command) {
   case 'status':
     await cmdStatus()
     break
+  case 'dojo':
+    await cmdDojo(args.slice(1))
+    break
   case 'infra':
     await cmdInfra(args.slice(1))
     break
@@ -442,6 +445,59 @@ function eventColor(type: string): string {
     case 'permission-request': return '\x1b[31m' // red
     default:               return ''
   }
+}
+
+// ── Dojo subcommands ─────────────────────────────────────────────
+
+async function cmdDojo(args: string[]) {
+  const sub = args[0]
+  switch (sub) {
+    case 'init': cmdDojoInit(args[1]); break
+    default:
+      console.error('Usage: jean dojo init [path]')
+      process.exit(1)
+  }
+}
+
+function cmdDojoInit(targetPath?: string) {
+  const dojoRoot = resolve(targetPath ?? '.')
+
+  const jeanDir = resolve(dojoRoot, '.jean')
+  if (existsSync(jeanDir)) {
+    console.error(`Already a Jean dojo: ${jeanDir} exists.`)
+    process.exit(1)
+  }
+
+  // Create directory structure
+  mkdirSync(resolve(jeanDir, 'playbooks'), { recursive: true })
+  mkdirSync(resolve(jeanDir, 'context'), { recursive: true })
+
+  // Write .env template
+  writeFileSync(resolve(jeanDir, '.env'), `# Jean infrastructure config
+# Uncomment and configure for Slack integration:
+# SLACK_APP_TOKEN=xapp-...
+# SLACK_BOT_TOKEN=xoxb-...
+# SLACK_CHANNEL=C...
+`)
+
+  // Write .gitignore for runtime files
+  writeFileSync(resolve(jeanDir, '.gitignore'), `infra.pid
+infra.port
+*.snapshot.json
+`)
+
+  console.log(`${GREEN}Dojo initialized at ${dojoRoot}${RESET}`)
+  console.log()
+  console.log(`  ${dojoRoot}/`)
+  console.log(`    .jean/`)
+  console.log(`      playbooks/      ${DIM}← flow definitions${RESET}`)
+  console.log(`      context/        ${DIM}← shared project context${RESET}`)
+  console.log(`      .env            ${DIM}← infrastructure config${RESET}`)
+  console.log(`      .gitignore      ${DIM}← excludes runtime files${RESET}`)
+  console.log()
+  console.log(`Next steps:`)
+  console.log(`  jean infra start    ${DIM}← start infrastructure${RESET}`)
+  console.log(`  jean agent add <name> ${DIM}← add your first agent${RESET}`)
 }
 
 // ── Infra subcommands ────────────────────────────────────────────
@@ -1070,9 +1126,10 @@ function cmdAgentStart(name?: string) {
 // ── Usage ─────────────────────────────────────────────────────────
 
 function printUsage() {
-  console.log(`jean — multi-agent orchestration
+  console.log(`jean — multi-agent orchestration (v0.1.0)
 
 Commands:
+  jean dojo init [path]                       Initialize a new dojo
   jean infra start                            Start infrastructure server
   jean infra stop                             Stop infrastructure server
   jean infra status                           Show infrastructure status

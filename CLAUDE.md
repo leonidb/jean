@@ -32,7 +32,7 @@ src/
   channel/          ← Jean channel plugin (MCP server for Claude Code)
   infra/            ← Infrastructure layer (HTTP/WS server, event store, projections, Slack)
   es/               ← Event sourcing primitives (store, projections, backends)
-  cli/              ← CLI commands (jean board, jean agent, jean send, jean status)
+  cli/              ← CLI commands (jean infra, jean board, jean agent, jean task, jean playbook, ...)
 docs/
   design.md         ← Project overview and core ideas
   concepts.md       ← Full architecture, component design, communication patterns
@@ -52,17 +52,26 @@ docs/
 ## Running
 
 ```bash
-# Start the infrastructure service
-bun run src/infra/server.ts
+# Install the jean CLI globally (run once from this repo)
+bun link
 
-# Start an agent (from its directory)
+# Start infrastructure (from dojo root or any subdirectory)
+jean infra start                       # auto-selects port, writes .jean/infra.pid
+jean infra stop                        # stops the server for this dojo
+jean infra status                      # show running state
+
+# Start an agent
+jean agent start <name>                # or manually:
 cd <agent-dir> && claude --dangerously-load-development-channels server:jean
 
-# CLI commands
-bun run src/cli/jean.ts board          # kanban view
-bun run src/cli/jean.ts agent list     # list agents
-bun run src/cli/jean.ts status         # infra status + recent events
-bun run src/cli/jean.ts send <agent> "message"
+# CLI commands (run from anywhere in the dojo tree)
+jean board                             # kanban view
+jean agent list                        # list agents
+jean status                            # infra status + recent events
+jean send <agent> "message"            # send message to agent
+jean task log <id>                     # task event history
+jean playbook list                     # loaded playbooks
+jean trigger list                      # scheduled triggers
 ```
 
 ### Key reference
