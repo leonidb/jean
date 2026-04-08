@@ -588,13 +588,14 @@ async function cmdDojo(args: string[]) {
       cmdDojoInit(args.slice(1))
       break
     default:
-      console.error('Usage: jean dojo init [path] [--key value ...]')
+      console.error('Usage: jean dojo init [path] [--git] [--key value ...]')
       process.exit(1)
   }
 }
 
 function cmdDojoInit(args: string[]) {
-  // First non-flag arg is the path
+  const useGit = args.includes('--git')
+  // First non-flag arg is the path (skip --git and --key value pairs)
   const targetPath = args.find((a) => !a.startsWith('--'))
   const dojoRoot = resolve(targetPath ?? '.')
 
@@ -604,60 +605,41 @@ function cmdDojoInit(args: string[]) {
     process.exit(1)
   }
 
+  // Core directories
   mkdirSync(resolve(jeanDir, 'playbooks'), { recursive: true })
   mkdirSync(resolve(jeanDir, 'context'), { recursive: true })
-  mkdirSync(resolve(jeanDir, 'skills'), { recursive: true })
 
-  // Ship default skills
-  writeFileSync(
-    resolve(jeanDir, 'skills', 'create-playbook.md'),
-    `---
-name: create-playbook
-description: >
-  Guide for creating and updating playbooks — workflow definitions
-  that control how work flows through the dojo.
----
+  // Skill hierarchy
+  mkdirSync(resolve(jeanDir, '.claude', 'skills'), { recursive: true })
+  mkdirSync(resolve(jeanDir, 'roles', 'worker', '.claude', 'skills'), { recursive: true })
+  shipSenseiSkills(jeanDir)
 
-# Create Playbook
+  // Git repo
+  if (useGit) {
+    const bareDir = resolve(jeanDir, '.bare')
+    const gitOpts = { stdout: 'pipe' as const, stderr: 'pipe' as const }
+    const gitCheck = (result: { exitCode: number; stderr: { toString(): string } }, label: string) => {
+      if (result.exitCode !== 0) {
+        console.error(`git ${label} failed: ${result.stderr.toString().trim()}`)
+        process.exit(1)
+      }
+    }
+    gitCheck(Bun.spawnSync(['git', 'init', '--bare', bareDir], gitOpts), 'init --bare')
+    gitCheck(Bun.spawnSync(['git', '-C', bareDir, 'symbolic-ref', 'HEAD', 'refs/heads/main'], gitOpts), 'symbolic-ref')
+    // Initial commit with .gitignore (temp file — worktrees will have it via checkout)
+    writeFileSync(resolve(dojoRoot, '.gitignore'), '.jean/\n')
+    const env = { ...process.env, GIT_DIR: bareDir, GIT_WORK_TREE: dojoRoot }
+    gitCheck(Bun.spawnSync(['git', 'add', '.gitignore'], { ...gitOpts, env }), 'add')
+    gitCheck(Bun.spawnSync(['git', 'commit', '-m', 'Initial commit'], { ...gitOpts, env }), 'commit')
+    unlinkSync(resolve(dojoRoot, '.gitignore'))
+  }
 
-Create or update a playbook — a workflow definition that guides how a type of work flows through the dojo.
-
-## Format
-
-Playbooks are markdown files in \`.jean/playbooks/\`. The infrastructure watches this directory — changes are picked up automatically.
-
-\`\`\`markdown
----
-name: <short-name>
-description: >
-  One or two sentences. What this workflow is for and when it applies.
----
-
-# <Title>
-
-<Body: phases, rules, output expectations, done criteria>
-\`\`\`
-
-## Writing guidelines
-
-- **Start with the trigger**: what causes this workflow to start?
-- **Define phases**: sequential, concrete steps.
-- **Specify output rules**: where do results go? (task replies, Slack, files)
-- **Define done**: when is the workflow complete?
-- **Human interaction points**: when should the agent pause and ask?
-- **Keep it short**: agents scan playbooks quickly, not read essays.
-- **No agent-specific instructions**: playbooks define the workflow, not which agent runs it.
-
-## Verifying
-
-After writing a playbook file, verify it loaded via \`GET /playbooks\`.
-`,
-  )
-
+  // Config
   const config: JeanConfig = {}
   for (let i = 0; i < args.length; i++) {
     if (!args[i]?.startsWith('--')) continue
     const key = args[i]!.slice(2)
+    if (key === 'git') continue // not a config key
     const raw = args[i + 1]
     if (!raw || raw.startsWith('--')) {
       console.error(`Missing value for --${key}`)
@@ -675,8 +657,12 @@ After writing a playbook file, verify it loaded via \`GET /playbooks\`.
   console.log()
   console.log(`  ${dojoRoot}/`)
   console.log(`    .jean/`)
+  if (useGit) {
+    console.log(`      .bare/          ${DIM}← git bare repo${RESET}`)
+  }
+  console.log(`      .claude/skills/ ${DIM}← shared dojo skills${RESET}`)
+  console.log(`      roles/          ${DIM}← role-specific skills${RESET}`)
   console.log(`      playbooks/      ${DIM}← flow definitions${RESET}`)
-  console.log(`      skills/         ${DIM}← dojo-level skill templates${RESET}`)
   console.log(`      context/        ${DIM}← shared project context${RESET}`)
   if (Object.keys(config).length > 0) {
     console.log(`      jean.config.json ${DIM}← configuration${RESET}`)
@@ -685,6 +671,27 @@ After writing a playbook file, verify it loaded via \`GET /playbooks\`.
   console.log(`Next steps:`)
   console.log(`  jean infra start    ${DIM}← start infrastructure${RESET}`)
   console.log(`  jean agent add <name> ${DIM}← add your first agent${RESET}`)
+}
+
+/** Directory containing the CLI source (used for resolving co-located assets) */
+function cliDir(): string {
+  return dirname(Bun.main)
+}
+
+/** Read a framework skill template shipped with Jean */
+function readSkillTemplate(name: string): string {
+  return readFileSync(resolve(cliDir(), 'skills', `${name}.md`), 'utf8')
+}
+
+/** Ship framework skills for sensei role */
+function shipSenseiSkills(jeanDir: string) {
+  const senseiSkillBase = resolve(jeanDir, 'roles', 'sensei', '.claude', 'skills')
+
+  for (const name of ['create-playbook', 'jean-sensei']) {
+    const skillDir = resolve(senseiSkillBase, name)
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(resolve(skillDir, 'SKILL.md'), readSkillTemplate(name))
+  }
 }
 
 // ── Infra subcommands ────────────────────────────────────────────
@@ -726,7 +733,7 @@ async function cmdInfraStart() {
   }
 
   // Find the server entrypoint
-  const serverPath = resolve(dirname(new URL(import.meta.url).pathname), '../infra/server.ts')
+  const serverPath = resolve(cliDir(), '../infra/server.ts')
 
   const child = Bun.spawn(['bun', 'run', serverPath], {
     cwd: dataDir,
@@ -898,7 +905,7 @@ function findDojoRoot(): string {
 }
 
 function findBareRepo(dojoRoot: string): string | null {
-  const bareDir = resolve(dojoRoot, '.bare')
+  const bareDir = resolve(dojoRoot, '.jean', '.bare')
   return existsSync(bareDir) ? bareDir : null
 }
 
@@ -964,7 +971,7 @@ function findAgent(name: string, dojoRoot: string): AgentInfo | undefined {
 }
 
 function channelDir(): string {
-  return resolve(dirname(Bun.main), '..', 'channel')
+  return resolve(cliDir(), '..', 'channel')
 }
 
 function isWorktreeDirty(path: string): boolean {
@@ -1368,7 +1375,7 @@ function printUsage() {
   console.log(`jean — multi-agent orchestration (v0.1.0)
 
 Commands:
-  jean dojo init [path] [--key value ...]      Initialize a new dojo
+  jean dojo init [path] [--git] [--key value ..] Initialize a new dojo
   jean config set <key> <value>               Set a config value
   jean config get <key>                       Get a config value
   jean config list                            Show all config
