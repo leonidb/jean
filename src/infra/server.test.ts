@@ -1,13 +1,15 @@
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { mkdirSync, rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
-import { rmSync, mkdirSync } from 'node:fs'
 
 const TEST_PORT = 8799
 const DATA_DIR = '/tmp/jean-test-server'
 let server: Subprocess
 
 beforeAll(async () => {
-  try { rmSync(DATA_DIR, { recursive: true }) } catch {}
+  try {
+    rmSync(DATA_DIR, { recursive: true })
+  } catch {}
   mkdirSync(DATA_DIR, { recursive: true })
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
     env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_DATA_DIR: DATA_DIR },
@@ -78,7 +80,7 @@ describe('infrastructure server', () => {
     const data = (await res.json()) as { events: Array<{ type: string }> }
     expect(Array.isArray(data.events)).toBe(true)
     expect(data.events.length).toBeGreaterThan(0)
-    expect(data.events.some(e => e.type === 'start')).toBe(true)
+    expect(data.events.some((e) => e.type === 'start')).toBe(true)
   })
 
   test('WebSocket registration works', async () => {
@@ -101,7 +103,7 @@ describe('infrastructure server', () => {
     // Verify the agent appears in /agents
     const res = await fetch(`${BASE}/agents`)
     const data = (await res.json()) as { agents: Array<{ name: string; role: string }> }
-    expect(data.agents.some(a => a.name === 'test-agent')).toBe(true)
+    expect(data.agents.some((a) => a.name === 'test-agent')).toBe(true)
 
     ws.close()
   })
@@ -143,10 +145,10 @@ describe('infrastructure server', () => {
       setTimeout(resolve, 1000)
     })
 
-    const delivered = messages.find(m => m.type === 'deliver')
+    const delivered = messages.find((m) => m.type === 'deliver')
     expect(delivered).toBeDefined()
-    expect(delivered!.text).toBe('hello routed')
-    expect(delivered!.from).toBe('test')
+    expect(delivered?.text).toBe('hello routed')
+    expect(delivered?.from).toBe('test')
 
     ws.close()
   })

@@ -1,13 +1,15 @@
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { mkdirSync, rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
-import { rmSync, mkdirSync } from 'node:fs'
 
 const TEST_PORT = 8795
 const DATA_DIR = '/tmp/jean-test-queue'
 let server: Subprocess
 
 beforeAll(async () => {
-  try { rmSync(DATA_DIR, { recursive: true }) } catch {}
+  try {
+    rmSync(DATA_DIR, { recursive: true })
+  } catch {}
   mkdirSync(DATA_DIR, { recursive: true })
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
     env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_DATA_DIR: DATA_DIR },
@@ -15,17 +17,26 @@ beforeAll(async () => {
     stderr: 'pipe',
   })
   for (let i = 0; i < 20; i++) {
-    try { await fetch(`http://127.0.0.1:${TEST_PORT}/`); break }
-    catch { await Bun.sleep(100) }
+    try {
+      await fetch(`http://127.0.0.1:${TEST_PORT}/`)
+      break
+    } catch {
+      await Bun.sleep(100)
+    }
   }
 })
 
-afterAll(() => { server.kill() })
+afterAll(() => {
+  server.kill()
+})
 
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 
-function connectAgent(name: string, role: string = 'worker'): Promise<{ ws: WebSocket; messages: any[]; baselineCount: number }> {
+function connectAgent(
+  name: string,
+  role: string = 'worker',
+): Promise<{ ws: WebSocket; messages: any[]; baselineCount: number }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(WS_URL)
     const messages: any[] = []
@@ -61,9 +72,9 @@ describe('event queue', () => {
     const res = await fetch(`${BASE}/events/pending?agent=reply-worker`)
     const data = (await res.json()) as { events: Array<{ type: string; agent: string; data: { text: string } }> }
     expect(data.events.length).toBeGreaterThanOrEqual(1)
-    const event = data.events.find(e => e.type === 'reply')
+    const event = data.events.find((e) => e.type === 'reply')
     expect(event).toBeDefined()
-    expect(event!.data.text).toBe('done with task')
+    expect(event?.data.text).toBe('done with task')
 
     ws.close()
   })
@@ -79,7 +90,7 @@ describe('event queue', () => {
 
     const res = await fetch(`${BASE}/events/pending?agent=idle-worker`)
     const data = (await res.json()) as { events: Array<{ type: string; agent: string }> }
-    expect(data.events.some(e => e.type === 'agent-idle')).toBe(true)
+    expect(data.events.some((e) => e.type === 'agent-idle')).toBe(true)
 
     ws.close()
   })
@@ -93,7 +104,7 @@ describe('event queue', () => {
 
     const res = await fetch(`${BASE}/events/pending?agent=queue-test`)
     const data = (await res.json()) as { events: Array<{ type: string; agent: string }> }
-    expect(data.events.some(e => e.type === 'task-created')).toBe(true)
+    expect(data.events.some((e) => e.type === 'task-created')).toBe(true)
   })
 
   test('GET /events/agents returns per-agent counts', async () => {
@@ -122,7 +133,7 @@ describe('event queue', () => {
     // Verify it's gone
     const after = await fetch(`${BASE}/events/pending?agent=ack-worker`)
     const afterData = (await after.json()) as { events: Array<{ id: number }> }
-    expect(afterData.events.find(e => e.id === event.id)).toBeUndefined()
+    expect(afterData.events.find((e) => e.id === event.id)).toBeUndefined()
 
     ws.close()
   })
@@ -142,7 +153,7 @@ describe('event queue', () => {
     expect(data.events.length).toBe(3)
 
     // Ack up to the second event
-    const secondId = data.events[1]!.id
+    const secondId = data.events[1]?.id
     const ackRes = await fetch(`${BASE}/events/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -170,9 +181,9 @@ describe('event queue', () => {
 
     const res = await fetch(`${BASE}/events/pending?agent=fifo-worker`)
     const data = (await res.json()) as { events: Array<{ data: { text: string } }> }
-    expect(data.events[0]!.data.text).toBe('first')
-    expect(data.events[1]!.data.text).toBe('second')
-    expect(data.events[2]!.data.text).toBe('third')
+    expect(data.events[0]?.data.text).toBe('first')
+    expect(data.events[1]?.data.text).toBe('second')
+    expect(data.events[2]?.data.text).toBe('third')
 
     ws.close()
   })
@@ -182,7 +193,7 @@ async function clearPendingEvents() {
   const res = await fetch(`${BASE}/events`)
   const data = (await res.json()) as { events: Array<{ id: number }> }
   if (data.events.length > 0) {
-    const maxId = Math.max(...data.events.map(e => e.id))
+    const maxId = Math.max(...data.events.map((e) => e.id))
     await fetch(`${BASE}/events/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -209,7 +220,9 @@ describe('sensei nudge', () => {
 
     // Look for nudge after connect-time messages
     const postConnect = messages.slice(baselineCount)
-    const nudge = postConnect.find(m => m.type === 'deliver' && m.from === 'infra' && m.text?.includes('Events pending'))
+    const nudge = postConnect.find(
+      (m) => m.type === 'deliver' && m.from === 'infra' && m.text?.includes('Events pending'),
+    )
     expect(nudge).toBeDefined()
 
     sensei.close()
@@ -227,7 +240,7 @@ describe('sensei nudge', () => {
     // Event should be queued regardless
     const res = await fetch(`${BASE}/events?agent=busy-worker`)
     const data = (await res.json()) as { events: Array<{ data: { text: string } }> }
-    expect(data.events.some(e => e.data?.text === 'done')).toBe(true)
+    expect(data.events.some((e) => e.data?.text === 'done')).toBe(true)
 
     sensei.close()
     worker.close()
@@ -253,13 +266,13 @@ describe('sensei nudge', () => {
 
     // No new nudges after connect (only the connect nudge in baseline)
     const postConnect = messages.slice(baselineCount)
-    const nudges = postConnect.filter(m => m.type === 'deliver' && m.from === 'infra')
+    const nudges = postConnect.filter((m) => m.type === 'deliver' && m.from === 'infra')
     expect(nudges.length).toBe(0)
 
     // But the event IS in history (informational)
     const histRes = await fetch(`${BASE}/history`)
     const hist = (await histRes.json()) as { events: Array<{ type: string; agent: string }> }
-    expect(hist.events.some(e => e.type === 'agent-idle' && e.agent === 'self-loop-sensei')).toBe(true)
+    expect(hist.events.some((e) => e.type === 'agent-idle' && e.agent === 'self-loop-sensei')).toBe(true)
 
     sensei.close()
   })
@@ -275,7 +288,7 @@ describe('sensei nudge', () => {
 
     const res = await fetch(`${BASE}/events?agent=idle-actionable-worker`)
     const data = (await res.json()) as { events: Array<{ type: string }> }
-    expect(data.events.some(e => e.type === 'agent-idle')).toBe(true)
+    expect(data.events.some((e) => e.type === 'agent-idle')).toBe(true)
 
     worker.close()
   })
@@ -284,9 +297,9 @@ describe('sensei nudge', () => {
 describe('role-based routing', () => {
   test('register with role is acknowledged', async () => {
     const { ws, messages } = await connectAgent('role-test', 'worker')
-    const reg = messages.find(m => m.type === 'registered')
+    const reg = messages.find((m) => m.type === 'registered')
     expect(reg).toBeDefined()
-    expect(reg!.role).toBe('worker')
+    expect(reg?.role).toBe('worker')
     ws.close()
   })
 
@@ -301,10 +314,10 @@ describe('role-based routing', () => {
     // Reply should be in the queue
     const res = await fetch(`${BASE}/events/pending?agent=routing-worker`)
     const data = (await res.json()) as { events: Array<{ text: string }> }
-    expect(data.events.some(e => (e as any).data?.text === 'routed reply')).toBe(true)
+    expect(data.events.some((e) => (e as any).data?.text === 'routed reply')).toBe(true)
 
     // Sensei should NOT have received it directly (it's not idle)
-    const directDelivery = senseiMsgs.find(m => m.type === 'deliver' && m.text === 'routed reply')
+    const directDelivery = senseiMsgs.find((m) => m.type === 'deliver' && m.text === 'routed reply')
     expect(directDelivery).toBeUndefined()
 
     sensei.close()

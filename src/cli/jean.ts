@@ -23,12 +23,17 @@
  *   jean infra status                           Show infrastructure status
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, unlinkSync } from 'node:fs'
-import { resolve, dirname, basename } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, resolve } from 'node:path'
 import {
-  CONFIG_SCHEMA, readConfig, writeConfig,
-  validateConfigKey, parseConfigValue, setByPath, getByPath,
+  CONFIG_SCHEMA,
+  getByPath,
   type JeanConfig,
+  parseConfigValue,
+  readConfig,
+  setByPath,
+  validateConfigKey,
+  writeConfig,
 } from '../infra/config.ts'
 
 const args = process.argv.slice(2)
@@ -123,7 +128,8 @@ async function cmdBoard() {
   const groups: Record<string, Array<Record<string, string>>> = {}
   for (const task of board.tasks) {
     const status = task.status ?? 'unknown'
-    ;(groups[status] ??= []).push(task)
+    groups[status] ??= []
+    groups[status]!.push(task)
   }
 
   const statusOrder = ['todo', 'assigned', 'in-progress', 'waiting', 'done', 'cancelled']
@@ -180,10 +186,7 @@ async function cmdSend(agent?: string, text?: string) {
 }
 
 async function cmdStatus() {
-  const [infoRes, eventsRes] = await Promise.all([
-    infraFetch('/'),
-    infraFetch('/events'),
-  ])
+  const [infoRes, eventsRes] = await Promise.all([infraFetch('/'), infraFetch('/events')])
   const info = (await infoRes.json()) as { agents: string[] }
   const eventsData = (await eventsRes.json()) as {
     events: Array<{ ts: string; type: string; agent?: string; detail?: string }>
@@ -234,7 +237,10 @@ function summarizeSamples(tool: string, samples: Record<string, unknown>[]): str
   if (tool === 'Bash') {
     const cmds: Record<string, number> = {}
     for (const s of samples) {
-      const cmd = String(s.command ?? '').split(' ').slice(0, 3).join(' ')
+      const cmd = String(s.command ?? '')
+        .split(' ')
+        .slice(0, 3)
+        .join(' ')
       if (cmd) cmds[cmd] = (cmds[cmd] ?? 0) + 1
     }
     return Object.entries(cmds)
@@ -244,7 +250,7 @@ function summarizeSamples(tool: string, samples: Record<string, unknown>[]): str
       .join(', ')
   }
   if (tool === 'Edit' || tool === 'Write') {
-    const paths = new Set(samples.map(s => String(s.file_path ?? '')).filter(Boolean))
+    const paths = new Set(samples.map((s) => String(s.file_path ?? '')).filter(Boolean))
     if (paths.size <= 3) return [...paths].join(', ')
     return `${paths.size} files`
   }
@@ -256,10 +262,18 @@ function summarizeSamples(tool: string, samples: Record<string, unknown>[]): str
 async function cmdTrigger(args: string[]) {
   const sub = args[0]
   switch (sub) {
-    case 'add':    await cmdTriggerAdd(args.slice(1)); break
-    case 'list':   await cmdTriggerList(); break
-    case 'remove': await cmdTriggerRemove(args[1]); break
-    case 'fire':   await cmdTriggerFire(args[1]); break
+    case 'add':
+      await cmdTriggerAdd(args.slice(1))
+      break
+    case 'list':
+      await cmdTriggerList()
+      break
+    case 'remove':
+      await cmdTriggerRemove(args[1])
+      break
+    case 'fire':
+      await cmdTriggerFire(args[1])
+      break
     default:
       console.error('Usage: jean trigger <add|list|remove|fire>')
       process.exit(1)
@@ -310,8 +324,14 @@ async function cmdTriggerList() {
   const res = await infraFetch('/triggers')
   const { triggers } = (await res.json()) as {
     triggers: Array<{
-      id: string; cron?: string; at?: string; agent: string
-      prompt: string; status: string; actor: string; lastFiredAt?: string
+      id: string
+      cron?: string
+      at?: string
+      agent: string
+      prompt: string
+      status: string
+      actor: string
+      lastFiredAt?: string
     }>
   }
 
@@ -324,9 +344,7 @@ async function cmdTriggerList() {
   for (const t of triggers) {
     const schedule = t.cron ? `cron: ${t.cron}` : `at: ${t.at}`
     const statusColor = t.status === 'active' ? GREEN : DIM
-    const lastFired = t.lastFiredAt
-      ? ` ${DIM}(last: ${t.lastFiredAt.slice(0, 19)})${RESET}`
-      : ''
+    const lastFired = t.lastFiredAt ? ` ${DIM}(last: ${t.lastFiredAt.slice(0, 19)})${RESET}` : ''
     console.log(`  ${BOLD}${t.id}${RESET} ${statusColor}${t.status}${RESET} ${DIM}${schedule}${RESET}${lastFired}`)
     console.log(`    → ${t.agent}: "${t.prompt}"`)
   }
@@ -368,7 +386,9 @@ async function cmdTriggerFire(id?: string) {
 async function cmdTask(args: string[]) {
   const sub = args[0]
   switch (sub) {
-    case 'log': await cmdTaskLog(args[1]); break
+    case 'log':
+      await cmdTaskLog(args[1])
+      break
     default:
       console.error('Usage: jean task <log> <id>')
       process.exit(1)
@@ -387,7 +407,10 @@ async function cmdTaskLog(id?: string) {
   const res = await infraFetch(`/history?taskId=${encodeURIComponent(taskId)}&diagnostics=true`)
   const { events } = (await res.json()) as {
     events: Array<{
-      id: number; type: string; ts: string; agent?: string
+      id: number
+      type: string
+      ts: string
+      agent?: string
       data: { text?: string; from?: string; to?: string; status?: string; [k: string]: unknown }
     }>
   }
@@ -397,8 +420,16 @@ async function cmdTaskLog(id?: string) {
     return
   }
 
-  const meaningful = events.filter(e =>
-    ['task-created', 'task-status', 'task-updated', 'send', 'reply', 'human-interaction', 'permission-request'].includes(e.type),
+  const meaningful = events.filter((e) =>
+    [
+      'task-created',
+      'task-status',
+      'task-updated',
+      'send',
+      'reply',
+      'human-interaction',
+      'permission-request',
+    ].includes(e.type),
   )
 
   console.log(`\n${BOLD}Task ${taskId}${RESET} — ${meaningful.length} events\n`)
@@ -412,7 +443,7 @@ async function cmdTaskLog(id?: string) {
     let detail = ''
     if (e.type === 'task-created') {
       const actor = e.data.actor ? ` (by ${e.data.actor})` : ''
-      detail = (e.data.title as string ?? '') + actor
+      detail = ((e.data.title as string) ?? '') + actor
     } else if (e.type === 'task-status') {
       const actor = e.data.actor ? ` by ${e.data.actor}` : ''
       detail = `${e.data.from} → ${e.data.to}${actor}`
@@ -424,8 +455,11 @@ async function cmdTaskLog(id?: string) {
       detail = parts.join(', ')
     } else if (e.type === 'send' || e.type === 'reply' || e.type === 'human-interaction') {
       const text = e.data.text ?? ''
-      const lines = text.split('\n').filter((l: string) => l.trim()).slice(0, 3)
-      const truncated = lines.map((l: string) => l.length > 120 ? l.slice(0, 117) + '...' : l)
+      const lines = text
+        .split('\n')
+        .filter((l: string) => l.trim())
+        .slice(0, 3)
+      const truncated = lines.map((l: string) => (l.length > 120 ? `${l.slice(0, 117)}...` : l))
       if (text.split('\n').filter((l: string) => l.trim()).length > 3) truncated.push('...')
       detail = truncated.join('\n')
     } else if (e.type === 'permission-request') {
@@ -445,13 +479,20 @@ async function cmdTaskLog(id?: string) {
 
 function eventColor(type: string): string {
   switch (type) {
-    case 'task-created':   return '\x1b[36m'  // cyan
-    case 'task-status':    return '\x1b[33m'  // yellow
-    case 'send':           return '\x1b[34m'  // blue
-    case 'reply':          return '\x1b[32m'  // green
-    case 'human-interaction': return '\x1b[35m' // magenta
-    case 'permission-request': return '\x1b[31m' // red
-    default:               return ''
+    case 'task-created':
+      return '\x1b[36m' // cyan
+    case 'task-status':
+      return '\x1b[33m' // yellow
+    case 'send':
+      return '\x1b[34m' // blue
+    case 'reply':
+      return '\x1b[32m' // green
+    case 'human-interaction':
+      return '\x1b[35m' // magenta
+    case 'permission-request':
+      return '\x1b[31m' // red
+    default:
+      return ''
   }
 }
 
@@ -479,9 +520,15 @@ function applyConfigEntry(config: JeanConfig, key: string, raw: string): void {
 function cmdConfig(args: string[]) {
   const sub = args[0]
   switch (sub) {
-    case 'set': cmdConfigSet(args[1], args[2]); break
-    case 'get': cmdConfigGet(args[1]); break
-    case 'list': cmdConfigList(); break
+    case 'set':
+      cmdConfigSet(args[1], args[2])
+      break
+    case 'get':
+      cmdConfigGet(args[1])
+      break
+    case 'list':
+      cmdConfigList()
+      break
     default:
       console.error('Usage: jean config <set|get|list>')
       process.exit(1)
@@ -537,7 +584,9 @@ function cmdConfigList() {
 async function cmdDojo(args: string[]) {
   const sub = args[0]
   switch (sub) {
-    case 'init': cmdDojoInit(args.slice(1)); break
+    case 'init':
+      cmdDojoInit(args.slice(1))
+      break
     default:
       console.error('Usage: jean dojo init [path] [--key value ...]')
       process.exit(1)
@@ -546,7 +595,7 @@ async function cmdDojo(args: string[]) {
 
 function cmdDojoInit(args: string[]) {
   // First non-flag arg is the path
-  const targetPath = args.find(a => !a.startsWith('--'))
+  const targetPath = args.find((a) => !a.startsWith('--'))
   const dojoRoot = resolve(targetPath ?? '.')
 
   const jeanDir = resolve(dojoRoot, '.jean')
@@ -560,8 +609,8 @@ function cmdDojoInit(args: string[]) {
 
   const config: JeanConfig = {}
   for (let i = 0; i < args.length; i++) {
-    if (!args[i]!.startsWith('--')) continue
-    const key = args[i]!.slice(2)
+    if (!args[i]?.startsWith('--')) continue
+    const key = args[i]?.slice(2)
     const raw = args[i + 1]
     if (!raw || raw.startsWith('--')) {
       console.error(`Missing value for --${key}`)
@@ -595,9 +644,15 @@ function cmdDojoInit(args: string[]) {
 async function cmdInfra(args: string[]) {
   const sub = args[0]
   switch (sub) {
-    case 'start': await cmdInfraStart(); break
-    case 'stop':  await cmdInfraStop(); break
-    case 'status': await cmdInfraStatus(); break
+    case 'start':
+      await cmdInfraStart()
+      break
+    case 'stop':
+      await cmdInfraStop()
+      break
+    case 'status':
+      await cmdInfraStatus()
+      break
     default:
       console.error('Usage: jean infra <start|stop|status>')
       process.exit(1)
@@ -671,8 +726,12 @@ async function cmdInfraStop() {
   }
 
   // Clean up in case signal handler didn't
-  try { unlinkSync(pidFile) } catch {}
-  try { unlinkSync(resolve(dataDir, 'infra.port')) } catch {}
+  try {
+    unlinkSync(pidFile)
+  } catch {}
+  try {
+    unlinkSync(resolve(dataDir, 'infra.port'))
+  } catch {}
 }
 
 async function cmdInfraStatus() {
@@ -710,7 +769,9 @@ async function cmdInfraStatus() {
 async function cmdPlaybook(args: string[]) {
   const sub = args[0]
   switch (sub) {
-    case 'list': await cmdPlaybookList(); break
+    case 'list':
+      await cmdPlaybookList()
+      break
     default:
       console.error('Usage: jean playbook <list>')
       process.exit(1)
@@ -721,7 +782,11 @@ async function cmdPlaybookList() {
   const res = await infraFetch('/playbooks')
   const { playbooks } = (await res.json()) as {
     playbooks: Array<{
-      id: string; name: string; description: string; hash: string; updatedAt: string
+      id: string
+      name: string
+      description: string
+      hash: string
+      updatedAt: string
     }>
   }
 
@@ -745,11 +810,21 @@ async function cmdPlaybookList() {
 function cmdAgent(args: string[]) {
   const sub = args[0]
   switch (sub) {
-    case 'add':    cmdAgentAdd(args.slice(1)); break
-    case 'list':   cmdAgentList(); break
-    case 'tag':    cmdAgentTag(args.slice(1)); break
-    case 'remove': cmdAgentRemove(args.slice(1)); break
-    case 'start':  cmdAgentStart(args[1]); break
+    case 'add':
+      cmdAgentAdd(args.slice(1))
+      break
+    case 'list':
+      cmdAgentList()
+      break
+    case 'tag':
+      cmdAgentTag(args.slice(1))
+      break
+    case 'remove':
+      cmdAgentRemove(args.slice(1))
+      break
+    case 'start':
+      cmdAgentStart(args[1])
+      break
     default:
       console.error('Usage: jean agent <add|list|tag|remove|start>')
       process.exit(1)
@@ -780,10 +855,10 @@ function findBareRepo(dojoRoot: string): string | null {
 }
 
 function getWorktreeBranches(bareDir: string): Map<string, string> {
-  const result = Bun.spawnSync(
-    ['git', '-C', bareDir, 'worktree', 'list', '--porcelain'],
-    { stdout: 'pipe', stderr: 'pipe' },
-  )
+  const result = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'list', '--porcelain'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
   if (result.exitCode !== 0) return new Map()
 
   const branches = new Map<string, string>()
@@ -807,14 +882,13 @@ function readAgentMeta(agentDir: string): AgentMeta | null {
       tags: data.tags ?? [],
       role: data.role ?? 'worker',
     }
-  } catch { return null }
+  } catch {
+    return null
+  }
 }
 
 function writeAgentMeta(agentDir: string, meta: AgentMeta): void {
-  writeFileSync(
-    resolve(agentDir, '.jean-agent.json'),
-    JSON.stringify(meta, null, 2) + '\n',
-  )
+  writeFileSync(resolve(agentDir, '.jean-agent.json'), `${JSON.stringify(meta, null, 2)}\n`)
 }
 
 function discoverAgents(dojoRoot: string): AgentInfo[] {
@@ -830,13 +904,15 @@ function discoverAgents(dojoRoot: string): AgentInfo[] {
       if (!meta) continue
       agents.push({ ...meta, path: dirPath, branch: branches.get(dirPath) })
     }
-  } catch { /* can't read dojo root */ }
+  } catch {
+    /* can't read dojo root */
+  }
 
   return agents
 }
 
 function findAgent(name: string, dojoRoot: string): AgentInfo | undefined {
-  return discoverAgents(dojoRoot).find(a => a.name === name)
+  return discoverAgents(dojoRoot).find((a) => a.name === name)
 }
 
 function channelDir(): string {
@@ -844,10 +920,7 @@ function channelDir(): string {
 }
 
 function isWorktreeDirty(path: string): boolean {
-  const result = Bun.spawnSync(
-    ['git', '-C', path, 'status', '--porcelain'],
-    { stdout: 'pipe', stderr: 'pipe' },
-  )
+  const result = Bun.spawnSync(['git', '-C', path, 'status', '--porcelain'], { stdout: 'pipe', stderr: 'pipe' })
   return result.stdout.toString().trim().length > 0
 }
 
@@ -863,19 +936,12 @@ function cmdAgentAdd(args: string[]) {
     process.exit(1)
   }
   const role = roleStr as AgentRole
-  const useWorktree = args.includes('--worktree') ? true
-    : args.includes('--no-worktree') ? false
-    : role === 'worker' // default: workers get worktrees
+  const useWorktree = args.includes('--worktree') ? true : args.includes('--no-worktree') ? false : role === 'worker' // default: workers get worktrees
   const tagsIdx = args.indexOf('--tags')
-  const tags: string[] = tagsIdx >= 0
-    ? args.slice(tagsIdx + 1).filter(a => !a.startsWith('--'))
-    : []
+  const tags: string[] = tagsIdx >= 0 ? args.slice(tagsIdx + 1).filter((a) => !a.startsWith('--')) : []
 
   if (existingMode) {
-    const positional = args.filter(a =>
-      !a.startsWith('--') && !tags.includes(a) &&
-      a !== flagValue(args, '--role'),
-    )
+    const positional = args.filter((a) => !a.startsWith('--') && !tags.includes(a) && a !== flagValue(args, '--role'))
     const targetPath = positional[0]
     if (!targetPath) {
       console.error('Usage: jean agent add --existing <path> [--role <role>] [--tags ...]')
@@ -923,15 +989,15 @@ function addNew(name: string, role: AgentRole, tags: string[], useWorktree: bool
     const branch = `jean/${name}`
     console.log(`Creating worktree on branch "${branch}"...`)
 
-    let wt = Bun.spawnSync(
-      ['git', '-C', bareDir, 'worktree', 'add', `../${name}`, '-b', branch],
-      { stderr: 'pipe', stdout: 'pipe' },
-    )
+    let wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', `../${name}`, '-b', branch], {
+      stderr: 'pipe',
+      stdout: 'pipe',
+    })
     if (wt.exitCode !== 0) {
-      wt = Bun.spawnSync(
-        ['git', '-C', bareDir, 'worktree', 'add', `../${name}`, branch],
-        { stderr: 'pipe', stdout: 'pipe' },
-      )
+      wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', `../${name}`, branch], {
+        stderr: 'pipe',
+        stdout: 'pipe',
+      })
       if (wt.exitCode !== 0) {
         console.error(`Failed to create worktree: ${wt.stderr.toString().trim()}`)
         process.exit(1)
@@ -945,7 +1011,8 @@ function addNew(name: string, role: AgentRole, tags: string[], useWorktree: bool
       console.error(`Failed to write agent config: ${err}`)
       console.error('Rolling back worktree...')
       Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'remove', `../${name}`, '--force'], {
-        stderr: 'pipe', stdout: 'pipe',
+        stderr: 'pipe',
+        stdout: 'pipe',
       })
       process.exit(1)
     }
@@ -1004,18 +1071,29 @@ function defaultPermissions(role: AgentRole): string[] {
     return [
       ...base,
       'Bash(curl:*)',
-      'Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)',
+      'Bash(git log:*)',
+      'Bash(git diff:*)',
+      'Bash(git show:*)',
       'Bash(git status:*)',
-      'Bash(gh api:*)', 'Bash(gh pr view:*)', 'Bash(gh pr diff:*)', 'Bash(gh pr list:*)',
-      'Bash(gh issue list:*)', 'Bash(gh issue view:*)',
+      'Bash(gh api:*)',
+      'Bash(gh pr view:*)',
+      'Bash(gh pr diff:*)',
+      'Bash(gh pr list:*)',
+      'Bash(gh issue list:*)',
+      'Bash(gh issue view:*)',
     ]
   }
   // worker and user
   return [
     ...base,
-    'Read', 'Edit', 'Write',
-    'Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)',
-    'Bash(git status:*)', 'Bash(git branch:*)',
+    'Read',
+    'Edit',
+    'Write',
+    'Bash(git log:*)',
+    'Bash(git diff:*)',
+    'Bash(git show:*)',
+    'Bash(git status:*)',
+    'Bash(git branch:*)',
   ]
 }
 
@@ -1024,19 +1102,26 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
 
   const mcpPath = resolve(agentDir, '.mcp.json')
   if (!existsSync(mcpPath)) {
-    writeFileSync(mcpPath, JSON.stringify({
-      mcpServers: {
-        jean: {
-          command: 'bun',
-          args: ['run', '--cwd', channelDir(), '--shell=bun', '--silent', 'start'],
-          env: {
-            JEAN_AGENT: name,
-            JEAN_ROLE: role,
-            JEAN_INFRA_URL: INFRA_URL.replace('http://', 'ws://') + '/ws',
+    writeFileSync(
+      mcpPath,
+      `${JSON.stringify(
+        {
+          mcpServers: {
+            jean: {
+              command: 'bun',
+              args: ['run', '--cwd', channelDir(), '--shell=bun', '--silent', 'start'],
+              env: {
+                JEAN_AGENT: name,
+                JEAN_ROLE: role,
+                JEAN_INFRA_URL: `${INFRA_URL.replace('http://', 'ws://')}/ws`,
+              },
+            },
           },
         },
-      },
-    }, null, 2) + '\n')
+        null,
+        2,
+      )}\n`,
+    )
   } else {
     console.log(`  ${DIM}Skipping .mcp.json (already exists)${RESET}`)
   }
@@ -1045,27 +1130,42 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
   const settingsPath = resolve(settingsDir, 'settings.local.json')
   if (!existsSync(settingsPath)) {
     mkdirSync(settingsDir, { recursive: true })
-    writeFileSync(settingsPath, JSON.stringify({
-      permissions: {
-        allow: defaultPermissions(role),
-      },
-      enabledMcpjsonServers: ['jean'],
-      hooks: {
-        Stop: [{
-          hooks: [{
-            type: 'command',
-            command: `curl -s -X POST http://127.0.0.1:8700/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat /tmp/jean-session-${name}.id 2>/dev/null)\\"}"`,
-          }],
-        }],
-        PermissionRequest: [{
-          hooks: [{
-            type: 'command',
-            command: `bun -e 'const d=JSON.parse(await Bun.stdin.text());fetch("http://127.0.0.1:8700/permissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({agent:"${name}",tool:d.tool_name,input:d.tool_input})})'`,
-            async: true,
-          }],
-        }],
-      },
-    }, null, 2) + '\n')
+    writeFileSync(
+      settingsPath,
+      `${JSON.stringify(
+        {
+          permissions: {
+            allow: defaultPermissions(role),
+          },
+          enabledMcpjsonServers: ['jean'],
+          hooks: {
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `curl -s -X POST http://127.0.0.1:8700/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat /tmp/jean-session-${name}.id 2>/dev/null)\\"}"`,
+                  },
+                ],
+              },
+            ],
+            PermissionRequest: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `bun -e 'const d=JSON.parse(await Bun.stdin.text());fetch("http://127.0.0.1:8700/permissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({agent:"${name}",tool:d.tool_name,input:d.tool_input})})'`,
+                    async: true,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    )
   } else {
     console.log(`  ${DIM}Skipping .claude/settings.local.json (already exists)${RESET}`)
   }
@@ -1110,7 +1210,7 @@ function cmdAgentTag(args: string[]) {
   }
 
   const removeMode = args.includes('--remove')
-  const tags = args.slice(1).filter(a => a !== '--remove')
+  const tags = args.slice(1).filter((a) => a !== '--remove')
 
   if (!tags.length) {
     console.log(`Tags for "${name}": ${agent.tags.join(', ') || '(none)'}`)
@@ -1119,7 +1219,7 @@ function cmdAgentTag(args: string[]) {
 
   const meta = readAgentMeta(agent.path)!
   if (removeMode) {
-    meta.tags = meta.tags.filter(t => !tags.includes(t))
+    meta.tags = meta.tags.filter((t) => !tags.includes(t))
   } else {
     const existing = new Set(meta.tags)
     for (const t of tags) existing.add(t)
@@ -1133,7 +1233,7 @@ function cmdAgentTag(args: string[]) {
 // ── Agent Remove ──────────────────────────────────────────────────
 
 function cmdAgentRemove(args: string[]) {
-  const name = args.find(a => !a.startsWith('-'))
+  const name = args.find((a) => !a.startsWith('-'))
   const force = args.includes('--force')
   const keep = args.includes('--keep')
 
@@ -1206,10 +1306,12 @@ function cmdAgentStart(name?: string) {
   }
 
   console.log(`Starting agent "${name}" in ${agent.path}...`)
-  const result = Bun.spawnSync(
-    ['claude', '--dangerously-load-development-channels', 'server:jean'],
-    { cwd: agent.path, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' },
-  )
+  const result = Bun.spawnSync(['claude', '--dangerously-load-development-channels', 'server:jean'], {
+    cwd: agent.path,
+    stdin: 'inherit',
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
   process.exit(result.exitCode ?? 0)
 }
 
@@ -1266,12 +1368,19 @@ Environment:
 
 function statusColor(status: string): string {
   switch (status) {
-    case 'todo':        return '\x1b[36m'  // cyan
-    case 'assigned':    return '\x1b[34m'  // blue
-    case 'in-progress': return '\x1b[33m'  // yellow
-    case 'waiting':     return '\x1b[35m'  // magenta
-    case 'done':        return '\x1b[32m'  // green
-    case 'cancelled':   return '\x1b[2m'   // dim
-    default:            return ''
+    case 'todo':
+      return '\x1b[36m' // cyan
+    case 'assigned':
+      return '\x1b[34m' // blue
+    case 'in-progress':
+      return '\x1b[33m' // yellow
+    case 'waiting':
+      return '\x1b[35m' // magenta
+    case 'done':
+      return '\x1b[32m' // green
+    case 'cancelled':
+      return '\x1b[2m' // dim
+    default:
+      return ''
   }
 }

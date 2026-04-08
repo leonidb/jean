@@ -9,11 +9,11 @@
 
 /** Stored event — envelope assigned by the store + domain payload. */
 export type StoredEvent<T = unknown> = {
-  id: number          // monotonic, assigned by store
-  stream: string      // grouping key (e.g. "task-001", "agent-scratch")
-  type: string        // event discriminator (e.g. "task-created")
-  ts: string          // ISO 8601, assigned by store
-  data: T             // domain payload
+  id: number // monotonic, assigned by store
+  stream: string // grouping key (e.g. "task-001", "agent-scratch")
+  type: string // event discriminator (e.g. "task-created")
+  ts: string // ISO 8601, assigned by store
+  data: T // domain payload
 }
 
 /** What callers pass to append. Store assigns id and ts. */

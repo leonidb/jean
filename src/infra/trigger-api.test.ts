@@ -1,13 +1,15 @@
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { mkdirSync, rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
-import { rmSync, mkdirSync } from 'node:fs'
 
 const TEST_PORT = 8797
 const DATA_DIR = '/tmp/jean-test-trigger'
 let server: Subprocess
 
 beforeAll(async () => {
-  try { rmSync(DATA_DIR, { recursive: true }) } catch {}
+  try {
+    rmSync(DATA_DIR, { recursive: true })
+  } catch {}
   mkdirSync(DATA_DIR, { recursive: true })
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
     env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_DATA_DIR: DATA_DIR },
@@ -15,12 +17,18 @@ beforeAll(async () => {
     stderr: 'pipe',
   })
   for (let i = 0; i < 20; i++) {
-    try { await fetch(`http://127.0.0.1:${TEST_PORT}/`); break }
-    catch { await Bun.sleep(100) }
+    try {
+      await fetch(`http://127.0.0.1:${TEST_PORT}/`)
+      break
+    } catch {
+      await Bun.sleep(100)
+    }
   }
 })
 
-afterAll(() => { server.kill() })
+afterAll(() => {
+  server.kill()
+})
 
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 const json = { 'content-type': 'application/json' }
@@ -28,7 +36,8 @@ const json = { 'content-type': 'application/json' }
 describe('trigger CRUD', () => {
   test('POST /triggers creates a cron trigger', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ id: 'morning', cron: '0 8 * * 1-5', agent: 'sensei', prompt: 'Run brief', actor: 'cli' }),
     })
     expect(res.status).toBe(201)
@@ -41,7 +50,8 @@ describe('trigger CRUD', () => {
 
   test('POST /triggers creates a one-off trigger', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ id: 'reminder', at: '2026-12-01T10:00:00Z', agent: 'sensei', prompt: 'Check PR' }),
     })
     expect(res.status).toBe(201)
@@ -52,7 +62,8 @@ describe('trigger CRUD', () => {
 
   test('POST /triggers auto-generates ID if not provided', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ cron: '0 9 * * *', agent: 'sensei', prompt: 'Auto ID test' }),
     })
     expect(res.status).toBe(201)
@@ -63,7 +74,8 @@ describe('trigger CRUD', () => {
 
   test('POST /triggers rejects missing agent', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ cron: '0 8 * * *', prompt: 'no agent' }),
     })
     expect(res.status).toBe(400)
@@ -71,7 +83,8 @@ describe('trigger CRUD', () => {
 
   test('POST /triggers rejects missing prompt', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ cron: '0 8 * * *', agent: 'sensei' }),
     })
     expect(res.status).toBe(400)
@@ -79,7 +92,8 @@ describe('trigger CRUD', () => {
 
   test('POST /triggers rejects missing cron and at', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ agent: 'sensei', prompt: 'no schedule' }),
     })
     expect(res.status).toBe(400)
@@ -87,7 +101,8 @@ describe('trigger CRUD', () => {
 
   test('POST /triggers rejects both cron and at', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ cron: '0 8 * * *', at: '2026-12-01T10:00:00Z', agent: 'sensei', prompt: 'both' }),
     })
     expect(res.status).toBe(400)
@@ -95,7 +110,8 @@ describe('trigger CRUD', () => {
 
   test('POST /triggers rejects invalid cron', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ cron: 'not a cron', agent: 'sensei', prompt: 'bad cron' }),
     })
     expect(res.status).toBe(400)
@@ -103,7 +119,8 @@ describe('trigger CRUD', () => {
 
   test('POST /triggers rejects invalid datetime', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ at: 'not a date', agent: 'sensei', prompt: 'bad date' }),
     })
     expect(res.status).toBe(400)
@@ -111,7 +128,8 @@ describe('trigger CRUD', () => {
 
   test('POST /triggers rejects duplicate ID', async () => {
     const res = await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ id: 'morning', cron: '0 9 * * *', agent: 'sensei', prompt: 'dup' }),
     })
     expect(res.status).toBe(409)
@@ -153,7 +171,8 @@ describe('trigger CRUD', () => {
 
   test('PATCH /triggers/:id updates fields', async () => {
     const res = await fetch(`${BASE}/triggers/morning`, {
-      method: 'PATCH', headers: json,
+      method: 'PATCH',
+      headers: json,
       body: JSON.stringify({ prompt: 'Run morning brief and post to Slack' }),
     })
     expect(res.status).toBe(200)
@@ -164,7 +183,8 @@ describe('trigger CRUD', () => {
 
   test('PATCH /triggers/:id can disable', async () => {
     const res = await fetch(`${BASE}/triggers/reminder`, {
-      method: 'PATCH', headers: json,
+      method: 'PATCH',
+      headers: json,
       body: JSON.stringify({ status: 'disabled' }),
     })
     const trigger = (await res.json()) as { status: string }
@@ -173,7 +193,8 @@ describe('trigger CRUD', () => {
 
   test('PATCH /triggers/:id rejects invalid cron', async () => {
     const res = await fetch(`${BASE}/triggers/morning`, {
-      method: 'PATCH', headers: json,
+      method: 'PATCH',
+      headers: json,
       body: JSON.stringify({ cron: 'bad' }),
     })
     expect(res.status).toBe(400)
@@ -181,7 +202,8 @@ describe('trigger CRUD', () => {
 
   test('PATCH /triggers/:id returns 404 for unknown', async () => {
     const res = await fetch(`${BASE}/triggers/nonexistent`, {
-      method: 'PATCH', headers: json,
+      method: 'PATCH',
+      headers: json,
       body: JSON.stringify({ prompt: 'nope' }),
     })
     expect(res.status).toBe(404)
@@ -190,7 +212,8 @@ describe('trigger CRUD', () => {
   test('DELETE /triggers/:id removes trigger', async () => {
     // Create one to delete
     await fetch(`${BASE}/triggers`, {
-      method: 'POST', headers: json,
+      method: 'POST',
+      headers: json,
       body: JSON.stringify({ id: 'to-delete', cron: '0 12 * * *', agent: 'sensei', prompt: 'deleteme' }),
     })
 

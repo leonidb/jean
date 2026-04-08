@@ -1,6 +1,6 @@
-import { describe, test, expect } from 'bun:test'
-import { createStore, memoryBackend, memorySnapshotBackend } from './store.ts'
+import { describe, expect, test } from 'bun:test'
 import { createProjection } from './projection.ts'
+import { createStore, memoryBackend, memorySnapshotBackend } from './store.ts'
 import type { Reducer } from './types.ts'
 
 // ── Trivial counter domain (no Jean knowledge) ──────────────────
@@ -49,7 +49,10 @@ describe('createProjection', () => {
   test('apply ignores events not matching type filter', async () => {
     const store = createStore(memoryBackend())
     const p = createProjection({
-      name: 'c', store, reducer: counter, initial: 0,
+      name: 'c',
+      store,
+      reducer: counter,
+      initial: 0,
       filter: { types: ['add'] },
     })
 
@@ -63,7 +66,10 @@ describe('createProjection', () => {
   test('apply ignores events not matching stream filter', async () => {
     const store = createStore(memoryBackend())
     const p = createProjection({
-      name: 'c', store, reducer: counter, initial: 0,
+      name: 'c',
+      store,
+      reducer: counter,
+      initial: 0,
       filter: { stream: 'a' },
     })
 
@@ -81,7 +87,10 @@ describe('createProjection', () => {
     await store.append({ stream: 's', type: 'add', data: { amount: 3 } })
 
     const p = createProjection({
-      name: 'c', store, reducer: counter, initial: 0,
+      name: 'c',
+      store,
+      reducer: counter,
+      initial: 0,
       filter: { types: ['add'] },
     })
     await p.catchUp()
@@ -157,8 +166,12 @@ describe('snapshots', () => {
     }
 
     const p = createProjection({
-      name: 'c', store, reducer: counter, initial: 0,
-      snapshots, snapshotEvery: 3,
+      name: 'c',
+      store,
+      reducer: counter,
+      initial: 0,
+      snapshots,
+      snapshotEvery: 3,
     })
     await p.catchUp()
     expect(p.state).toBe(5)
@@ -166,8 +179,8 @@ describe('snapshots', () => {
     // Snapshot should have been taken (5 >= 3)
     const snap = await snapshots.load('c')
     expect(snap).not.toBeNull()
-    expect(snap!.state).toBe(5)
-    expect(snap!.lastEventId).toBe(5)
+    expect(snap?.state).toBe(5)
+    expect(snap?.lastEventId).toBe(5)
   })
 
   test('auto-snapshot on apply', async () => {
@@ -175,8 +188,12 @@ describe('snapshots', () => {
     const snapshots = memorySnapshotBackend<number>()
 
     const p = createProjection({
-      name: 'c', store, reducer: counter, initial: 0,
-      snapshots, snapshotEvery: 2,
+      name: 'c',
+      store,
+      reducer: counter,
+      initial: 0,
+      snapshots,
+      snapshotEvery: 2,
     })
 
     const e1 = await store.append({ stream: 's', type: 'add', data: { amount: 1 } })
@@ -190,6 +207,6 @@ describe('snapshots', () => {
     await Bun.sleep(10)
     const snap = await snapshots.load('c')
     expect(snap).not.toBeNull()
-    expect(snap!.state).toBe(2)
+    expect(snap?.state).toBe(2)
   })
 })

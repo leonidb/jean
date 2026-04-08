@@ -5,8 +5,8 @@
  * apply() in real-time: fold one event synchronously after append.
  */
 
-import type { StoredEvent, Reducer, SnapshotBackend } from './types.ts'
 import type { EventStore, ReadOpts } from './store.ts'
+import type { Reducer, SnapshotBackend, StoredEvent } from './types.ts'
 
 // ── Projection ───────────────────────────────────────────────────
 
@@ -42,8 +42,12 @@ export function createProjection<S>(opts: ProjectionOpts<S>): Projection<S> {
   }
 
   const projection: Projection<S> = {
-    get state() { return state },
-    get version() { return version },
+    get state() {
+      return state
+    },
+    get version() {
+      return version
+    },
 
     async catchUp() {
       // Try loading snapshot first

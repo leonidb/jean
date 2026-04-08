@@ -4,15 +4,15 @@
  * Two backends: in-memory (tests) and JSONL (production).
  */
 
-import { appendFile } from 'fs/promises'
-import type { StoredEvent, NewEvent, StoreBackend, Snapshot, SnapshotBackend } from './types.ts'
+import { appendFile } from 'node:fs/promises'
+import type { NewEvent, Snapshot, SnapshotBackend, StoreBackend, StoredEvent } from './types.ts'
 
 // ── EventStore ───────────────────────────────────────────────────
 
 export type ReadOpts = {
-  stream?: string       // filter to a single stream
-  afterId?: number      // only events with id > afterId
-  types?: string[]      // filter by event type(s)
+  stream?: string // filter to a single stream
+  afterId?: number // only events with id > afterId
+  types?: string[] // filter by event type(s)
 }
 
 export type EventStore = {
@@ -32,7 +32,7 @@ export function createStore(backend: StoreBackend): EventStore {
   return {
     async append(event) {
       const id = (await ensureId()) + 1
-      nextId = id  // increment before async write to prevent concurrent duplicates
+      nextId = id // increment before async write to prevent concurrent duplicates
       const stored: StoredEvent = {
         id,
         stream: event.stream,
@@ -46,11 +46,11 @@ export function createStore(backend: StoreBackend): EventStore {
 
     async read(opts) {
       let events = await backend.readAll()
-      if (opts?.stream) events = events.filter(e => e.stream === opts.stream)
-      if (opts?.afterId) events = events.filter(e => e.id > opts.afterId!)
+      if (opts?.stream) events = events.filter((e) => e.stream === opts.stream)
+      if (opts?.afterId) events = events.filter((e) => e.id > opts.afterId!)
       if (opts?.types) {
         const set = new Set(opts.types)
-        events = events.filter(e => set.has(e.type))
+        events = events.filter((e) => set.has(e.type))
       }
       return events
     },
@@ -64,9 +64,15 @@ export function createStore(backend: StoreBackend): EventStore {
 export function memoryBackend(): StoreBackend {
   const events: StoredEvent[] = []
   return {
-    async append(event) { events.push(event) },
-    async readAll() { return [...events] },
-    async lastId() { return events.at(-1)?.id ?? 0 },
+    async append(event) {
+      events.push(event)
+    },
+    async readAll() {
+      return [...events]
+    },
+    async lastId() {
+      return events.at(-1)?.id ?? 0
+    },
   }
 }
 
@@ -75,16 +81,18 @@ export function memoryBackend(): StoreBackend {
 export function jsonlBackend(path: string): StoreBackend {
   return {
     async append(event) {
-      await appendFile(path, JSON.stringify(event) + '\n')
+      await appendFile(path, `${JSON.stringify(event)}\n`)
     },
 
     async readAll() {
       const file = Bun.file(path)
       if (!(await file.exists())) return []
       const text = await file.text()
-      return text.trimEnd().split('\n')
-        .filter(line => line.length > 0)
-        .map(line => JSON.parse(line) as StoredEvent)
+      return text
+        .trimEnd()
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as StoredEvent)
     },
 
     async lastId() {
@@ -108,8 +116,12 @@ export function jsonlBackend(path: string): StoreBackend {
 export function memorySnapshotBackend<S>(): SnapshotBackend<S> {
   const snapshots = new Map<string, Snapshot<S>>()
   return {
-    async load(name) { return snapshots.get(name) ?? null },
-    async save(name, snapshot) { snapshots.set(name, snapshot) },
+    async load(name) {
+      return snapshots.get(name) ?? null
+    },
+    async save(name, snapshot) {
+      snapshots.set(name, snapshot)
+    },
   }
 }
 
@@ -121,7 +133,7 @@ export function fileSnapshotBackend<S>(dir: string): SnapshotBackend<S> {
       return file.json() as Promise<Snapshot<S>>
     },
     async save(name, snapshot) {
-      await Bun.write(`${dir}/${name}.snapshot.json`, JSON.stringify(snapshot) + '\n')
+      await Bun.write(`${dir}/${name}.snapshot.json`, `${JSON.stringify(snapshot)}\n`)
     },
   }
 }

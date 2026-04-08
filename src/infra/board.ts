@@ -7,13 +7,7 @@
 
 // ── Types ──────────────────────────────────────────────────────────
 
-export type TaskStatus =
-  | 'todo'
-  | 'assigned'
-  | 'in-progress'
-  | 'waiting'
-  | 'done'
-  | 'cancelled'
+export type TaskStatus = 'todo' | 'assigned' | 'in-progress' | 'waiting' | 'done' | 'cancelled'
 
 export type Task = {
   id: string
@@ -23,7 +17,7 @@ export type Task = {
   queue: string
   playbook?: string
   agent?: string
-  createdAt: string  // ISO 8601
+  createdAt: string // ISO 8601
   updatedAt: string
 }
 
@@ -34,12 +28,12 @@ export type Board = {
 // ── Valid transitions ──────────────────────────────────────────────
 
 const transitions: Record<TaskStatus, TaskStatus[]> = {
-  todo:            ['assigned', 'in-progress', 'cancelled'],
-  assigned:        ['in-progress', 'cancelled'],
-  'in-progress':   ['waiting', 'done', 'cancelled'],
-  waiting:         ['in-progress', 'done', 'cancelled'],
-  done:            [],
-  cancelled:       [],
+  todo: ['assigned', 'in-progress', 'cancelled'],
+  assigned: ['in-progress', 'cancelled'],
+  'in-progress': ['waiting', 'done', 'cancelled'],
+  waiting: ['in-progress', 'done', 'cancelled'],
+  done: [],
+  cancelled: [],
 }
 
 /** Map legacy state names from old snapshots/events to current names. */
@@ -50,7 +44,7 @@ export function migrateStatus(status: string): TaskStatus {
     blocked: 'waiting',
     review: 'waiting',
   }
-  return legacy[status] ?? status as TaskStatus
+  return legacy[status] ?? (status as TaskStatus)
 }
 
 export function canTransition(from: TaskStatus, to: TaskStatus): boolean {

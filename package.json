@@ -11,9 +11,14 @@
     "infra": "bun run src/infra/server.ts",
     "board": "bun run src/cli/jean.ts board",
     "status": "bun run src/cli/jean.ts status",
-    "test": "bun test"
+    "test": "bun test",
+    "lint": "biome check src/",
+    "format": "biome check --write src/",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && biome check src/"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.10",
     "@types/bun": "latest"
   },
   "peerDependencies": {

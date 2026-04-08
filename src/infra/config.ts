@@ -9,7 +9,7 @@ import { resolve } from 'node:path'
 // ── Schema ──────────────────────────────────────────────────────
 
 export const CONFIG_SCHEMA: Record<string, 'string' | 'number'> = {
-  'port': 'number',
+  port: 'number',
   'slack.appToken': 'string',
   'slack.botToken': 'string',
   'slack.channel': 'string',
@@ -43,7 +43,7 @@ export function readConfig(dataDir: string): JeanConfig {
 }
 
 export function writeConfig(dataDir: string, config: JeanConfig): void {
-  writeFileSync(configPath(dataDir), JSON.stringify(config, null, 2) + '\n')
+  writeFileSync(configPath(dataDir), `${JSON.stringify(config, null, 2)}\n`)
 }
 
 // ── Dot-path helpers ────────────────────────────────────────────
@@ -83,7 +83,7 @@ export function parseConfigValue(key: string, raw: string): { value: unknown } |
   if (!type) return { error: `Unknown config key: ${key}` }
   if (type === 'number') {
     const n = Number(raw)
-    if (isNaN(n)) return { error: `${key} must be a number` }
+    if (Number.isNaN(n)) return { error: `${key} must be a number` }
     return { value: n }
   }
   return { value: raw }
@@ -96,10 +96,13 @@ export function resolveConfig(dataDir: string): JeanConfig {
   // Env vars override config file
   if (process.env.JEAN_PORT) {
     const p = Number(process.env.JEAN_PORT)
-    if (!isNaN(p)) config.port = p
+    if (!Number.isNaN(p)) config.port = p
   }
-  if (process.env.SLACK_APP_TOKEN) (config.slack ??= {}).appToken = process.env.SLACK_APP_TOKEN
-  if (process.env.SLACK_BOT_TOKEN) (config.slack ??= {}).botToken = process.env.SLACK_BOT_TOKEN
-  if (process.env.SLACK_CHANNEL) (config.slack ??= {}).channel = process.env.SLACK_CHANNEL
+  if (process.env.SLACK_APP_TOKEN || process.env.SLACK_BOT_TOKEN || process.env.SLACK_CHANNEL) {
+    config.slack ??= {}
+    if (process.env.SLACK_APP_TOKEN) config.slack.appToken = process.env.SLACK_APP_TOKEN
+    if (process.env.SLACK_BOT_TOKEN) config.slack.botToken = process.env.SLACK_BOT_TOKEN
+    if (process.env.SLACK_CHANNEL) config.slack.channel = process.env.SLACK_CHANNEL
+  }
   return config
 }

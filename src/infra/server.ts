@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 /**
  * Jean infrastructure service.
  *
@@ -12,35 +13,67 @@
  * No LLM — fast, deterministic plumbing.
  */
 
-import { resolve, basename } from 'path'
-import { watch, existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, unlinkSync, watch, writeFileSync } from 'node:fs'
+import { basename, resolve } from 'node:path'
 import type { ServerWebSocket } from 'bun'
-import {
-  createStore, jsonlBackend, createProjection, fileSnapshotBackend,
-  type StoredEvent, type EventStore,
-} from '../es/index.ts'
-import { canTransition, type Board, type TaskStatus } from './board.ts'
 import { Cron } from 'croner'
 import {
-  boardReducer, migrateBoard, pendingReducer, triggerReducer, playbookReducer,
-  taskStream, agentStream, SYSTEM_STREAM, TRIGGERS_STREAM, PLAYBOOKS_STREAM, taskIdFromStream, agentFromEvent,
-  toApiEvent,
-  type TaskCreatedData, type TaskStatusData, type TaskUpdatedData,
-  type SendData, type AgentIdleData, type RegisterData, type AckData,
-  type ReplyData, type NudgeData, type StartData, type PermissionRequestData,
-  type TriggerCreatedData, type TriggerUpdatedData, type TriggerRemovedData, type TriggerFiredData,
-  type Trigger, type TriggerState,
-  type PlaybookCreatedData, type PlaybookUpdatedData, type PlaybookRemovedData,
-  type PlaybookState,
-  type PendingState,
-} from './reducers.ts'
-import type {
-  InboundMsg, OutboundMsg, DeliverMsg, SendRequest,
-  AgentRole,
-  CreateTaskRequest, UpdateTaskRequest, UpdateStatusRequest,
-} from './protocol.ts'
-
+  createProjection,
+  createStore,
+  type EventStore,
+  fileSnapshotBackend,
+  jsonlBackend,
+  type StoredEvent,
+} from '../es/index.ts'
+import { type Board, canTransition, type TaskStatus } from './board.ts'
 import { resolveConfig } from './config.ts'
+import type {
+  AgentRole,
+  CreateTaskRequest,
+  DeliverMsg,
+  InboundMsg,
+  OutboundMsg,
+  SendRequest,
+  UpdateStatusRequest,
+  UpdateTaskRequest,
+} from './protocol.ts'
+import {
+  type AckData,
+  type AgentIdleData,
+  agentFromEvent,
+  agentStream,
+  boardReducer,
+  migrateBoard,
+  type NudgeData,
+  type PendingState,
+  type PermissionRequestData,
+  PLAYBOOKS_STREAM,
+  type PlaybookCreatedData,
+  type PlaybookRemovedData,
+  type PlaybookState,
+  type PlaybookUpdatedData,
+  pendingReducer,
+  playbookReducer,
+  type RegisterData,
+  type ReplyData,
+  type SendData,
+  type StartData,
+  SYSTEM_STREAM,
+  type TaskCreatedData,
+  type TaskStatusData,
+  type TaskUpdatedData,
+  TRIGGERS_STREAM,
+  type Trigger,
+  type TriggerCreatedData,
+  type TriggerFiredData,
+  type TriggerRemovedData,
+  type TriggerState,
+  type TriggerUpdatedData,
+  taskIdFromStream,
+  taskStream,
+  toApiEvent,
+  triggerReducer,
+} from './reducers.ts'
 
 const DATA_DIR = resolve(process.env.JEAN_DATA_DIR ?? '.')
 const config = resolveConfig(DATA_DIR)
@@ -72,7 +105,18 @@ const pendingProjection = createProjection<PendingState>({
   store,
   reducer: pendingReducer,
   initial: [],
-  filter: { types: ['reply', 'agent-idle', 'task-created', 'trigger-fired', 'playbook-created', 'playbook-updated', 'playbook-removed', 'ack'] },
+  filter: {
+    types: [
+      'reply',
+      'agent-idle',
+      'task-created',
+      'trigger-fired',
+      'playbook-created',
+      'playbook-updated',
+      'playbook-removed',
+      'ack',
+    ],
+  },
 })
 
 const lastTaskContext = createProjection<Map<string, string>>({
@@ -167,7 +211,11 @@ const sseSubscribers = new Set<{ write: (data: string) => void; close: () => voi
 function broadcastSSE(event: StoredEvent) {
   const json = JSON.stringify(toApiEvent(event))
   for (const sub of sseSubscribers) {
-    try { sub.write(`data: ${json}\n\n`) } catch { sseSubscribers.delete(sub) }
+    try {
+      sub.write(`data: ${json}\n\n`)
+    } catch {
+      sseSubscribers.delete(sub)
+    }
   }
 }
 
@@ -200,7 +248,7 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
 function inferTaskId(agentName?: string): string | undefined {
   if (!agentName) return undefined
   const task = boardProjection.state.tasks.find(
-    t => (t.agent === agentName || t.queue === agentName) && (t.status === 'in-progress' || t.status === 'waiting'),
+    (t) => (t.agent === agentName || t.queue === agentName) && (t.status === 'in-progress' || t.status === 'waiting'),
   )
   if (task) return task.id
   return lastTaskContext.state.get(agentName)
@@ -215,7 +263,7 @@ function resolveAgent(event: StoredEvent): string | undefined {
   if (agent) return agent
   const taskId = taskIdFromStream(event.stream)
   if (taskId) {
-    const task = boardProjection.state.tasks.find(t => t.id === taskId)
+    const task = boardProjection.state.tasks.find((t) => t.id === taskId)
     return task?.agent ?? task?.queue
   }
   return undefined
@@ -223,7 +271,7 @@ function resolveAgent(event: StoredEvent): string | undefined {
 
 function pendingEvents(agent?: string): StoredEvent[] {
   if (!agent) return [...pendingProjection.state]
-  return pendingProjection.state.filter(e => resolveAgent(e) === agent)
+  return pendingProjection.state.filter((e) => resolveAgent(e) === agent)
 }
 
 function pendingByAgent(): Record<string, number> {
@@ -239,7 +287,7 @@ function pendingByAgent(): Record<string, number> {
 
 function nudgeSenseiIfIdle(force = false) {
   const sensei = findSensei()
-  if (!sensei || !sensei.idle) return
+  if (!sensei?.idle) return
   if (!force && pendingProjection.state.length === 0) return
 
   sensei.idle = false
@@ -257,12 +305,16 @@ const cronJobs = new Map<string, Cron>()
 
 function startTriggerJob(trigger: Trigger) {
   if (cronJobs.has(trigger.id)) return
-  const callback = () => { void fireTrigger(trigger) }
+  const callback = () => {
+    void fireTrigger(trigger)
+  }
   const job = trigger.cron
     ? new Cron(trigger.cron, { catch: true }, callback)
     : new Cron(new Date(trigger.at!), { catch: true }, callback)
   cronJobs.set(trigger.id, job)
-  process.stderr.write(`[jean] trigger ${trigger.id} scheduled${trigger.cron ? ` (${trigger.cron})` : ` (at ${trigger.at})`}\n`)
+  process.stderr.write(
+    `[jean] trigger ${trigger.id} scheduled${trigger.cron ? ` (${trigger.cron})` : ` (at ${trigger.at})`}\n`,
+  )
 }
 
 function stopTriggerJob(id: string) {
@@ -361,17 +413,19 @@ async function reconcilePlaybooks() {
 
     const dir = readdirSync(PLAYBOOKS_DIR)
     const ids = dir.map(playbookIdFromFilename).filter((id): id is string => id !== null)
-    const entries = await Promise.all(ids.map(async id => {
-      const data = await readPlaybookFile(id)
-      return data ? [id, data] as const : null
-    }))
+    const entries = await Promise.all(
+      ids.map(async (id) => {
+        const data = await readPlaybookFile(id)
+        return data ? ([id, data] as const) : null
+      }),
+    )
 
     const files = new Map<string, { content: string; hash: string }>()
     for (const entry of entries) {
       if (entry) files.set(entry[0], entry[1])
     }
 
-    const known = new Map(playbookProjection.state.playbooks.map(p => [p.id, p]))
+    const known = new Map(playbookProjection.state.playbooks.map((p) => [p.id, p]))
 
     for (const [id, { content, hash }] of files) {
       const existing = known.get(id)
@@ -379,14 +433,22 @@ async function reconcilePlaybooks() {
         await record('playbook-created', PLAYBOOKS_STREAM, { id, content, hash } satisfies PlaybookCreatedData)
         process.stderr.write(`[jean] playbook created: ${id}\n`)
       } else if (existing.hash !== hash) {
-        await record('playbook-updated', PLAYBOOKS_STREAM, { id, content, hash, prevHash: existing.hash } satisfies PlaybookUpdatedData)
+        await record('playbook-updated', PLAYBOOKS_STREAM, {
+          id,
+          content,
+          hash,
+          prevHash: existing.hash,
+        } satisfies PlaybookUpdatedData)
         process.stderr.write(`[jean] playbook updated: ${id}\n`)
       }
     }
 
     for (const [id, playbook] of known) {
       if (!files.has(id)) {
-        await record('playbook-removed', PLAYBOOKS_STREAM, { id, lastHash: playbook.hash } satisfies PlaybookRemovedData)
+        await record('playbook-removed', PLAYBOOKS_STREAM, {
+          id,
+          lastHash: playbook.hash,
+        } satisfies PlaybookRemovedData)
         process.stderr.write(`[jean] playbook removed: ${id}\n`)
       }
     }
@@ -401,10 +463,12 @@ function watchPlaybooks() {
 
   let debounce: ReturnType<typeof setTimeout> | null = null
   watch(PLAYBOOKS_DIR, (_eventType, filename) => {
-    if (!filename || !filename.endsWith('.md')) return
+    if (!filename?.endsWith('.md')) return
     // Debounce — editors often fire multiple events for one save
     if (debounce) clearTimeout(debounce)
-    debounce = setTimeout(() => { void reconcilePlaybooks() }, 200)
+    debounce = setTimeout(() => {
+      void reconcilePlaybooks()
+    }, 200)
   })
   process.stderr.write(`[jean] watching ${PLAYBOOKS_DIR} for changes\n`)
 }
@@ -428,7 +492,9 @@ async function initSlack() {
   try {
     const info = await app.client.conversations.info({ channel: SLACK_CHANNEL })
     channelName = (info.channel as { name?: string })?.name ?? SLACK_CHANNEL
-  } catch { /* use channel ID as fallback */ }
+  } catch {
+    /* use channel ID as fallback */
+  }
 
   // Register Slack channel as an agent
   agents.set(channelName, {
@@ -461,7 +527,11 @@ async function initSlack() {
   await app.start()
   slackConnected = true
   process.stderr.write(`[jean] slack connected: #${channelName} (${SLACK_CHANNEL})\n`)
-  void record('register', agentStream(channelName), { agent: channelName, role: 'user', idle: true } satisfies RegisterData)
+  void record('register', agentStream(channelName), {
+    agent: channelName,
+    role: 'user',
+    idle: true,
+  } satisfies RegisterData)
 }
 
 // ── Port selection ───────────────────────────────────────────────
@@ -476,9 +546,7 @@ function findFreePort(start: number, maxAttempts = 100): number {
       const testServer = Bun.serve({ port, hostname: '127.0.0.1', fetch: () => new Response() })
       testServer.stop(true)
       return port
-    } catch {
-      continue
-    }
+    } catch {}
   }
   throw new Error(`No free port found in range ${start}-${start + maxAttempts}`)
 }
@@ -491,8 +559,12 @@ function writeRuntimeFiles() {
 }
 
 function cleanupRuntimeFiles() {
-  try { unlinkSync(PORT_FILE) } catch {}
-  try { unlinkSync(PID_FILE) } catch {}
+  try {
+    unlinkSync(PORT_FILE)
+  } catch {}
+  try {
+    unlinkSync(PID_FILE)
+  } catch {}
 }
 
 process.on('exit', cleanupRuntimeFiles)
@@ -530,7 +602,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           playbook: body.playbook,
           actor: body.actor ?? 'api',
         } satisfies TaskCreatedData)
-        const task = boardProjection.state.tasks.find(t => t.id === taskId)
+        const task = boardProjection.state.tasks.find((t) => t.id === taskId)
         return Response.json(task, { status: 201 })
       })()
     }
@@ -538,15 +610,15 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     if (path === '/tasks' && req.method === 'GET') {
       let tasks = boardProjection.state.tasks
       const status = url.searchParams.get('status')
-      if (status) tasks = tasks.filter(t => t.status === status)
+      if (status) tasks = tasks.filter((t) => t.status === status)
       const queue = url.searchParams.get('queue')
-      if (queue) tasks = tasks.filter(t => t.queue === queue)
+      if (queue) tasks = tasks.filter((t) => t.queue === queue)
       return Response.json({ tasks })
     }
 
     const taskGetMatch = path.match(/^\/tasks\/(\w+)$/)
     if (taskGetMatch && req.method === 'GET') {
-      const task = boardProjection.state.tasks.find(t => t.id === taskGetMatch[1])
+      const task = boardProjection.state.tasks.find((t) => t.id === taskGetMatch[1])
       if (!task) return Response.json({ error: 'not found' }, { status: 404 })
       return Response.json(task)
     }
@@ -558,20 +630,17 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         if (!body.status) {
           return Response.json({ error: 'missing status' }, { status: 400 })
         }
-        const task = boardProjection.state.tasks.find(t => t.id === statusMatch[1])
+        const task = boardProjection.state.tasks.find((t) => t.id === statusMatch[1])
         if (!task) return Response.json({ error: 'not found' }, { status: 404 })
         if (!canTransition(task.status, body.status as TaskStatus)) {
-          return Response.json(
-            { error: `invalid transition: ${task.status} → ${body.status}` },
-            { status: 400 },
-          )
+          return Response.json({ error: `invalid transition: ${task.status} → ${body.status}` }, { status: 400 })
         }
         await record('task-status', taskStream(task.id), {
           from: task.status,
           to: body.status,
           actor: body.actor ?? 'api',
         } satisfies TaskStatusData)
-        const updated = boardProjection.state.tasks.find(t => t.id === task.id)
+        const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
         return Response.json(updated)
       })()
     }
@@ -580,14 +649,14 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     if (taskPatchMatch && req.method === 'PATCH') {
       return (async () => {
         const body = (await req.json()) as UpdateTaskRequest
-        const task = boardProjection.state.tasks.find(t => t.id === taskPatchMatch[1])
+        const task = boardProjection.state.tasks.find((t) => t.id === taskPatchMatch[1])
         if (!task) return Response.json({ error: 'not found' }, { status: 404 })
         await record('task-updated', taskStream(task.id), {
           ...(body.agent !== undefined && { agent: body.agent }),
           ...(body.description !== undefined && { description: body.description }),
           actor: body.actor ?? 'api',
         } satisfies TaskUpdatedData)
-        const updated = boardProjection.state.tasks.find(t => t.id === task.id)
+        const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
         return Response.json(updated)
       })()
     }
@@ -642,7 +711,9 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         const entry = agents.get(agentName)
 
         if (sessionId && entry?.sessionId && sessionId !== entry.sessionId) {
-          process.stderr.write(`[jean] WARNING: agent-idle for "${agentName}" from stale session ${sessionId} (current: ${entry.sessionId})\n`)
+          process.stderr.write(
+            `[jean] WARNING: agent-idle for "${agentName}" from stale session ${sessionId} (current: ${entry.sessionId})\n`,
+          )
           void record('agent-idle', agentStream(agentName), {
             agent: agentName,
             role: entry.role,
@@ -701,8 +772,10 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         const byAgent: Record<string, Record<string, { count: number; samples: Record<string, unknown>[] }>> = {}
         for (const e of permEvents) {
           const d = e.data as PermissionRequestData
-          const agentMap = byAgent[d.agent] ??= {}
-          const entry = agentMap[d.tool] ??= { count: 0, samples: [] }
+          byAgent[d.agent] ??= {}
+          const agentMap = byAgent[d.agent]!
+          agentMap[d.tool] ??= { count: 0, samples: [] }
+          const entry = agentMap[d.tool]!
           entry.count++
           if (entry.samples.length < 5) entry.samples.push(d.input)
         }
@@ -716,8 +789,13 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     if (path === '/triggers' && req.method === 'POST') {
       return (async () => {
         const body = (await req.json()) as {
-          id?: string; cron?: string; at?: string; agent: string
-          prompt: string; actor?: string; metadata?: Record<string, unknown>
+          id?: string
+          cron?: string
+          at?: string
+          agent: string
+          prompt: string
+          actor?: string
+          metadata?: Record<string, unknown>
         }
         if (!body.agent || !body.prompt) {
           return Response.json({ error: 'missing agent or prompt' }, { status: 400 })
@@ -729,18 +807,21 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           return Response.json({ error: 'cron and at are mutually exclusive' }, { status: 400 })
         }
         if (body.cron) {
-          try { new Cron(body.cron) }
-          catch { return Response.json({ error: 'invalid cron expression' }, { status: 400 }) }
+          try {
+            new Cron(body.cron)
+          } catch {
+            return Response.json({ error: 'invalid cron expression' }, { status: 400 })
+          }
         }
         if (body.at) {
           const d = new Date(body.at)
-          if (isNaN(d.getTime())) {
+          if (Number.isNaN(d.getTime())) {
             return Response.json({ error: 'invalid datetime for at' }, { status: 400 })
           }
         }
 
         const id = body.id ?? crypto.randomUUID().slice(0, 8)
-        if (triggerProjection.state.triggers.some(t => t.id === id)) {
+        if (triggerProjection.state.triggers.some((t) => t.id === id)) {
           return Response.json({ error: 'trigger ID already exists' }, { status: 409 })
         }
 
@@ -754,7 +835,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           metadata: body.metadata,
         } satisfies TriggerCreatedData)
 
-        const trigger = triggerProjection.state.triggers.find(t => t.id === id)
+        const trigger = triggerProjection.state.triggers.find((t) => t.id === id)
         return Response.json(trigger, { status: 201 })
       })()
     }
@@ -762,16 +843,16 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     if (path === '/triggers' && req.method === 'GET') {
       let triggers = triggerProjection.state.triggers
       const status = url.searchParams.get('status')
-      if (status) triggers = triggers.filter(t => t.status === status)
+      if (status) triggers = triggers.filter((t) => t.status === status)
       const agent = url.searchParams.get('agent')
-      if (agent) triggers = triggers.filter(t => t.agent === agent)
+      if (agent) triggers = triggers.filter((t) => t.agent === agent)
       return Response.json({ triggers })
     }
 
     const triggerMatch = path.match(/^\/triggers\/([^/]+)$/)
 
     if (triggerMatch && req.method === 'GET') {
-      const trigger = triggerProjection.state.triggers.find(t => t.id === triggerMatch[1])
+      const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerMatch[1])
       if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
       return Response.json(trigger)
     }
@@ -779,24 +860,27 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     if (triggerMatch && req.method === 'PATCH') {
       return (async () => {
         const body = (await req.json()) as Omit<TriggerUpdatedData, 'id'>
-        const trigger = triggerProjection.state.triggers.find(t => t.id === triggerMatch[1])
+        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerMatch[1])
         if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
         if (body.cron) {
-          try { new Cron(body.cron) }
-          catch { return Response.json({ error: 'invalid cron expression' }, { status: 400 }) }
+          try {
+            new Cron(body.cron)
+          } catch {
+            return Response.json({ error: 'invalid cron expression' }, { status: 400 })
+          }
         }
         await record('trigger-updated', TRIGGERS_STREAM, {
           id: triggerMatch[1],
           ...body,
         } satisfies TriggerUpdatedData)
-        const updated = triggerProjection.state.triggers.find(t => t.id === triggerMatch[1])
+        const updated = triggerProjection.state.triggers.find((t) => t.id === triggerMatch[1])
         return Response.json(updated)
       })()
     }
 
     if (triggerMatch && req.method === 'DELETE') {
       return (async () => {
-        const trigger = triggerProjection.state.triggers.find(t => t.id === triggerMatch[1])
+        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerMatch[1])
         if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
         await record('trigger-removed', TRIGGERS_STREAM, {
           id: triggerMatch[1],
@@ -808,7 +892,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     const triggerFireMatch = path.match(/^\/triggers\/([^/]+)\/fire$/)
     if (triggerFireMatch && req.method === 'POST') {
       return (async () => {
-        const trigger = triggerProjection.state.triggers.find(t => t.id === triggerFireMatch[1])
+        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerFireMatch[1])
         if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
         await fireTrigger(trigger)
         return Response.json({ ok: true, triggerId: trigger.id })
@@ -818,7 +902,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     // ── Playbook endpoints ──────────────────────────────────────
 
     if (path === '/playbooks' && req.method === 'GET') {
-      const playbooks = playbookProjection.state.playbooks.map(p => ({
+      const playbooks = playbookProjection.state.playbooks.map((p) => ({
         id: p.id,
         name: p.name,
         description: p.description,
@@ -830,7 +914,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     const playbookMatch = path.match(/^\/playbooks\/([^/]+)$/)
     if (playbookMatch && req.method === 'GET') {
-      const playbook = playbookProjection.state.playbooks.find(p => p.id === playbookMatch[1])
+      const playbook = playbookProjection.state.playbooks.find((p) => p.id === playbookMatch[1])
       if (!playbook) return Response.json({ error: 'not found' }, { status: 404 })
       return Response.json(playbook)
     }
@@ -855,7 +939,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     if (ackMatch && req.method === 'POST') {
       return (async () => {
         const id = Number(ackMatch[1])
-        const exists = pendingProjection.state.some(e => e.id === id)
+        const exists = pendingProjection.state.some((e) => e.id === id)
         if (!exists) return Response.json({ ok: false })
         await record('ack', SYSTEM_STREAM, { eventIds: [id] } satisfies AckData)
         return Response.json({ ok: true })
@@ -868,11 +952,11 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         if (!body.upToId) {
           return Response.json({ error: 'missing upToId' }, { status: 400 })
         }
-        let toAck = pendingProjection.state.filter(e => e.id <= body.upToId)
+        let toAck = pendingProjection.state.filter((e) => e.id <= body.upToId)
         if (body.agent) {
-          toAck = toAck.filter(e => resolveAgent(e) === body.agent)
+          toAck = toAck.filter((e) => resolveAgent(e) === body.agent)
         }
-        const eventIds = toAck.map(e => e.id)
+        const eventIds = toAck.map((e) => e.id)
         if (eventIds.length > 0) {
           await record('ack', SYSTEM_STREAM, { eventIds } satisfies AckData)
         }
@@ -890,7 +974,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         const stream = url.searchParams.get('stream') ?? (taskId ? taskStream(taskId) : undefined)
         const includeDiagnostics = url.searchParams.get('diagnostics') === 'true'
         let events = await store.read({ stream })
-        if (!includeDiagnostics) events = events.filter(e => e.type !== 'permission-request')
+        if (!includeDiagnostics) events = events.filter((e) => e.type !== 'permission-request')
         if (last) events = events.slice(-Number(last))
         return Response.json({ events: raw ? events : events.map(toApiEvent) })
       })()
@@ -919,7 +1003,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           headers: {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
+            Connection: 'keep-alive',
           },
         })
       })()
@@ -948,7 +1032,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         agents: [...agents.entries()].map(([n, e]) => ({ name: n, role: e.role })),
         sensei: sensei ? { connected: true, idle: sensei.idle } : { connected: false },
         pendingEvents: pendingProjection.state.length,
-        activeTriggers: triggerProjection.state.triggers.filter(t => t.status === 'active').length,
+        activeTriggers: triggerProjection.state.triggers.filter((t) => t.status === 'active').length,
         slack: SLACK_APP_TOKEN
           ? { configured: true, connected: slackConnected, channel: SLACK_CHANNEL }
           : { configured: false },
@@ -959,7 +1043,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
   },
 
   websocket: {
-    open(ws) {},
+    open(_ws) {},
 
     close(ws) {
       const agent = ws.data.agent
@@ -994,7 +1078,11 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             if (role === 'sensei') {
               const existingSensei = findSensei()
               if (existingSensei) {
-                wsSend(ws, { type: 'deliver', from: 'infra', text: 'ERROR: Another sensei is already connected. Only one sensei per dojo. This connection will be ignored.' })
+                wsSend(ws, {
+                  type: 'deliver',
+                  from: 'infra',
+                  text: 'ERROR: Another sensei is already connected. Only one sensei per dojo. This connection will be ignored.',
+                })
                 break
               }
             }
@@ -1002,7 +1090,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             ws.data.agent = msg.agent
             ws.data.role = msg.role
             const hasActiveTask = boardProjection.state.tasks.some(
-              t => t.agent === msg.agent && (t.status === 'in-progress' || t.status === 'waiting'),
+              (t) => t.agent === msg.agent && (t.status === 'in-progress' || t.status === 'waiting'),
             )
             const idle = !hasActiveTask
             const sessionId = msg.sessionId
@@ -1012,10 +1100,18 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
               sessionId,
               tags: msg.tags ?? [],
               deliver: wsDeliver(ws),
-              close: () => { ws.data.agent = undefined; ws.close() },
+              close: () => {
+                ws.data.agent = undefined
+                ws.close()
+              },
             })
             wsSend(ws, { type: 'registered', agent: msg.agent, role })
-            void record('register', agentStream(msg.agent), { agent: msg.agent, role, idle, sessionId } satisfies RegisterData)
+            void record('register', agentStream(msg.agent), {
+              agent: msg.agent,
+              role,
+              idle,
+              sessionId,
+            } satisfies RegisterData)
 
             if (role === 'sensei') {
               setTimeout(() => {
@@ -1030,7 +1126,11 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
                 nudgeSenseiIfIdle()
               } else {
                 const hasWork = boardProjection.state.tasks.some(
-                  t => t.status === 'todo' || t.status === 'assigned' || t.status === 'in-progress' || t.status === 'waiting',
+                  (t) =>
+                    t.status === 'todo' ||
+                    t.status === 'assigned' ||
+                    t.status === 'in-progress' ||
+                    t.status === 'waiting',
                 )
                 if (hasWork) nudgeSenseiIfIdle(true)
               }
@@ -1045,7 +1145,12 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             if (sender?.role !== 'sensei') {
               void record('reply', stream, { agent: msg.from, text: msg.text } satisfies ReplyData)
             } else {
-              void record('send', stream, { agent: msg.from, from: msg.from, text: msg.text, delivered: true } satisfies SendData)
+              void record('send', stream, {
+                agent: msg.from,
+                from: msg.from,
+                text: msg.text,
+                delivered: true,
+              } satisfies SendData)
             }
             break
           }

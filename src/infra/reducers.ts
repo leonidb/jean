@@ -127,8 +127,12 @@ export type PlaybookRemovedData = {
 
 // ── Stream helpers ───────────────────────────────────────────────
 
-export function taskStream(taskId: string): string { return `task-${taskId}` }
-export function agentStream(agent: string): string { return `agent-${agent}` }
+export function taskStream(taskId: string): string {
+  return `task-${taskId}`
+}
+export function agentStream(agent: string): string {
+  return `agent-${agent}`
+}
 export const SYSTEM_STREAM = 'system'
 export const TRIGGERS_STREAM = 'triggers'
 export const PLAYBOOKS_STREAM = 'playbooks'
@@ -143,8 +147,7 @@ export function agentFromStream(stream: string): string | undefined {
 
 /** Extract agent name from a StoredEvent — checks data.agent, then stream prefix. */
 export function agentFromEvent(event: StoredEvent): string | undefined {
-  return (event.data as Record<string, unknown>)?.agent as string | undefined
-    ?? agentFromStream(event.stream)
+  return ((event.data as Record<string, unknown>)?.agent as string | undefined) ?? agentFromStream(event.stream)
 }
 
 // ── Board reducer ────────────────────────────────────────────────
@@ -174,7 +177,7 @@ export const boardReducer: Reducer<Board> = (state, event) => {
       if (!taskId) return state
       const to = migrateStatus(d.to)
       return {
-        tasks: state.tasks.map(t => {
+        tasks: state.tasks.map((t) => {
           if (t.id !== taskId) return t
           const updated = { ...t, status: to, updatedAt: event.ts }
           // When starting a task, ensure agent is set (default to queue)
@@ -189,7 +192,7 @@ export const boardReducer: Reducer<Board> = (state, event) => {
       const taskId = taskIdFromStream(event.stream)
       if (!taskId) return state
       return {
-        tasks: state.tasks.map(t =>
+        tasks: state.tasks.map((t) =>
           t.id === taskId
             ? {
                 ...t,
@@ -210,7 +213,7 @@ export const boardReducer: Reducer<Board> = (state, event) => {
 /** Migrate board snapshot with legacy status names to current names. */
 export function migrateBoard(board: Board): Board {
   let changed = false
-  const tasks = board.tasks.map(t => {
+  const tasks = board.tasks.map((t) => {
     const migrated = migrateStatus(t.status)
     if (migrated !== t.status) {
       changed = true
@@ -244,7 +247,7 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
     case 'ack': {
       const d = event.data as AckData
       const acked = new Set(d.eventIds)
-      return state.filter(e => !acked.has(e.id))
+      return state.filter((e) => !acked.has(e.id))
     }
 
     default:
@@ -291,7 +294,7 @@ export const triggerReducer: Reducer<TriggerState> = (state, event) => {
     case 'trigger-updated': {
       const d = event.data as TriggerUpdatedData
       return {
-        triggers: state.triggers.map(t =>
+        triggers: state.triggers.map((t) =>
           t.id === d.id
             ? {
                 ...t,
@@ -309,13 +312,13 @@ export const triggerReducer: Reducer<TriggerState> = (state, event) => {
 
     case 'trigger-removed': {
       const d = event.data as TriggerRemovedData
-      return { triggers: state.triggers.filter(t => t.id !== d.id) }
+      return { triggers: state.triggers.filter((t) => t.id !== d.id) }
     }
 
     case 'trigger-fired': {
       const d = event.data as TriggerFiredData
       return {
-        triggers: state.triggers.map(t => {
+        triggers: state.triggers.map((t) => {
           if (t.id !== d.triggerId) return t
           return {
             ...t,
@@ -353,9 +356,9 @@ function parseFrontmatter(content: string): { name: string; description: string 
   const fmLines = fm.split('\n')
   const name = fm.match(/^name:\s*(.+)/m)?.[1]?.trim() ?? ''
   let description = ''
-  const descLineIdx = fmLines.findIndex(l => /^description:/.test(l))
+  const descLineIdx = fmLines.findIndex((l) => /^description:/.test(l))
   if (descLineIdx >= 0) {
-    const afterColon = fmLines[descLineIdx]!.replace(/^description:\s*/, '')
+    const afterColon = fmLines[descLineIdx]?.replace(/^description:\s*/, '')
     if (afterColon === '>' || afterColon === '') {
       const indented: string[] = []
       for (const l of fmLines.slice(descLineIdx + 1)) {
@@ -391,7 +394,7 @@ export const playbookReducer: Reducer<PlaybookState> = (state, event) => {
       const d = event.data as PlaybookUpdatedData
       const { name, description } = parseFrontmatter(d.content)
       return {
-        playbooks: state.playbooks.map(p =>
+        playbooks: state.playbooks.map((p) =>
           p.id === d.id
             ? { ...p, name: name || d.id, description, content: d.content, hash: d.hash, updatedAt: event.ts }
             : p,
@@ -401,7 +404,7 @@ export const playbookReducer: Reducer<PlaybookState> = (state, event) => {
 
     case 'playbook-removed': {
       const d = event.data as PlaybookRemovedData
-      return { playbooks: state.playbooks.filter(p => p.id !== d.id) }
+      return { playbooks: state.playbooks.filter((p) => p.id !== d.id) }
     }
 
     default:

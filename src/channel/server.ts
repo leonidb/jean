@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 /**
  * Jean channel plugin.
  *
@@ -11,16 +12,12 @@
  * Spawned by Claude Code as a subprocess over stdio.
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js'
-import type { DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
-
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import type { DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE = process.env.JEAN_ROLE ?? 'worker'
@@ -36,7 +33,9 @@ const AGENT_TAGS: string[] = (() => {
       const data = JSON.parse(readFileSync(file, 'utf8'))
       return data.tags ?? []
     }
-  } catch { /* no file or parse error */ }
+  } catch {
+    /* no file or parse error */
+  }
   return []
 })()
 
@@ -46,19 +45,20 @@ const mcp = new Server(
   { name: 'jean', version: '0.1.0' },
   {
     capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
-    instructions: AGENT_ROLE === 'sensei'
-      ? [
-          `You are the sensei (orchestrator) in the Jean system, agent "${AGENT_NAME}".`,
-          `When you receive any message from Jean, FIRST load the jean-sensei skill, then follow its instructions.`,
-          `You manage the board and agents via curl to http://127.0.0.1:8700.`,
-          `The reply tool is ONLY for reporting to the human. Use curl for all system interactions.`,
-        ].join('\n')
-      : [
-          `You are connected to the Jean orchestration system as agent "${AGENT_NAME}".`,
-          `Messages from the orchestrator arrive as <channel source="jean" ...> tags.`,
-          `Use the reply tool to send messages back to the orchestrator.`,
-          `When you finish a task or get stuck, just stop — the orchestrator will check on you.`,
-        ].join('\n'),
+    instructions:
+      AGENT_ROLE === 'sensei'
+        ? [
+            `You are the sensei (orchestrator) in the Jean system, agent "${AGENT_NAME}".`,
+            `When you receive any message from Jean, FIRST load the jean-sensei skill, then follow its instructions.`,
+            `You manage the board and agents via curl to http://127.0.0.1:8700.`,
+            `The reply tool is ONLY for reporting to the human. Use curl for all system interactions.`,
+          ].join('\n')
+        : [
+            `You are connected to the Jean orchestration system as agent "${AGENT_NAME}".`,
+            `Messages from the orchestrator arrive as <channel source="jean" ...> tags.`,
+            `Use the reply tool to send messages back to the orchestrator.`,
+            `When you finish a task or get stuck, just stop — the orchestrator will check on you.`,
+          ].join('\n'),
   },
 )
 
@@ -85,7 +85,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }))
 
-mcp.setRequestHandler(CallToolRequestSchema, async req => {
+mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
 
   if (req.params.name === 'reply') {

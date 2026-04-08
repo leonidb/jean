@@ -1,0 +1,10 @@
+pre-commit:
+  parallel: true
+  commands:
+    biome:
+      glob: "*.{ts,tsx,js,jsx,json}"
+      run: bunx biome check --staged --write --no-errors-on-unmatched
+      stage_fixed: true
+    # TODO: enable once existing type errors are fixed
+    # typecheck:
+    #   run: bunx tsc --noEmit

@@ -11,7 +11,7 @@ export type AgentRole = 'worker' | 'sensei' | 'user'
 
 export type RegisterMsg = {
   type: 'register'
-  agent: string  // agent name, e.g. "scratch", "sensei"
+  agent: string // agent name, e.g. "scratch", "sensei"
   role: AgentRole
   sessionId?: string
   tags?: string[]

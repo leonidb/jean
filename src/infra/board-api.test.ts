@@ -1,13 +1,15 @@
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { mkdirSync, rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
-import { rmSync, mkdirSync } from 'node:fs'
 
 const TEST_PORT = 8798
 const DATA_DIR = '/tmp/jean-test-board-api'
 let server: Subprocess
 
 beforeAll(async () => {
-  try { rmSync(DATA_DIR, { recursive: true }) } catch {}
+  try {
+    rmSync(DATA_DIR, { recursive: true })
+  } catch {}
   mkdirSync(DATA_DIR, { recursive: true })
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
     env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_DATA_DIR: DATA_DIR },
@@ -15,12 +17,18 @@ beforeAll(async () => {
     stderr: 'pipe',
   })
   for (let i = 0; i < 20; i++) {
-    try { await fetch(`http://127.0.0.1:${TEST_PORT}/`); break }
-    catch { await Bun.sleep(100) }
+    try {
+      await fetch(`http://127.0.0.1:${TEST_PORT}/`)
+      break
+    } catch {
+      await Bun.sleep(100)
+    }
   }
 })
 
-afterAll(() => { server.kill() })
+afterAll(() => {
+  server.kill()
+})
 
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 
