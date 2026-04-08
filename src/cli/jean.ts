@@ -24,7 +24,7 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
-import { basename, dirname, resolve } from 'node:path'
+import { basename, dirname, relative, resolve } from 'node:path'
 import {
   CONFIG_SCHEMA,
   getByPath,
@@ -957,7 +957,7 @@ function discoverAgents(dojoRoot: string): AgentInfo[] {
       const dirPath = resolve(dojoRoot, entry.name)
       const meta = readAgentMeta(dirPath)
       if (!meta) continue
-      agents.push({ ...meta, path: dirPath, branch: branches.get(dirPath) })
+      agents.push({ ...meta, path: dirPath, branch: branches.get(resolve(dirPath, 'work')) })
     }
   } catch {
     /* can't read dojo root */
@@ -972,6 +972,16 @@ function findAgent(name: string, dojoRoot: string): AgentInfo | undefined {
 
 function channelDir(): string {
   return resolve(cliDir(), '..', 'channel')
+}
+
+/** Compute --add-dir flags for agent launch based on agent location */
+function agentLaunchFlags(agentDir: string): string {
+  const dojoRoot = findDojoRoot()
+  const jeanDir = resolve(dojoRoot, '.jean')
+  const relJean = relative(agentDir, jeanDir)
+  const meta = readAgentMeta(agentDir)
+  const role = meta?.role ?? 'worker'
+  return `--add-dir work --add-dir ${relJean} --add-dir ${relJean}/roles/${role}`
 }
 
 function isWorktreeDirty(path: string): boolean {
@@ -991,7 +1001,7 @@ function cmdAgentAdd(args: string[]) {
     process.exit(1)
   }
   const role = roleStr as AgentRole
-  const useWorktree = args.includes('--worktree') ? true : args.includes('--no-worktree') ? false : role === 'worker' // default: workers get worktrees
+  const useWorktree = !args.includes('--no-worktree') // default: all agents get worktrees
   const tagsIdx = args.indexOf('--tags')
   const tags: string[] = tagsIdx >= 0 ? args.slice(tagsIdx + 1).filter((a) => !a.startsWith('--')) : []
 
@@ -1021,6 +1031,7 @@ function flagValue(args: string[], flag: string): string | undefined {
 function addNew(name: string, role: AgentRole, tags: string[], useWorktree: boolean) {
   const dojoRoot = findDojoRoot()
   const agentDir = resolve(dojoRoot, name)
+  const workDir = resolve(agentDir, 'work')
 
   // Check name uniqueness
   const existing = findAgent(name, dojoRoot)
@@ -1036,48 +1047,54 @@ function addNew(name: string, role: AgentRole, tags: string[], useWorktree: bool
   if (useWorktree) {
     const bareDir = findBareRepo(dojoRoot)
     if (!bareDir) {
-      console.error('No .bare/ directory found. Cannot create worktree.')
-      console.error('Use --no-worktree to create a plain directory instead.')
+      console.error('No .jean/.bare/ directory found. Cannot create worktree.')
+      console.error('Initialize with: jean dojo init --git')
       process.exit(1)
     }
+
+    // Create wrapper directory (after bare repo check to avoid orphan dir)
+    mkdirSync(agentDir, { recursive: true })
 
     const branch = `jean/${name}`
     console.log(`Creating worktree on branch "${branch}"...`)
 
-    let wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', `../${name}`, '-b', branch], {
+    let wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', workDir, '-b', branch], {
       stderr: 'pipe',
       stdout: 'pipe',
     })
     if (wt.exitCode !== 0) {
-      wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', `../${name}`, branch], {
+      wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', workDir, branch], {
         stderr: 'pipe',
         stdout: 'pipe',
       })
       if (wt.exitCode !== 0) {
         console.error(`Failed to create worktree: ${wt.stderr.toString().trim()}`)
+        rmSync(agentDir, { recursive: true })
         process.exit(1)
       }
     }
 
-    // Write config — rollback worktree on failure
+    // Write config to wrapper dir — rollback on failure
     try {
       writeJeanConfig(agentDir, name, role, tags)
     } catch (err) {
       console.error(`Failed to write agent config: ${err}`)
       console.error('Rolling back worktree...')
-      Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'remove', `../${name}`, '--force'], {
+      Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'remove', workDir, '--force'], {
         stderr: 'pipe',
         stdout: 'pipe',
       })
+      rmSync(agentDir, { recursive: true, force: true })
       process.exit(1)
     }
 
     console.log(`\n${GREEN}Agent "${name}" created.${RESET}`)
-    console.log(`  Worktree: ./${name}/`)
+    console.log(`  Wrapper:  ./${name}/`)
+    console.log(`  Worktree: ./${name}/work/`)
     console.log(`  Branch:   ${branch}`)
   } else {
-    // Plain directory
-    mkdirSync(agentDir)
+    // No worktree — create empty work directory
+    mkdirSync(workDir)
     writeJeanConfig(agentDir, name, role, tags)
 
     console.log(`\n${GREEN}Agent "${name}" created.${RESET}`)
@@ -1087,7 +1104,9 @@ function addNew(name: string, role: AgentRole, tags: string[], useWorktree: bool
   if (role !== 'worker') console.log(`  Role:     ${role}`)
   if (tags.length) console.log(`  Tags:     ${tags.join(', ')}`)
   console.log(`\nTo start:`)
-  console.log(`  cd ${name} && claude --dangerously-load-development-channels server:jean`)
+  console.log(
+    `  cd ${name} && claude ${agentLaunchFlags(agentDir)} --dangerously-load-development-channels server:jean`,
+  )
 }
 
 function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
@@ -1117,7 +1136,9 @@ function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
   if (role !== 'worker') console.log(`  Role: ${role}`)
   if (tags.length) console.log(`  Tags: ${tags.join(', ')}`)
   console.log(`\nTo start:`)
-  console.log(`  cd ${targetPath} && claude --dangerously-load-development-channels server:jean`)
+  console.log(
+    `  cd ${targetPath} && claude ${agentLaunchFlags(targetPath)} --dangerously-load-development-channels server:jean`,
+  )
 }
 
 function defaultPermissions(role: AgentRole): string[] {
@@ -1223,6 +1244,9 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
   } else {
     console.log(`  ${DIM}Skipping .claude/settings.local.json (already exists)${RESET}`)
   }
+
+  // Agent-specific skills directory
+  mkdirSync(resolve(agentDir, '.claude', 'skills'), { recursive: true })
 }
 
 // ── Agent List ────────────────────────────────────────────────────
@@ -1313,24 +1337,31 @@ function cmdAgentRemove(args: string[]) {
 
   if (agent.branch !== undefined) {
     // Worktree agent: check dirty state, remove via git
-    if (!force && isWorktreeDirty(agent.path)) {
+    const workDir = resolve(agent.path, 'work')
+    if (!force && isWorktreeDirty(workDir)) {
       console.error(`Agent "${name}" has uncommitted changes. Use --force to remove anyway.`)
       process.exit(1)
     }
 
-    const bareDir = findBareRepo(dojoRoot)!
-    const result = Bun.spawnSync(
-      ['git', '-C', bareDir, 'worktree', 'remove', agent.path, ...(force ? ['--force'] : [])],
-      { stderr: 'pipe', stdout: 'pipe' },
-    )
+    const bareDir = findBareRepo(dojoRoot)
+    if (!bareDir) {
+      console.error('No .jean/.bare/ directory found. Cannot remove worktree.')
+      process.exit(1)
+    }
+    const result = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'remove', workDir, ...(force ? ['--force'] : [])], {
+      stderr: 'pipe',
+      stdout: 'pipe',
+    })
     if (result.exitCode !== 0) {
       console.error(`Failed to remove worktree: ${result.stderr.toString().trim()}`)
       process.exit(1)
     }
+    // Remove wrapper directory
+    rmSync(agent.path, { recursive: true, force: true })
 
     console.log(`${GREEN}Agent "${name}" removed.${RESET}`)
     if (agent.branch) {
-      console.log(`  Branch "${agent.branch}" still exists. Delete with: git -C .bare branch -d ${agent.branch}`)
+      console.log(`  Branch "${agent.branch}" still exists. Delete with: git -C .jean/.bare branch -d ${agent.branch}`)
     }
   } else {
     // Plain directory agent: remove directory
@@ -1360,7 +1391,8 @@ function cmdAgentStart(name?: string) {
   }
 
   console.log(`Starting agent "${name}" in ${agent.path}...`)
-  const result = Bun.spawnSync(['claude', '--dangerously-load-development-channels', 'server:jean'], {
+  const flags = agentLaunchFlags(agent.path).split(' ')
+  const result = Bun.spawnSync(['claude', ...flags, '--dangerously-load-development-channels', 'server:jean'], {
     cwd: agent.path,
     stdin: 'inherit',
     stdout: 'inherit',
