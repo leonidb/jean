@@ -13,7 +13,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
@@ -21,7 +21,41 @@ import type { DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE = process.env.JEAN_ROLE ?? 'worker'
-const INFRA_URL = process.env.JEAN_INFRA_URL ?? 'ws://127.0.0.1:8700/ws'
+
+/** Discover infra WebSocket URL: env var > .jean/infra.port file > fallback */
+function discoverInfraWsUrl(): string {
+  if (process.env.JEAN_INFRA_URL) return process.env.JEAN_INFRA_URL
+  let dir = process.cwd()
+  while (dir !== dirname(dir)) {
+    const portFile = resolve(dir, '.jean', 'infra.port')
+    if (existsSync(portFile)) {
+      const port = readFileSync(portFile, 'utf8').trim()
+      return `ws://127.0.0.1:${port}/ws`
+    }
+    dir = dirname(dir)
+  }
+  return 'ws://127.0.0.1:8700/ws'
+}
+
+/** Discover infra HTTP URL (for sensei instructions) */
+function discoverInfraHttpUrl(): string {
+  if (process.env.JEAN_INFRA_URL) {
+    return process.env.JEAN_INFRA_URL.replace('ws://', 'http://').replace('/ws', '')
+  }
+  let dir = process.cwd()
+  while (dir !== dirname(dir)) {
+    const portFile = resolve(dir, '.jean', 'infra.port')
+    if (existsSync(portFile)) {
+      const port = readFileSync(portFile, 'utf8').trim()
+      return `http://127.0.0.1:${port}`
+    }
+    dir = dirname(dir)
+  }
+  return 'http://127.0.0.1:8700'
+}
+
+const INFRA_URL = discoverInfraWsUrl()
+const INFRA_HTTP_URL = discoverInfraHttpUrl()
 const SESSION_ID = crypto.randomUUID()
 const SESSION_FILE = `/tmp/jean-session-${AGENT_NAME}.id`
 
@@ -50,7 +84,7 @@ const mcp = new Server(
         ? [
             `You are the sensei (orchestrator) in the Jean system, agent "${AGENT_NAME}".`,
             `When you receive any message from Jean, FIRST load the jean-sensei skill, then follow its instructions.`,
-            `You manage the board and agents via curl to http://127.0.0.1:8700.`,
+            `You manage the board and agents via curl to ${INFRA_HTTP_URL}.`,
             `The reply tool is ONLY for reporting to the human. Use curl for all system interactions.`,
           ].join('\n')
         : [

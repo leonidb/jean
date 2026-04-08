@@ -606,6 +606,53 @@ function cmdDojoInit(args: string[]) {
 
   mkdirSync(resolve(jeanDir, 'playbooks'), { recursive: true })
   mkdirSync(resolve(jeanDir, 'context'), { recursive: true })
+  mkdirSync(resolve(jeanDir, 'skills'), { recursive: true })
+
+  // Ship default skills
+  writeFileSync(
+    resolve(jeanDir, 'skills', 'create-playbook.md'),
+    `---
+name: create-playbook
+description: >
+  Guide for creating and updating playbooks — workflow definitions
+  that control how work flows through the dojo.
+---
+
+# Create Playbook
+
+Create or update a playbook — a workflow definition that guides how a type of work flows through the dojo.
+
+## Format
+
+Playbooks are markdown files in \`.jean/playbooks/\`. The infrastructure watches this directory — changes are picked up automatically.
+
+\`\`\`markdown
+---
+name: <short-name>
+description: >
+  One or two sentences. What this workflow is for and when it applies.
+---
+
+# <Title>
+
+<Body: phases, rules, output expectations, done criteria>
+\`\`\`
+
+## Writing guidelines
+
+- **Start with the trigger**: what causes this workflow to start?
+- **Define phases**: sequential, concrete steps.
+- **Specify output rules**: where do results go? (task replies, Slack, files)
+- **Define done**: when is the workflow complete?
+- **Human interaction points**: when should the agent pause and ask?
+- **Keep it short**: agents scan playbooks quickly, not read essays.
+- **No agent-specific instructions**: playbooks define the workflow, not which agent runs it.
+
+## Verifying
+
+After writing a playbook file, verify it loaded via \`GET /playbooks\`.
+`,
+  )
 
   const config: JeanConfig = {}
   for (let i = 0; i < args.length; i++) {
@@ -629,6 +676,7 @@ function cmdDojoInit(args: string[]) {
   console.log(`  ${dojoRoot}/`)
   console.log(`    .jean/`)
   console.log(`      playbooks/      ${DIM}← flow definitions${RESET}`)
+  console.log(`      skills/         ${DIM}← dojo-level skill templates${RESET}`)
   console.log(`      context/        ${DIM}← shared project context${RESET}`)
   if (Object.keys(config).length > 0) {
     console.log(`      jean.config.json ${DIM}← configuration${RESET}`)
@@ -1113,7 +1161,6 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
               env: {
                 JEAN_AGENT: name,
                 JEAN_ROLE: role,
-                JEAN_INFRA_URL: `${INFRA_URL.replace('http://', 'ws://')}/ws`,
               },
             },
           },
@@ -1144,7 +1191,7 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
                 hooks: [
                   {
                     type: 'command',
-                    command: `curl -s -X POST http://127.0.0.1:8700/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat /tmp/jean-session-${name}.id 2>/dev/null)\\"}"`,
+                    command: `JEAN_PORT=$(cat ../.jean/infra.port 2>/dev/null || echo 8700); curl -s -X POST http://127.0.0.1:$JEAN_PORT/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat /tmp/jean-session-${name}.id 2>/dev/null)\\"}"`,
                   },
                 ],
               },
@@ -1154,7 +1201,7 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
                 hooks: [
                   {
                     type: 'command',
-                    command: `bun -e 'const d=JSON.parse(await Bun.stdin.text());fetch("http://127.0.0.1:8700/permissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({agent:"${name}",tool:d.tool_name,input:d.tool_input})})'`,
+                    command: `bun -e 'const{readFileSync:r,existsSync:e}=require("fs");const p=e("../.jean/infra.port")?r("../.jean/infra.port","utf8").trim():"8700";const d=JSON.parse(await Bun.stdin.text());fetch("http://127.0.0.1:"+p+"/permissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({agent:"${name}",tool:d.tool_name,input:d.tool_input})})'`,
                     async: true,
                   },
                 ],
