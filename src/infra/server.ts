@@ -40,14 +40,17 @@ import type {
   CreateTaskRequest, UpdateTaskRequest, UpdateStatusRequest,
 } from './protocol.ts'
 
+import { resolveConfig } from './config.ts'
+
 const DATA_DIR = resolve(process.env.JEAN_DATA_DIR ?? '.')
+const config = resolveConfig(DATA_DIR)
 const HISTORY_PATH = resolve(DATA_DIR, 'history.jsonl')
 const SNAPSHOT_DIR = DATA_DIR
 
-// Slack config (optional) — loaded from .env in the data directory
-const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN
-const SLACK_CHANNEL = process.env.SLACK_CHANNEL
+// Slack config (optional)
+const SLACK_APP_TOKEN = config.slack?.appToken
+const SLACK_BOT_TOKEN = config.slack?.botToken
+const SLACK_CHANNEL = config.slack?.channel
 
 // ── Event store & projections ────────────────────────────────────
 
@@ -463,7 +466,7 @@ async function initSlack() {
 
 // ── Port selection ───────────────────────────────────────────────
 
-const PREFERRED_PORT = Number(process.env.JEAN_PORT ?? 8700)
+const PREFERRED_PORT = config.port ?? 8700
 const PORT_FILE = resolve(DATA_DIR, 'infra.port')
 const PID_FILE = resolve(DATA_DIR, 'infra.pid')
 
@@ -480,7 +483,7 @@ function findFreePort(start: number, maxAttempts = 100): number {
   throw new Error(`No free port found in range ${start}-${start + maxAttempts}`)
 }
 
-const PORT = process.env.JEAN_PORT ? PREFERRED_PORT : findFreePort(PREFERRED_PORT)
+const PORT = config.port ? PREFERRED_PORT : findFreePort(PREFERRED_PORT)
 
 function writeRuntimeFiles() {
   writeFileSync(PORT_FILE, String(PORT))

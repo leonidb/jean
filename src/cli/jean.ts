@@ -25,6 +25,11 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, unlinkSync } from 'node:fs'
 import { resolve, dirname, basename } from 'node:path'
+import {
+  CONFIG_SCHEMA, readConfig, writeConfig,
+  validateConfigKey, parseConfigValue, setByPath, getByPath,
+  type JeanConfig,
+} from '../infra/config.ts'
 
 const args = process.argv.slice(2)
 const command = args[0]
@@ -78,6 +83,9 @@ switch (command) {
     break
   case 'dojo':
     await cmdDojo(args.slice(1))
+    break
+  case 'config':
+    cmdConfig(args.slice(1))
     break
   case 'infra':
     await cmdInfra(args.slice(1))
@@ -447,19 +455,98 @@ function eventColor(type: string): string {
   }
 }
 
+// ── Config helpers ───────────────────────────────────────────────
+
+const VALID_KEYS = Object.keys(CONFIG_SCHEMA).join(', ')
+
+function applyConfigEntry(config: JeanConfig, key: string, raw: string): void {
+  const err = validateConfigKey(key)
+  if (err) {
+    console.error(err)
+    console.error(`Valid keys: ${VALID_KEYS}`)
+    process.exit(1)
+  }
+  const parsed = parseConfigValue(key, raw)
+  if ('error' in parsed) {
+    console.error(parsed.error)
+    process.exit(1)
+  }
+  setByPath(config as Record<string, unknown>, key, parsed.value)
+}
+
+// ── Config subcommands ───────────────────────────────────────────
+
+function cmdConfig(args: string[]) {
+  const sub = args[0]
+  switch (sub) {
+    case 'set': cmdConfigSet(args[1], args[2]); break
+    case 'get': cmdConfigGet(args[1]); break
+    case 'list': cmdConfigList(); break
+    default:
+      console.error('Usage: jean config <set|get|list>')
+      process.exit(1)
+  }
+}
+
+function cmdConfigSet(key?: string, raw?: string) {
+  if (!key || !raw) {
+    console.error('Usage: jean config set <key> <value>')
+    console.error(`Valid keys: ${VALID_KEYS}`)
+    process.exit(1)
+  }
+  const dojoRoot = findDojoRoot()
+  const dataDir = resolve(dojoRoot, '.jean')
+  const config = readConfig(dataDir)
+  applyConfigEntry(config, key, raw)
+  writeConfig(dataDir, config)
+  const value = getByPath(config as Record<string, unknown>, key)
+  console.log(`${key} = ${JSON.stringify(value)}`)
+}
+
+function cmdConfigGet(key?: string) {
+  if (!key) {
+    console.error('Usage: jean config get <key>')
+    process.exit(1)
+  }
+  const dojoRoot = findDojoRoot()
+  const dataDir = resolve(dojoRoot, '.jean')
+  const config = readConfig(dataDir)
+  const value = getByPath(config as Record<string, unknown>, key)
+  if (value === undefined) {
+    console.log(`${key}: (not set)`)
+  } else {
+    console.log(`${key} = ${JSON.stringify(value)}`)
+  }
+}
+
+function cmdConfigList() {
+  const dojoRoot = findDojoRoot()
+  const dataDir = resolve(dojoRoot, '.jean')
+  const config = readConfig(dataDir)
+  const content = JSON.stringify(config, null, 2)
+  if (content === '{}') {
+    console.log('No configuration set.')
+    console.log(`Valid keys: ${VALID_KEYS}`)
+    return
+  }
+  console.log(content)
+}
+
 // ── Dojo subcommands ─────────────────────────────────────────────
 
 async function cmdDojo(args: string[]) {
   const sub = args[0]
   switch (sub) {
-    case 'init': cmdDojoInit(args[1]); break
+    case 'init': cmdDojoInit(args.slice(1)); break
     default:
-      console.error('Usage: jean dojo init [path]')
+      console.error('Usage: jean dojo init [path] [--key value ...]')
       process.exit(1)
   }
 }
 
-function cmdDojoInit(targetPath?: string) {
+function cmdDojoInit(args: string[]) {
+  // First non-flag arg is the path
+  const targetPath = args.find(a => !a.startsWith('--'))
   const dojoRoot = resolve(targetPath ?? '.')
 
   const jeanDir = resolve(dojoRoot, '.jean')
@@ -471,12 +558,32 @@ function cmdDojoInit(targetPath?: string) {
   mkdirSync(resolve(jeanDir, 'playbooks'), { recursive: true })
   mkdirSync(resolve(jeanDir, 'context'), { recursive: true })
 
+  const config: JeanConfig = {}
+  for (let i = 0; i < args.length; i++) {
+    if (!args[i]!.startsWith('--')) continue
+    const key = args[i]!.slice(2)
+    const raw = args[i + 1]
+    if (!raw || raw.startsWith('--')) {
+      console.error(`Missing value for --${key}`)
+      process.exit(1)
+    }
+    applyConfigEntry(config, key, raw)
+    i++ // skip value
+  }
+
+  if (Object.keys(config).length > 0) {
+    writeConfig(jeanDir, config)
+  }
+
   console.log(`${GREEN}Dojo initialized at ${dojoRoot}${RESET}`)
   console.log()
   console.log(`  ${dojoRoot}/`)
   console.log(`    .jean/`)
   console.log(`      playbooks/      ${DIM}← flow definitions${RESET}`)
   console.log(`      context/        ${DIM}← shared project context${RESET}`)
+  if (Object.keys(config).length > 0) {
+    console.log(`      jean.config.json ${DIM}← configuration${RESET}`)
+  }
   console.log()
   console.log(`Next steps:`)
   console.log(`  jean infra start    ${DIM}← start infrastructure${RESET}`)
@@ -1112,7 +1219,10 @@ function printUsage() {
   console.log(`jean — multi-agent orchestration (v0.1.0)
 
 Commands:
-  jean dojo init [path]                       Initialize a new dojo
+  jean dojo init [path] [--key value ...]      Initialize a new dojo
+  jean config set <key> <value>               Set a config value
+  jean config get <key>                       Get a config value
+  jean config list                            Show all config
   jean infra start                            Start infrastructure server
   jean infra stop                             Stop infrastructure server
   jean infra status                           Show infrastructure status
