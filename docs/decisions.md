@@ -115,6 +115,8 @@ Workers default to git worktrees (they need isolated code copies). Non-workers (
 
 Why: Workers need to edit code without conflicting with each other. The orchestrator doesn't edit code — it manages state. Making the common case automatic while allowing overrides covers edge cases without forcing a one-size-fits-all approach.
 
+**Superseded by decision #15** — moving to wrapper directories with worktrees for all agents.
+
 ## 12. External communication: Slack integration
 
 **Chosen: Transport-agnostic agent registry with Slack as a `user` role agent**
@@ -148,3 +150,36 @@ Conceptually cleaner: an agent is really just a role stamped onto a temporary wo
 **Why not adopted yet**: Environment setup cost. Real projects have fragile setups (wrong Python version, missing deps, Poetry quirks). With persistent directories, you fix once. With ephemeral workspaces, you pay setup cost per task — a 5-minute dep install to answer a quick Slack question is unacceptable.
 
 **Revisit when**: Fast, reliable workspace provisioning is solved — e.g. containerized environments, cached dependency layers, or project-specific setup scripts that work first try.
+
+## 15. Agent directory structure: Wrapper + work subdirectory
+
+**Chosen: Agent wrapper directory with `work/` subdirectory**
+
+Supersedes decision #11. Every agent gets a wrapper directory that Jean owns, with a `work/` subdirectory that is a git worktree.
+
+```
+agent/
+  .claude/settings.local.json   ← Jean config (permissions, hooks, MCP)
+  .jean-agent.json               ← agent metadata
+  work/                          ← git worktree
+    CLAUDE.md                    ← repo knowledge (lazy-loaded by Claude Code)
+    .claude/skills/              ← repo skills (loaded via --add-dir)
+    src/...
+```
+
+**Three base assumptions:**
+1. Every dojo is backed by a git repo.
+2. Every agent gets a worktree in `agent/work/`.
+3. `work/` is a subdirectory of the agent wrapper dir.
+
+**Why wrapper:** Jean needs to inject config (`.claude/settings.local.json`, `.mcp.json`, hooks, permissions) into the agent's working directory. If the agent directory IS the repo worktree, Jean's config conflicts with the repo's own `.claude/` files. The wrapper separates concerns: Jean owns the wrapper, the repo owns `work/`.
+
+**How knowledge flows:** Claude Code lazy-loads `work/CLAUDE.md` when the agent accesses files in `work/` (subdirectory CLAUDE.md convention). Repo skills in `work/.claude/skills/` are loaded via `--add-dir work`. No env vars needed for CLAUDE.md.
+
+**Dojo-level shared skills:** Live in `.jean/.claude/skills/`, loaded via `--add-dir ../../.jean` (or equivalent path to `.jean/`). Role-specific skills live in `.jean/roles/<role>/.claude/skills/`.
+
+**Git as artifact layer:** Agents commit results to git. Branches are referenceable from task events — sensei and other agents can inspect any branch. Branch naming strategy (per-agent, per-task, etc.) is project-specific, defined by playbooks.
+
+**Why worktrees over clones:** Industry research (Apr 2026) showed cloud systems use VMs/containers, local systems use worktrees. Nobody uses full clones for multi-agent setups. Worktrees are lighter (shared object store), faster to create, and provide instant branch visibility. Clones sit in an awkward middle — heavier than worktrees, less isolated than containers. If isolation needs grow beyond worktrees, the upgrade path is containers.
+
+**Launch:** `cd <agent> && claude --add-dir work --add-dir ../../.jean --add-dir ../../.jean/roles/<role> ...`
