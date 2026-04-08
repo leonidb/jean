@@ -610,7 +610,7 @@ function cmdDojoInit(args: string[]) {
   const config: JeanConfig = {}
   for (let i = 0; i < args.length; i++) {
     if (!args[i]?.startsWith('--')) continue
-    const key = args[i]?.slice(2)
+    const key = args[i]!.slice(2)
     const raw = args[i + 1]
     if (!raw || raw.startsWith('--')) {
       console.error(`Missing value for --${key}`)

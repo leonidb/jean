@@ -637,7 +637,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         }
         await record('task-status', taskStream(task.id), {
           from: task.status,
-          to: body.status,
+          to: body.status as TaskStatus,
           actor: body.actor ?? 'api',
         } satisfies TaskStatusData)
         const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
@@ -850,9 +850,10 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     }
 
     const triggerMatch = path.match(/^\/triggers\/([^/]+)$/)
+    const triggerId = triggerMatch?.[1]
 
     if (triggerMatch && req.method === 'GET') {
-      const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerMatch[1])
+      const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId!)
       if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
       return Response.json(trigger)
     }
@@ -860,7 +861,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     if (triggerMatch && req.method === 'PATCH') {
       return (async () => {
         const body = (await req.json()) as Omit<TriggerUpdatedData, 'id'>
-        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerMatch[1])
+        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId!)
         if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
         if (body.cron) {
           try {
@@ -870,20 +871,20 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           }
         }
         await record('trigger-updated', TRIGGERS_STREAM, {
-          id: triggerMatch[1],
+          id: triggerId!,
           ...body,
         } satisfies TriggerUpdatedData)
-        const updated = triggerProjection.state.triggers.find((t) => t.id === triggerMatch[1])
+        const updated = triggerProjection.state.triggers.find((t) => t.id === triggerId!)
         return Response.json(updated)
       })()
     }
 
     if (triggerMatch && req.method === 'DELETE') {
       return (async () => {
-        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerMatch[1])
+        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId!)
         if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
         await record('trigger-removed', TRIGGERS_STREAM, {
-          id: triggerMatch[1],
+          id: triggerId!,
         } satisfies TriggerRemovedData)
         return Response.json({ ok: true })
       })()

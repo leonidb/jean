@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { StoredEvent } from '../es/index.ts'
-import type { Board } from './board.ts'
+import type { Board, TaskStatus } from './board.ts'
 import {
   type AckData,
   type AgentIdleData,
@@ -88,8 +88,8 @@ describe('boardReducer', () => {
       queue: 'q',
     } satisfies TaskCreatedData)
     const e2 = makeEvent(2, 'task-status', taskStream('001'), {
-      from: 'inbox',
-      to: 'active',
+      from: 'inbox' as TaskStatus,
+      to: 'active' as TaskStatus,
     } satisfies TaskStatusData)
     const board = boardReducer(boardReducer(empty, e1), e2)
     expect(board.tasks[0]?.status).toBe('in-progress')
@@ -180,6 +180,7 @@ describe('pendingReducer', () => {
 
   test('worker agent-idle adds to pending', () => {
     const e = makeEvent(1, 'agent-idle', agentStream('scratch'), {
+      agent: 'scratch',
       role: 'worker',
     } satisfies AgentIdleData)
     const state = pendingReducer([], e)
@@ -188,6 +189,7 @@ describe('pendingReducer', () => {
 
   test('sensei agent-idle does NOT add to pending', () => {
     const e = makeEvent(1, 'agent-idle', agentStream('sensei'), {
+      agent: 'sensei',
       role: 'sensei',
     } satisfies AgentIdleData)
     const state = pendingReducer([], e)

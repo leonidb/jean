@@ -352,7 +352,7 @@ export type PlaybookState = { playbooks: Playbook[] }
 function parseFrontmatter(content: string): { name: string; description: string } {
   const match = content.match(/^---\s*\n([\s\S]*?)\n---/)
   if (!match) return { name: '', description: '' }
-  const fm = match[1]
+  const fm = match[1]!
   const fmLines = fm.split('\n')
   const name = fm.match(/^name:\s*(.+)/m)?.[1]?.trim() ?? ''
   let description = ''
@@ -367,7 +367,7 @@ function parseFrontmatter(content: string): { name: string; description: string 
       }
       description = indented.filter(Boolean).join(' ')
     } else {
-      description = afterColon
+      description = afterColon ?? ''
     }
   }
   return { name, description }

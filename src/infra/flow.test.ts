@@ -265,8 +265,10 @@ describe('history', () => {
 
     // Check pending events — the reply should have the taskId
     const res = await fetch(`${BASE}/events?agent=infer-worker`)
-    const data = (await res.json()) as { events: Array<{ type: string; taskId?: string; text: string }> }
-    const reply = data.events.find((e) => e.type === 'reply' && (e.data as any)?.text === 'inferred reply')
+    const data = (await res.json()) as {
+      events: Array<{ type: string; taskId?: string; data: Record<string, unknown> }>
+    }
+    const reply = data.events.find((e) => e.type === 'reply' && e.data?.text === 'inferred reply')
     expect(reply).toBeDefined()
     expect(reply?.taskId).toBe(task.id)
 
@@ -281,14 +283,14 @@ describe('history', () => {
     // Get the event and ack it
     const pending = await fetch(`${BASE}/events?agent=ack-hist-worker`)
     const events = (await pending.json()) as { events: Array<{ id: number }> }
-    const eventId = events.events[0]?.id
+    const eventId = events.events[0]!.id
     await fetch(`${BASE}/events/${eventId}/ack`, { method: 'POST' })
     await Bun.sleep(100)
 
     // Check history for ack event
     const res = await fetch(`${BASE}/history`)
-    const data = (await res.json()) as { events: Array<{ type: string; text?: string }> }
-    const ackEvent = data.events.find((e) => e.type === 'ack' && (e.data as any)?.eventIds?.includes(eventId))
+    const data = (await res.json()) as { events: Array<{ type: string; data: Record<string, unknown> }> }
+    const ackEvent = data.events.find((e) => e.type === 'ack' && (e.data?.eventIds as number[])?.includes(eventId))
     expect(ackEvent).toBeDefined()
 
     ws.close()
@@ -310,7 +312,7 @@ describe('history', () => {
     const res = await fetch(`${BASE}/history`)
     const data = (await res.json()) as { events: Array<{ id: number }> }
     for (let i = 1; i < data.events.length; i++) {
-      expect(data.events[i]?.id).toBeGreaterThan(data.events[i - 1]?.id)
+      expect(data.events[i]!.id).toBeGreaterThan(data.events[i - 1]!.id)
     }
   })
 })
