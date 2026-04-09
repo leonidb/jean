@@ -1104,8 +1104,9 @@ function addNew(name: string, role: AgentRole, tags: string[], useWorktree: bool
   if (role !== 'worker') console.log(`  Role:     ${role}`)
   if (tags.length) console.log(`  Tags:     ${tags.join(', ')}`)
   console.log(`\nTo start:`)
+  console.log(`  jean agent start ${name}`)
   console.log(
-    `  cd ${name} && claude ${agentLaunchFlags(agentDir)} --dangerously-load-development-channels server:jean`,
+    `\n${DIM}Or manually: cd ${name} && claude ${agentLaunchFlags(agentDir)} --dangerously-load-development-channels server:jean${RESET}`,
   )
 }
 
@@ -1136,8 +1137,9 @@ function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
   if (role !== 'worker') console.log(`  Role: ${role}`)
   if (tags.length) console.log(`  Tags: ${tags.join(', ')}`)
   console.log(`\nTo start:`)
+  console.log(`  jean agent start ${name}`)
   console.log(
-    `  cd ${targetPath} && claude ${agentLaunchFlags(targetPath)} --dangerously-load-development-channels server:jean`,
+    `\n${DIM}Or manually: cd ${targetPath} && claude ${agentLaunchFlags(targetPath)} --dangerously-load-development-channels server:jean${RESET}`,
   )
 }
 
@@ -1146,23 +1148,22 @@ function defaultPermissions(role: AgentRole): string[] {
   if (role === 'sensei') {
     return [
       ...base,
+      'Read',
+      'Glob',
+      'Grep',
       'Bash(curl:*)',
       'Bash(git log:*)',
       'Bash(git diff:*)',
       'Bash(git show:*)',
       'Bash(git status:*)',
-      'Bash(gh api:*)',
-      'Bash(gh pr view:*)',
-      'Bash(gh pr diff:*)',
-      'Bash(gh pr list:*)',
-      'Bash(gh issue list:*)',
-      'Bash(gh issue view:*)',
     ]
   }
   // worker and user
   return [
     ...base,
     'Read',
+    'Glob',
+    'Grep',
     'Edit',
     'Write',
     'Bash(git log:*)',
