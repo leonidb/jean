@@ -12,7 +12,7 @@
  * Spawned by Claude Code as a subprocess over stdio.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -22,21 +22,23 @@ import type { DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE = process.env.JEAN_ROLE ?? 'worker'
 
-/** Read port from .jean/infra.port, starting from JEAN_DOJO env var or walking up from cwd */
-function discoverPort(): string {
-  if (process.env.JEAN_DOJO) {
-    try {
-      return readFileSync(resolve(process.env.JEAN_DOJO, '.jean', 'infra.port'), 'utf8').trim()
-    } catch {}
-  }
+/** Locate dojo root: JEAN_DOJO env var (validated), else walk up from cwd looking for .jean/infra.port */
+function discoverDojoRoot(): string | null {
+  const hasInfraPort = (dir: string) => existsSync(resolve(dir, '.jean', 'infra.port'))
+  if (process.env.JEAN_DOJO && hasInfraPort(process.env.JEAN_DOJO)) return process.env.JEAN_DOJO
   let dir = process.cwd()
   while (dir !== dirname(dir)) {
-    try {
-      return readFileSync(resolve(dir, '.jean', 'infra.port'), 'utf8').trim()
-    } catch {}
+    if (hasInfraPort(dir)) return dir
     dir = dirname(dir)
   }
-  return '8700'
+  return null
+}
+
+const DOJO_ROOT = discoverDojoRoot()
+
+function discoverPort(): string {
+  if (!DOJO_ROOT) return '8700'
+  return readFileSync(resolve(DOJO_ROOT, '.jean', 'infra.port'), 'utf8').trim()
 }
 
 /** Discover infra WebSocket URL: env var > port file > fallback */
@@ -56,7 +58,18 @@ function discoverInfraHttpUrl(): string {
 const INFRA_URL = discoverInfraWsUrl()
 const INFRA_HTTP_URL = discoverInfraHttpUrl()
 const SESSION_ID = crypto.randomUUID()
-const SESSION_FILE = `/tmp/jean-session-${AGENT_NAME}.id`
+/** Session file lives under the dojo so two dojos with same-named agents don't collide */
+const SESSION_FILE = DOJO_ROOT ? resolve(DOJO_ROOT, '.jean', 'sessions', `${AGENT_NAME}.id`) : null
+
+async function writeSessionFile() {
+  if (!SESSION_FILE) return
+  try {
+    mkdirSync(dirname(SESSION_FILE), { recursive: true })
+    await Bun.write(SESSION_FILE, SESSION_ID)
+  } catch (err) {
+    process.stderr.write(`[jean] failed to write session file ${SESSION_FILE}: ${err}\n`)
+  }
+}
 
 // Read tags from .jean-agent.json if it exists in the working directory
 const AGENT_TAGS: string[] = (() => {
@@ -187,8 +200,7 @@ function connectToInfra() {
         switch (msg.type) {
           case 'registered':
             process.stderr.write(`[jean] registered as "${msg.agent}"\n`)
-            // Write session ID to file so stop hook can include it
-            Bun.write(SESSION_FILE, SESSION_ID).catch(() => {})
+            writeSessionFile()
             break
 
           case 'deliver':

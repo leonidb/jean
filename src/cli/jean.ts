@@ -1220,7 +1220,7 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
                 hooks: [
                   {
                     type: 'command',
-                    command: `JEAN_PORT=$(cat ../.jean/infra.port 2>/dev/null || echo 8700); curl -s -X POST http://127.0.0.1:$JEAN_PORT/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat /tmp/jean-session-${name}.id 2>/dev/null)\\"}"`,
+                    command: `JEAN_PORT=$(cat ../.jean/infra.port 2>/dev/null || echo 8700); curl -s -X POST http://127.0.0.1:$JEAN_PORT/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat ../.jean/sessions/${name}.id 2>/dev/null)\\"}"`,
                   },
                 ],
               },
