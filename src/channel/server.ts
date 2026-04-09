@@ -22,36 +22,35 @@ import type { DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE = process.env.JEAN_ROLE ?? 'worker'
 
-/** Discover infra WebSocket URL: env var > .jean/infra.port file > fallback */
-function discoverInfraWsUrl(): string {
-  if (process.env.JEAN_INFRA_URL) return process.env.JEAN_INFRA_URL
+/** Read port from .jean/infra.port, starting from JEAN_DOJO env var or walking up from cwd */
+function discoverPort(): string {
+  if (process.env.JEAN_DOJO) {
+    try {
+      return readFileSync(resolve(process.env.JEAN_DOJO, '.jean', 'infra.port'), 'utf8').trim()
+    } catch {}
+  }
   let dir = process.cwd()
   while (dir !== dirname(dir)) {
-    const portFile = resolve(dir, '.jean', 'infra.port')
-    if (existsSync(portFile)) {
-      const port = readFileSync(portFile, 'utf8').trim()
-      return `ws://127.0.0.1:${port}/ws`
-    }
+    try {
+      return readFileSync(resolve(dir, '.jean', 'infra.port'), 'utf8').trim()
+    } catch {}
     dir = dirname(dir)
   }
-  return 'ws://127.0.0.1:8700/ws'
+  return '8700'
+}
+
+/** Discover infra WebSocket URL: env var > port file > fallback */
+function discoverInfraWsUrl(): string {
+  if (process.env.JEAN_INFRA_URL) return process.env.JEAN_INFRA_URL
+  return `ws://127.0.0.1:${discoverPort()}/ws`
 }
 
 /** Discover infra HTTP URL (for sensei instructions) */
 function discoverInfraHttpUrl(): string {
   if (process.env.JEAN_INFRA_URL) {
-    return process.env.JEAN_INFRA_URL.replace('ws://', 'http://').replace('/ws', '')
+    return process.env.JEAN_INFRA_URL.replace('ws://', 'http://').replace(/\/ws$/, '')
   }
-  let dir = process.cwd()
-  while (dir !== dirname(dir)) {
-    const portFile = resolve(dir, '.jean', 'infra.port')
-    if (existsSync(portFile)) {
-      const port = readFileSync(portFile, 'utf8').trim()
-      return `http://127.0.0.1:${port}`
-    }
-    dir = dirname(dir)
-  }
-  return 'http://127.0.0.1:8700'
+  return `http://127.0.0.1:${discoverPort()}`
 }
 
 const INFRA_URL = discoverInfraWsUrl()

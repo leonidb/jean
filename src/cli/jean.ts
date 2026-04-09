@@ -1076,7 +1076,7 @@ function addNew(name: string, role: AgentRole, tags: string[], useWorktree: bool
 
     // Write config to wrapper dir — rollback on failure
     try {
-      writeJeanConfig(agentDir, name, role, tags)
+      writeJeanConfig(agentDir, name, role, tags, dojoRoot)
     } catch (err) {
       console.error(`Failed to write agent config: ${err}`)
       console.error('Rolling back worktree...')
@@ -1095,7 +1095,7 @@ function addNew(name: string, role: AgentRole, tags: string[], useWorktree: bool
   } else {
     // No worktree — create empty work directory
     mkdirSync(workDir)
-    writeJeanConfig(agentDir, name, role, tags)
+    writeJeanConfig(agentDir, name, role, tags, dojoRoot)
 
     console.log(`\n${GREEN}Agent "${name}" created.${RESET}`)
     console.log(`  Directory: ./${name}/`)
@@ -1129,7 +1129,7 @@ function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
     process.exit(1)
   }
 
-  writeJeanConfig(targetPath, name, role, tags)
+  writeJeanConfig(targetPath, name, role, tags, dojoRoot)
 
   console.log(`\n${GREEN}Agent "${name}" configured.${RESET}`)
   console.log(`  Path: ${targetPath}`)
@@ -1173,7 +1173,7 @@ function defaultPermissions(role: AgentRole): string[] {
   ]
 }
 
-function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: string[]) {
+function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: string[], dojoRoot: string) {
   writeAgentMeta(agentDir, { name, tags, role })
 
   const mcpPath = resolve(agentDir, '.mcp.json')
@@ -1189,6 +1189,7 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
               env: {
                 JEAN_AGENT: name,
                 JEAN_ROLE: role,
+                JEAN_DOJO: dojoRoot,
               },
             },
           },
