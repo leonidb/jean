@@ -909,6 +909,22 @@ function findBareRepo(dojoRoot: string): string | null {
   return existsSync(bareDir) ? bareDir : null
 }
 
+const GIT_EXCLUDE_MARKER = '# Jean agent config (managed by jean)'
+const GIT_EXCLUDE_ENTRIES = ['.jean/', '.claude/settings.local.json']
+
+/** Ensure .bare/info/exclude has entries to hide Jean files from git status in all worktrees */
+function ensureGitExclude(bareDir: string): void {
+  const excludePath = resolve(bareDir, 'info', 'exclude')
+  let content = ''
+  try {
+    content = readFileSync(excludePath, 'utf8')
+  } catch {}
+  if (content.includes(GIT_EXCLUDE_MARKER)) return
+  mkdirSync(resolve(bareDir, 'info'), { recursive: true })
+  const block = `\n${GIT_EXCLUDE_MARKER}\n${GIT_EXCLUDE_ENTRIES.join('\n')}\n`
+  writeFileSync(excludePath, content + block)
+}
+
 function getWorktreeBranches(bareDir: string): Map<string, string> {
   const result = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'list', '--porcelain'], {
     stdout: 'pipe',
@@ -931,7 +947,7 @@ function getWorktreeBranches(bareDir: string): Map<string, string> {
 
 function readAgentMeta(agentDir: string): AgentMeta | null {
   try {
-    const data = JSON.parse(readFileSync(resolve(agentDir, '.jean-agent.json'), 'utf8'))
+    const data = JSON.parse(readFileSync(resolve(agentDir, '.jean', '.jean-agent.json'), 'utf8'))
     return {
       name: data.name ?? basename(agentDir),
       tags: data.tags ?? [],
@@ -943,7 +959,9 @@ function readAgentMeta(agentDir: string): AgentMeta | null {
 }
 
 function writeAgentMeta(agentDir: string, meta: AgentMeta): void {
-  writeFileSync(resolve(agentDir, '.jean-agent.json'), `${JSON.stringify(meta, null, 2)}\n`)
+  const jeanDir = resolve(agentDir, '.jean')
+  mkdirSync(jeanDir, { recursive: true })
+  writeFileSync(resolve(jeanDir, '.jean-agent.json'), `${JSON.stringify(meta, null, 2)}\n`)
 }
 
 function discoverAgents(dojoRoot: string): AgentInfo[] {
@@ -957,7 +975,7 @@ function discoverAgents(dojoRoot: string): AgentInfo[] {
       const dirPath = resolve(dojoRoot, entry.name)
       const meta = readAgentMeta(dirPath)
       if (!meta) continue
-      agents.push({ ...meta, path: dirPath, branch: branches.get(resolve(dirPath, 'work')) })
+      agents.push({ ...meta, path: dirPath, branch: branches.get(dirPath) })
     }
   } catch {
     /* can't read dojo root */
@@ -974,14 +992,14 @@ function channelDir(): string {
   return resolve(cliDir(), '..', 'channel')
 }
 
-/** Compute --add-dir flags for agent launch based on agent location */
+/** Compute --add-dir and --mcp-config flags for agent launch */
 function agentLaunchFlags(agentDir: string): string {
   const dojoRoot = findDojoRoot()
   const jeanDir = resolve(dojoRoot, '.jean')
   const relJean = relative(agentDir, jeanDir)
   const meta = readAgentMeta(agentDir)
   const role = meta?.role ?? 'worker'
-  return `--add-dir work --add-dir ${relJean} --add-dir ${relJean}/roles/${role}`
+  return `--add-dir .jean --add-dir ${relJean} --add-dir ${relJean}/roles/${role} --mcp-config .jean/.mcp.json`
 }
 
 function isWorktreeDirty(path: string): boolean {
@@ -1031,7 +1049,6 @@ function flagValue(args: string[], flag: string): string | undefined {
 function addNew(name: string, role: AgentRole, tags: string[], useWorktree: boolean) {
   const dojoRoot = findDojoRoot()
   const agentDir = resolve(dojoRoot, name)
-  const workDir = resolve(agentDir, 'work')
 
   // Check name uniqueness
   const existing = findAgent(name, dojoRoot)
@@ -1052,49 +1069,44 @@ function addNew(name: string, role: AgentRole, tags: string[], useWorktree: bool
       process.exit(1)
     }
 
-    // Create wrapper directory (after bare repo check to avoid orphan dir)
-    mkdirSync(agentDir, { recursive: true })
-
     const branch = `jean/${name}`
     console.log(`Creating worktree on branch "${branch}"...`)
 
-    let wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', workDir, '-b', branch], {
+    // Create worktree directly at dojo/<name>/ (no wrapper/work split)
+    let wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', agentDir, '-b', branch], {
       stderr: 'pipe',
       stdout: 'pipe',
     })
     if (wt.exitCode !== 0) {
-      wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', workDir, branch], {
+      wt = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'add', agentDir, branch], {
         stderr: 'pipe',
         stdout: 'pipe',
       })
       if (wt.exitCode !== 0) {
         console.error(`Failed to create worktree: ${wt.stderr.toString().trim()}`)
-        rmSync(agentDir, { recursive: true })
         process.exit(1)
       }
     }
 
-    // Write config to wrapper dir — rollback on failure
+    // Write agent config — rollback worktree on failure
     try {
       writeJeanConfig(agentDir, name, role, tags, dojoRoot)
+      ensureGitExclude(bareDir)
     } catch (err) {
       console.error(`Failed to write agent config: ${err}`)
       console.error('Rolling back worktree...')
-      Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'remove', workDir, '--force'], {
+      Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'remove', agentDir, '--force'], {
         stderr: 'pipe',
         stdout: 'pipe',
       })
-      rmSync(agentDir, { recursive: true, force: true })
       process.exit(1)
     }
 
     console.log(`\n${GREEN}Agent "${name}" created.${RESET}`)
-    console.log(`  Wrapper:  ./${name}/`)
-    console.log(`  Worktree: ./${name}/work/`)
+    console.log(`  Worktree: ./${name}/`)
     console.log(`  Branch:   ${branch}`)
   } else {
-    // No worktree — create empty work directory
-    mkdirSync(workDir)
+    mkdirSync(agentDir)
     writeJeanConfig(agentDir, name, role, tags, dojoRoot)
 
     console.log(`\n${GREEN}Agent "${name}" created.${RESET}`)
@@ -1125,7 +1137,7 @@ function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
     process.exit(1)
   }
 
-  if (existsSync(resolve(targetPath, '.jean-agent.json'))) {
+  if (existsSync(resolve(targetPath, '.jean', '.jean-agent.json'))) {
     console.error(`"${name}" is already a Jean agent.`)
     process.exit(1)
   }
@@ -1146,38 +1158,17 @@ function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
 function defaultPermissions(role: AgentRole): string[] {
   const base = ['mcp__jean__reply']
   if (role === 'sensei') {
-    return [
-      ...base,
-      'Read',
-      'Glob',
-      'Grep',
-      'Bash(curl:*)',
-      'Bash(git log:*)',
-      'Bash(git diff:*)',
-      'Bash(git show:*)',
-      'Bash(git status:*)',
-    ]
+    return [...base, 'Read', 'Glob', 'Grep', 'Bash(curl:*)', 'Bash(git:*)']
   }
   // worker and user
-  return [
-    ...base,
-    'Read',
-    'Glob',
-    'Grep',
-    'Edit',
-    'Write',
-    'Bash(git log:*)',
-    'Bash(git diff:*)',
-    'Bash(git show:*)',
-    'Bash(git status:*)',
-    'Bash(git branch:*)',
-  ]
+  return [...base, 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git:*)']
 }
 
 function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: string[], dojoRoot: string) {
   writeAgentMeta(agentDir, { name, tags, role })
 
-  const mcpPath = resolve(agentDir, '.mcp.json')
+  // .mcp.json → agentDir/.jean/ (loaded via --mcp-config flag, not auto-discovery)
+  const mcpPath = resolve(agentDir, '.jean', '.mcp.json')
   if (!existsSync(mcpPath)) {
     writeFileSync(
       mcpPath,
@@ -1200,9 +1191,11 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
       )}\n`,
     )
   } else {
-    console.log(`  ${DIM}Skipping .mcp.json (already exists)${RESET}`)
+    console.log(`  ${DIM}Skipping .jean/.mcp.json (already exists)${RESET}`)
   }
 
+  // settings.local.json → agentDir/.claude/ (Claude Code discovers from cwd)
+  const relJean = relative(agentDir, resolve(dojoRoot, '.jean'))
   const settingsDir = resolve(agentDir, '.claude')
   const settingsPath = resolve(settingsDir, 'settings.local.json')
   if (!existsSync(settingsPath)) {
@@ -1214,14 +1207,13 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
           permissions: {
             allow: defaultPermissions(role),
           },
-          enabledMcpjsonServers: ['jean'],
           hooks: {
             Stop: [
               {
                 hooks: [
                   {
                     type: 'command',
-                    command: `JEAN_PORT=$(cat ../.jean/infra.port 2>/dev/null || echo 8700); curl -s -X POST http://127.0.0.1:$JEAN_PORT/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat ../.jean/sessions/${name}.id 2>/dev/null)\\"}"`,
+                    command: `JEAN_PORT=$(cat ${relJean}/infra.port 2>/dev/null || echo 8700); curl -s -X POST http://127.0.0.1:$JEAN_PORT/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat ${relJean}/sessions/${name}.id 2>/dev/null)\\"}"`,
                   },
                 ],
               },
@@ -1231,7 +1223,7 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
                 hooks: [
                   {
                     type: 'command',
-                    command: `bun -e 'const{readFileSync:r,existsSync:e}=require("fs");const p=e("../.jean/infra.port")?r("../.jean/infra.port","utf8").trim():"8700";const d=JSON.parse(await Bun.stdin.text());fetch("http://127.0.0.1:"+p+"/permissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({agent:"${name}",tool:d.tool_name,input:d.tool_input})})'`,
+                    command: `bun -e 'const{readFileSync:r,existsSync:e}=require("fs");const p=e("${relJean}/infra.port")?r("${relJean}/infra.port","utf8").trim():"8700";const d=JSON.parse(await Bun.stdin.text());fetch("http://127.0.0.1:"+p+"/permissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({agent:"${name}",tool:d.tool_name,input:d.tool_input})})'`,
                     async: true,
                   },
                 ],
@@ -1247,8 +1239,8 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
     console.log(`  ${DIM}Skipping .claude/settings.local.json (already exists)${RESET}`)
   }
 
-  // Agent-specific skills directory
-  mkdirSync(resolve(agentDir, '.claude', 'skills'), { recursive: true })
+  // Agent-specific skills → agentDir/.jean/.claude/skills/
+  mkdirSync(resolve(agentDir, '.jean', '.claude', 'skills'), { recursive: true })
 }
 
 // ── Agent List ────────────────────────────────────────────────────
@@ -1332,15 +1324,15 @@ function cmdAgentRemove(args: string[]) {
   }
 
   if (keep) {
-    rmSync(resolve(agent.path, '.jean-agent.json'), { force: true })
+    rmSync(resolve(agent.path, '.jean'), { recursive: true, force: true })
+    rmSync(resolve(agent.path, '.claude', 'settings.local.json'), { force: true })
     console.log(`Removed Jean config from "${name}". Directory kept at ${agent.path}`)
     return
   }
 
   if (agent.branch !== undefined) {
     // Worktree agent: check dirty state, remove via git
-    const workDir = resolve(agent.path, 'work')
-    if (!force && isWorktreeDirty(workDir)) {
+    if (!force && isWorktreeDirty(agent.path)) {
       console.error(`Agent "${name}" has uncommitted changes. Use --force to remove anyway.`)
       process.exit(1)
     }
@@ -1350,16 +1342,14 @@ function cmdAgentRemove(args: string[]) {
       console.error('No .jean/.bare/ directory found. Cannot remove worktree.')
       process.exit(1)
     }
-    const result = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'remove', workDir, ...(force ? ['--force'] : [])], {
-      stderr: 'pipe',
-      stdout: 'pipe',
-    })
+    const result = Bun.spawnSync(
+      ['git', '-C', bareDir, 'worktree', 'remove', agent.path, ...(force ? ['--force'] : [])],
+      { stderr: 'pipe', stdout: 'pipe' },
+    )
     if (result.exitCode !== 0) {
       console.error(`Failed to remove worktree: ${result.stderr.toString().trim()}`)
       process.exit(1)
     }
-    // Remove wrapper directory
-    rmSync(agent.path, { recursive: true, force: true })
 
     console.log(`${GREEN}Agent "${name}" removed.${RESET}`)
     if (agent.branch) {

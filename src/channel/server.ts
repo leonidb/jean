@@ -71,16 +71,16 @@ async function writeSessionFile() {
   }
 }
 
-// Read tags from .jean-agent.json if it exists in the working directory
+// Read tags from .jean/.jean-agent.json
 const AGENT_TAGS: string[] = (() => {
-  try {
-    const file = resolve(process.cwd(), '.jean-agent.json')
-    if (existsSync(file)) {
-      const data = JSON.parse(readFileSync(file, 'utf8'))
-      return data.tags ?? []
-    }
-  } catch {
-    /* no file or parse error */
+  const candidates = [process.env.JEAN_AGENT_DIR, resolve(process.cwd(), '.jean')].filter(Boolean) as string[]
+  for (const dir of candidates) {
+    try {
+      const file = resolve(dir, '.jean-agent.json')
+      if (existsSync(file)) {
+        return JSON.parse(readFileSync(file, 'utf8')).tags ?? []
+      }
+    } catch {}
   }
   return []
 })()
