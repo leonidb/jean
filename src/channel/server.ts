@@ -18,27 +18,25 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
+import { findDojoFrom, readRuntimeFiles } from '../probe.ts'
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE = process.env.JEAN_ROLE ?? 'worker'
 
-/** Locate dojo root: JEAN_DOJO env var (validated), else walk up from cwd looking for .jean/infra.port */
+/** Locate dojo root: JEAN_DOJO env var (validated) > walk up from cwd. */
 function discoverDojoRoot(): string | null {
-  const hasInfraPort = (dir: string) => existsSync(resolve(dir, '.jean', 'infra.port'))
-  if (process.env.JEAN_DOJO && hasInfraPort(process.env.JEAN_DOJO)) return process.env.JEAN_DOJO
-  let dir = process.cwd()
-  while (dir !== dirname(dir)) {
-    if (hasInfraPort(dir)) return dir
-    dir = dirname(dir)
+  if (process.env.JEAN_DOJO && existsSync(resolve(process.env.JEAN_DOJO, '.jean'))) {
+    return process.env.JEAN_DOJO
   }
-  return null
+  return findDojoFrom(process.cwd())
 }
 
 const DOJO_ROOT = discoverDojoRoot()
 
 function discoverPort(): string {
   if (!DOJO_ROOT) return '8700'
-  return readFileSync(resolve(DOJO_ROOT, '.jean', 'infra.port'), 'utf8').trim()
+  const { port } = readRuntimeFiles(resolve(DOJO_ROOT, '.jean'))
+  return String(port ?? 8700)
 }
 
 /** Discover infra WebSocket URL: env var > port file > fallback */
@@ -46,17 +44,6 @@ function discoverInfraWsUrl(): string {
   if (process.env.JEAN_INFRA_URL) return process.env.JEAN_INFRA_URL
   return `ws://127.0.0.1:${discoverPort()}/ws`
 }
-
-/** Discover infra HTTP URL (for sensei instructions) */
-function discoverInfraHttpUrl(): string {
-  if (process.env.JEAN_INFRA_URL) {
-    return process.env.JEAN_INFRA_URL.replace('ws://', 'http://').replace(/\/ws$/, '')
-  }
-  return `http://127.0.0.1:${discoverPort()}`
-}
-
-const INFRA_URL = discoverInfraWsUrl()
-const INFRA_HTTP_URL = discoverInfraHttpUrl()
 const SESSION_ID = crypto.randomUUID()
 /** Session file lives under the dojo so two dojos with same-named agents don't collide */
 const SESSION_FILE = DOJO_ROOT ? resolve(DOJO_ROOT, '.jean', 'sessions', `${AGENT_NAME}.id`) : null
@@ -96,7 +83,7 @@ const mcp = new Server(
         ? [
             `You are the sensei (orchestrator) in the Jean system, agent "${AGENT_NAME}".`,
             `When you receive any message from Jean, FIRST load the jean-sensei skill, then follow its instructions.`,
-            `You manage the board and agents via curl to ${INFRA_HTTP_URL}.`,
+            `You manage the board and agents via curl to the infra URL. Discover it once per session: INFRA=$(jean infra url)`,
             `The reply tool is ONLY for reporting to the human. Use curl for all system interactions.`,
           ].join('\n')
         : [
@@ -186,10 +173,11 @@ function sendToInfra(msg: object) {
 
 function connectToInfra() {
   try {
-    ws = new WebSocket(INFRA_URL)
+    const url = discoverInfraWsUrl()
+    ws = new WebSocket(url)
 
     ws.addEventListener('open', () => {
-      process.stderr.write(`[jean] connected to infra as "${AGENT_NAME}" session=${SESSION_ID}\n`)
+      process.stderr.write(`[jean] connected to infra at ${url} as "${AGENT_NAME}" session=${SESSION_ID}\n`)
       sendToInfra({ type: 'register', agent: AGENT_NAME, role: AGENT_ROLE, sessionId: SESSION_ID, tags: AGENT_TAGS })
     })
 

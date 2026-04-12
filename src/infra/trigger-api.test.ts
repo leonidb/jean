@@ -229,8 +229,8 @@ describe('trigger CRUD', () => {
     expect(res.status).toBe(404)
   })
 
-  test('info endpoint includes activeTriggers count', async () => {
-    const res = await fetch(`${BASE}/`)
+  test('status endpoint includes activeTriggers count', async () => {
+    const res = await fetch(`${BASE}/status`)
     const info = (await res.json()) as { activeTriggers: number }
     expect(info.activeTriggers).toBeGreaterThanOrEqual(1)
   })

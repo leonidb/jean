@@ -21,6 +21,7 @@
  *   jean infra start                            Start infrastructure server
  *   jean infra stop                             Stop infrastructure server
  *   jean infra status                           Show infrastructure status
+ *   jean infra url                              Print infra HTTP URL (http://127.0.0.1:PORT)
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -35,23 +36,19 @@ import {
   validateConfigKey,
   writeConfig,
 } from '../infra/config.ts'
+import { findDojoFrom, INFRA_IDENTITY, isProcessAlive, probeInfra, readRuntimeFiles } from '../probe.ts'
 
 const args = process.argv.slice(2)
 const command = args[0]
 
 function discoverInfraUrl(): string {
   if (process.env.JEAN_INFRA_URL) return process.env.JEAN_INFRA_URL
-  // Walk up to find .jean/infra.port
-  let dir = process.cwd()
-  while (dir !== dirname(dir)) {
-    const portFile = resolve(dir, '.jean', 'infra.port')
-    if (existsSync(portFile)) {
-      const port = readFileSync(portFile, 'utf8').trim()
-      return `http://127.0.0.1:${port}`
-    }
-    dir = dirname(dir)
+  const root = findDojoFrom(process.cwd())
+  if (root) {
+    const { port } = readRuntimeFiles(resolve(root, '.jean'))
+    if (port !== null) return `http://127.0.0.1:${port}`
   }
-  return 'http://127.0.0.1:8700' // fallback
+  return 'http://127.0.0.1:8700'
 }
 
 const INFRA_URL = discoverInfraUrl()
@@ -186,15 +183,16 @@ async function cmdSend(agent?: string, text?: string) {
 }
 
 async function cmdStatus() {
-  const [infoRes, eventsRes] = await Promise.all([infraFetch('/'), infraFetch('/events')])
-  const info = (await infoRes.json()) as { agents: string[] }
+  const [infoRes, eventsRes] = await Promise.all([infraFetch('/status'), infraFetch('/events')])
+  const info = (await infoRes.json()) as { agents: Array<{ name: string }> }
   const eventsData = (await eventsRes.json()) as {
     events: Array<{ ts: string; type: string; agent?: string; detail?: string }>
   }
 
+  const agentNames = info.agents.map((a) => a.name)
   console.log(`\n${BOLD}Jean Infrastructure${RESET}`)
   console.log(`  URL: ${INFRA_URL}`)
-  console.log(`  Connected agents: ${info.agents.length ? info.agents.join(', ') : '(none)'}`)
+  console.log(`  Connected agents: ${agentNames.length ? agentNames.join(', ') : '(none)'}`)
 
   if (eventsData.events.length) {
     console.log(`\n${BOLD}Recent Events${RESET}`)
@@ -708,71 +706,79 @@ async function cmdInfra(args: string[]) {
     case 'status':
       await cmdInfraStatus()
       break
+    case 'url':
+      cmdInfraUrl()
+      break
     default:
-      console.error('Usage: jean infra <start|stop|status>')
+      console.error('Usage: jean infra <start|stop|status|url>')
       process.exit(1)
   }
 }
 
-async function cmdInfraStart() {
-  const dojoRoot = findDojoRoot()
-  const dataDir = resolve(dojoRoot, '.jean')
-  const pidFile = resolve(dataDir, 'infra.pid')
+function cmdInfraUrl() {
+  const dataDir = resolve(findDojoRoot(), '.jean')
+  const { port } = readRuntimeFiles(dataDir)
+  if (port === null) {
+    console.error('Infrastructure is not running. Use "jean infra start".')
+    process.exit(1)
+  }
+  console.log(`http://127.0.0.1:${port}`)
+}
 
-  // Check if already running
-  if (existsSync(pidFile)) {
-    const pid = Number(readFileSync(pidFile, 'utf8').trim())
-    try {
-      process.kill(pid, 0) // test if process exists
-      console.error(`Infrastructure already running (pid ${pid}).`)
+async function cmdInfraStart() {
+  const dataDir = resolve(findDojoRoot(), '.jean')
+
+  // Friendlier pre-check: refuse before spawning if we can confirm a live duplicate.
+  // (The server also enforces this; we do it here to avoid spawn-and-die noise.)
+  const existing = readRuntimeFiles(dataDir)
+  if (existing.pid !== null && existing.port !== null && isProcessAlive(existing.pid)) {
+    const info = await probeInfra(existing.port)
+    if (info?.name === INFRA_IDENTITY && info.dataDir === dataDir) {
+      console.error(`Infrastructure already running (pid ${existing.pid}, port ${existing.port}).`)
       console.error('Use "jean infra stop" first.')
       process.exit(1)
-    } catch {
-      // Stale PID file — process is gone
     }
   }
 
-  // Find the server entrypoint
   const serverPath = resolve(cliDir(), '../infra/server.ts')
-
   const child = Bun.spawn(['bun', 'run', serverPath], {
     cwd: dataDir,
     env: { ...process.env, JEAN_DATA_DIR: dataDir },
     stdio: ['ignore', 'ignore', 'inherit'],
   })
 
-  // Wait briefly for the port file to appear
-  const portFile = resolve(dataDir, 'infra.port')
+  // Poll the port file: server writes it after successful bind.
+  let startedPort: number | null = null
   for (let i = 0; i < 30; i++) {
     await Bun.sleep(200)
-    if (existsSync(portFile)) break
+    const rt = readRuntimeFiles(dataDir)
+    if (rt.port !== null) {
+      startedPort = rt.port
+      break
+    }
   }
 
-  if (existsSync(portFile)) {
-    const port = readFileSync(portFile, 'utf8').trim()
+  if (startedPort !== null) {
     console.log(`${GREEN}Infrastructure started.${RESET}`)
     console.log(`  PID:  ${child.pid}`)
-    console.log(`  Port: ${port}`)
+    console.log(`  Port: ${startedPort}`)
     console.log(`  Data: ${dataDir}`)
   } else {
     console.error('Infrastructure started but port file not found. Check stderr for errors.')
   }
 
-  // Detach — don't wait for child
   child.unref()
 }
 
 async function cmdInfraStop() {
-  const dojoRoot = findDojoRoot()
-  const dataDir = resolve(dojoRoot, '.jean')
-  const pidFile = resolve(dataDir, 'infra.pid')
+  const dataDir = resolve(findDojoRoot(), '.jean')
+  const { pid } = readRuntimeFiles(dataDir)
 
-  if (!existsSync(pidFile)) {
+  if (pid === null) {
     console.log('Infrastructure is not running (no PID file).')
     return
   }
 
-  const pid = Number(readFileSync(pidFile, 'utf8').trim())
   try {
     process.kill(pid, 'SIGTERM')
     console.log(`Infrastructure stopped (pid ${pid}).`)
@@ -782,7 +788,7 @@ async function cmdInfraStop() {
 
   // Clean up in case signal handler didn't
   try {
-    unlinkSync(pidFile)
+    unlinkSync(resolve(dataDir, 'infra.pid'))
   } catch {}
   try {
     unlinkSync(resolve(dataDir, 'infra.port'))
@@ -790,32 +796,21 @@ async function cmdInfraStop() {
 }
 
 async function cmdInfraStatus() {
-  const dojoRoot = findDojoRoot()
-  const dataDir = resolve(dojoRoot, '.jean')
-  const pidFile = resolve(dataDir, 'infra.pid')
-  const portFile = resolve(dataDir, 'infra.port')
+  const dataDir = resolve(findDojoRoot(), '.jean')
+  const { pid, port } = readRuntimeFiles(dataDir)
 
-  if (!existsSync(pidFile)) {
+  if (pid === null) {
     console.log('Infrastructure is not running.')
     return
   }
-
-  const pid = Number(readFileSync(pidFile, 'utf8').trim())
-  let running = false
-  try {
-    process.kill(pid, 0)
-    running = true
-  } catch {}
-
-  if (!running) {
+  if (!isProcessAlive(pid)) {
     console.log(`Infrastructure is not running (stale PID ${pid}).`)
     return
   }
 
-  const port = existsSync(portFile) ? readFileSync(portFile, 'utf8').trim() : '?'
   console.log(`${GREEN}Infrastructure is running.${RESET}`)
   console.log(`  PID:  ${pid}`)
-  console.log(`  Port: ${port}`)
+  console.log(`  Port: ${port ?? '?'}`)
   console.log(`  Data: ${dataDir}`)
 }
 
@@ -894,11 +889,8 @@ type AgentMeta = { name: string; tags: string[]; role: AgentRole }
 type AgentInfo = AgentMeta & { path: string; branch?: string }
 
 function findDojoRoot(): string {
-  let dir = process.cwd()
-  while (dir !== dirname(dir)) {
-    if (existsSync(resolve(dir, '.jean'))) return dir
-    dir = dirname(dir)
-  }
+  const root = findDojoFrom(process.cwd())
+  if (root) return root
   console.error('Not a Jean dojo. No .jean/ directory found.')
   console.error('Run this command from within a dojo tree.')
   process.exit(1)
@@ -1406,6 +1398,7 @@ Commands:
   jean infra start                            Start infrastructure server
   jean infra stop                             Stop infrastructure server
   jean infra status                           Show infrastructure status
+  jean infra url                              Print infra HTTP URL
 
   jean board                                  Show the kanban board
   jean send <agent> <msg>                     Send a message to an agent

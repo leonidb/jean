@@ -25,6 +25,7 @@ import {
   jsonlBackend,
   type StoredEvent,
 } from '../es/index.ts'
+import { INFRA_IDENTITY, type InfraInfo, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Board, canTransition, type TaskStatus } from './board.ts'
 import { resolveConfig } from './config.ts'
 import type {
@@ -534,24 +535,68 @@ async function initSlack() {
   } satisfies RegisterData)
 }
 
-// ── Port selection ───────────────────────────────────────────────
+// ── Port + single-instance enforcement ───────────────────────────
 
-const PREFERRED_PORT = config.port ?? 8700
+const PORT = config.port ?? 8700
 const PORT_FILE = resolve(DATA_DIR, 'infra.port')
 const PID_FILE = resolve(DATA_DIR, 'infra.pid')
 
-function findFreePort(start: number, maxAttempts = 100): number {
-  for (let port = start; port < start + maxAttempts; port++) {
-    try {
-      const testServer = Bun.serve({ port, hostname: '127.0.0.1', fetch: () => new Response() })
-      testServer.stop(true)
-      return port
-    } catch {}
-  }
-  throw new Error(`No free port found in range ${start}-${start + maxAttempts}`)
+/** The identity tuple returned by `/` and embedded in `/status`. Matches `InfraInfo`. */
+function identity(): InfraInfo {
+  return { name: INFRA_IDENTITY, dataDir: DATA_DIR, pid: process.pid, port: PORT }
 }
 
-const PORT = config.port ? PREFERRED_PORT : findFreePort(PREFERRED_PORT)
+/** Print the appropriate "can't start" error for whatever is occupying PORT and exit. */
+function refuseStart(info: InfraInfo | null): never {
+  if (info?.name === INFRA_IDENTITY) {
+    const sameDojo = !info.dataDir || info.dataDir === DATA_DIR
+    if (sameDojo) {
+      const pidHint = info.pid ? `pid ${info.pid}` : 'unknown pid'
+      process.stderr.write(
+        `[jean] error: infra already running on port ${PORT} (${pidHint})\n` +
+          `       use 'jean infra stop' first${info.pid ? `, or kill ${info.pid}` : ''}\n`,
+      )
+    } else {
+      process.stderr.write(
+        `[jean] error: port ${PORT} is used by another Jean dojo (${info.dataDir})\n` +
+          `       run 'jean config set port <other>' in this dojo\n`,
+      )
+    }
+  } else {
+    process.stderr.write(
+      `[jean] error: port ${PORT} is in use by another process\n` +
+        `       run 'jean config set port <other>' to change\n`,
+    )
+  }
+  process.exit(1)
+}
+
+/** Enforce single-instance per dojo. Clean up stale state from crashes. */
+async function enforceSingleInstance(): Promise<void> {
+  // If something responds on PORT with our identity, refuse. (Same dojo → duplicate;
+  // different dojo → port conflict. refuseStart picks the message.)
+  const info = await probeInfra(PORT)
+  if (info?.name === INFRA_IDENTITY) refuseStart(info)
+
+  // Port might be held by a non-HTTP listener that probeInfra can't see.
+  try {
+    Bun.serve({ port: PORT, hostname: '127.0.0.1', fetch: () => new Response() }).stop(true)
+  } catch {
+    refuseStart(null)
+  }
+
+  // Port is free. Any leftover pid/port files are stale from a crash.
+  const { pid: stalePid } = readRuntimeFiles(DATA_DIR)
+  if (stalePid !== null) {
+    process.stderr.write(`[jean] cleaning up stale pid/port files (pid ${stalePid})\n`)
+    try {
+      unlinkSync(PID_FILE)
+    } catch {}
+    try {
+      unlinkSync(PORT_FILE)
+    } catch {}
+  }
+}
 
 function writeRuntimeFiles() {
   writeFileSync(PORT_FILE, String(PORT))
@@ -570,6 +615,8 @@ function cleanupRuntimeFiles() {
 process.on('exit', cleanupRuntimeFiles)
 process.on('SIGINT', () => process.exit(0))
 process.on('SIGTERM', () => process.exit(0))
+
+await enforceSingleInstance()
 
 // ── HTTP + WebSocket server ───────────────────────────────────────
 
@@ -1026,10 +1073,16 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       return Response.json({ agents: list })
     }
 
+    // Identity: minimal, used by probes to verify "is this our jean infra?"
     if (path === '/') {
+      return Response.json(identity())
+    }
+
+    // Full status: identity + live projection state, used by humans / CLI.
+    if (path === '/status') {
       const sensei = findSensei()
       return Response.json({
-        name: 'jean-infra',
+        ...identity(),
         agents: [...agents.entries()].map(([n, e]) => ({ name: n, role: e.role })),
         sensei: sensei ? { connected: true, idle: sensei.idle } : { connected: false },
         pendingEvents: pendingProjection.state.length,
