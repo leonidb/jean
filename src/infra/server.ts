@@ -309,13 +309,18 @@ function startTriggerJob(trigger: Trigger) {
   const callback = () => {
     void fireTrigger(trigger)
   }
-  const job = trigger.cron
-    ? new Cron(trigger.cron, { catch: true }, callback)
-    : new Cron(new Date(trigger.at!), { catch: true }, callback)
+  // Trigger type is a discriminated union: exactly one of cron or at.
+  let job: Cron
+  let desc: string
+  if (trigger.cron !== undefined) {
+    job = new Cron(trigger.cron, { catch: true }, callback)
+    desc = `(${trigger.cron})`
+  } else {
+    job = new Cron(new Date(trigger.at), { catch: true }, callback)
+    desc = `(at ${trigger.at})`
+  }
   cronJobs.set(trigger.id, job)
-  process.stderr.write(
-    `[jean] trigger ${trigger.id} scheduled${trigger.cron ? ` (${trigger.cron})` : ` (at ${trigger.at})`}\n`,
-  )
+  process.stderr.write(`[jean] trigger ${trigger.id} scheduled ${desc}\n`)
 }
 
 function stopTriggerJob(id: string) {
@@ -480,6 +485,8 @@ let slackConnected = false
 
 async function initSlack() {
   if (!SLACK_APP_TOKEN || !SLACK_BOT_TOKEN || !SLACK_CHANNEL) return
+  // Capture into const so narrowed type survives across closures.
+  const channelId = SLACK_CHANNEL
 
   const { App } = await import('@slack/bolt')
   const app = new App({
@@ -489,10 +496,10 @@ async function initSlack() {
   })
 
   // Derive channel name for agent registry
-  let channelName = SLACK_CHANNEL
+  let channelName = channelId
   try {
-    const info = await app.client.conversations.info({ channel: SLACK_CHANNEL })
-    channelName = (info.channel as { name?: string })?.name ?? SLACK_CHANNEL
+    const info = await app.client.conversations.info({ channel: channelId })
+    channelName = (info.channel as { name?: string })?.name ?? channelId
   } catch {
     /* use channel ID as fallback */
   }
@@ -504,7 +511,7 @@ async function initSlack() {
     tags: [],
     deliver: (msg) => {
       void app.client.chat.postMessage({
-        channel: SLACK_CHANNEL!,
+        channel: channelId,
         text: `*${msg.from}*: ${msg.text}`,
       })
       return true
@@ -540,6 +547,9 @@ async function initSlack() {
 const PORT = config.port ?? 8700
 const PORT_FILE = resolve(DATA_DIR, 'infra.port')
 const PID_FILE = resolve(DATA_DIR, 'infra.pid')
+
+/** Fields that can be updated on a trigger via PATCH. Schedule (cron/at) is immutable. */
+const TRIGGER_UPDATE_FIELDS = new Set(['agent', 'prompt', 'status', 'metadata'])
 
 /** The identity tuple returned by `/` and embedded in `/status`. Matches `InfraInfo`. */
 function identity(): InfraInfo {
@@ -816,12 +826,15 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           ...(agentFilter && { stream: agentStream(agentFilter) }),
         })
 
-        const byAgent: Record<string, Record<string, { count: number; samples: Record<string, unknown>[] }>> = {}
+        type ToolStats = { count: number; samples: Record<string, unknown>[] }
+        const byAgent: Record<string, Record<string, ToolStats>> = {}
         for (const e of permEvents) {
           const d = e.data as PermissionRequestData
           byAgent[d.agent] ??= {}
+          // biome-ignore lint/style/noNonNullAssertion: initialized by ??= above
           const agentMap = byAgent[d.agent]!
           agentMap[d.tool] ??= { count: 0, samples: [] }
+          // biome-ignore lint/style/noNonNullAssertion: initialized by ??= above
           const entry = agentMap[d.tool]!
           entry.count++
           if (entry.samples.length < 5) entry.samples.push(d.input)
@@ -896,42 +909,69 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       return Response.json({ triggers })
     }
 
-    const triggerMatch = path.match(/^\/triggers\/([^/]+)$/)
-    const triggerId = triggerMatch?.[1]
+    const triggerId = path.match(/^\/triggers\/([^/]+)$/)?.[1]
 
-    if (triggerMatch && req.method === 'GET') {
-      const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId!)
+    if (triggerId && req.method === 'GET') {
+      const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId)
       if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
       return Response.json(trigger)
     }
 
-    if (triggerMatch && req.method === 'PATCH') {
+    if (triggerId && req.method === 'PATCH') {
       return (async () => {
-        const body = (await req.json()) as Omit<TriggerUpdatedData, 'id'>
-        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId!)
+        const body = (await req.json()) as Record<string, unknown>
+        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId)
         if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
-        if (body.cron) {
-          try {
-            new Cron(body.cron)
-          } catch {
-            return Response.json({ error: 'invalid cron expression' }, { status: 400 })
+        if ('cron' in body || 'at' in body) {
+          return Response.json(
+            { error: 'schedule is immutable; delete and recreate the trigger to change cron or at' },
+            { status: 400 },
+          )
+        }
+        // Reject unknown fields — no silent drops.
+        const unknown = Object.keys(body).filter((k) => !TRIGGER_UPDATE_FIELDS.has(k))
+        if (unknown.length > 0) {
+          return Response.json({ error: `unknown fields: ${unknown.join(', ')}` }, { status: 400 })
+        }
+        const update: Omit<TriggerUpdatedData, 'id'> = {}
+        if ('agent' in body) {
+          if (typeof body.agent !== 'string') {
+            return Response.json({ error: 'agent must be a string' }, { status: 400 })
           }
+          update.agent = body.agent
+        }
+        if ('prompt' in body) {
+          if (typeof body.prompt !== 'string') {
+            return Response.json({ error: 'prompt must be a string' }, { status: 400 })
+          }
+          update.prompt = body.prompt
+        }
+        if ('status' in body) {
+          if (body.status !== 'active' && body.status !== 'disabled') {
+            return Response.json({ error: 'status must be "active" or "disabled"' }, { status: 400 })
+          }
+          update.status = body.status
+        }
+        if ('metadata' in body) {
+          if (!body.metadata || typeof body.metadata !== 'object' || Array.isArray(body.metadata)) {
+            return Response.json({ error: 'metadata must be a JSON object (not array)' }, { status: 400 })
+          }
+          update.metadata = body.metadata as Record<string, unknown>
         }
         await record('trigger-updated', TRIGGERS_STREAM, {
-          id: triggerId!,
-          ...body,
+          id: triggerId,
+          ...update,
         } satisfies TriggerUpdatedData)
-        const updated = triggerProjection.state.triggers.find((t) => t.id === triggerId!)
-        return Response.json(updated)
+        return Response.json({ ...trigger, ...update })
       })()
     }
 
-    if (triggerMatch && req.method === 'DELETE') {
+    if (triggerId && req.method === 'DELETE') {
       return (async () => {
-        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId!)
+        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId)
         if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
         await record('trigger-removed', TRIGGERS_STREAM, {
-          id: triggerId!,
+          id: triggerId,
         } satisfies TriggerRemovedData)
         return Response.json({ ok: true })
       })()

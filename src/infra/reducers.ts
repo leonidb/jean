@@ -87,8 +87,6 @@ export type TriggerCreatedData = {
 
 export type TriggerUpdatedData = {
   id: string
-  cron?: string
-  at?: string
   agent?: string
   prompt?: string
   status?: 'active' | 'disabled'
@@ -257,10 +255,8 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
 
 // ── Trigger reducer ──────────────────────────────────────────────
 
-export type Trigger = {
+type TriggerBase = {
   id: string
-  cron?: string
-  at?: string
   agent: string
   prompt: string
   status: 'active' | 'fired' | 'disabled'
@@ -270,16 +266,31 @@ export type Trigger = {
   metadata?: Record<string, unknown>
 }
 
+/** Exactly one of cron (recurring) or at (one-off). */
+type TriggerSchedule = { cron: string; at?: undefined } | { cron?: undefined; at: string }
+
+/** Discriminated union: a trigger has exactly one schedule kind. */
+export type Trigger = TriggerBase & TriggerSchedule
+
 export type TriggerState = { triggers: Trigger[] }
+
+/** Extract the schedule half of a Trigger from raw event data, or null if neither is set. */
+function scheduleFrom(d: { cron?: string; at?: string }): TriggerSchedule | null {
+  if (d.cron) return { cron: d.cron }
+  if (d.at) return { at: d.at }
+  return null
+}
 
 export const triggerReducer: Reducer<TriggerState> = (state, event) => {
   switch (event.type) {
     case 'trigger-created': {
       const d = event.data as TriggerCreatedData
+      // Invariant enforced at API boundary: exactly one of cron or at is set. Events that violate are dropped.
+      const schedule = scheduleFrom(d)
+      if (!schedule) return state
       const trigger: Trigger = {
         id: d.id,
-        cron: d.cron,
-        at: d.at,
+        ...schedule,
         agent: d.agent,
         prompt: d.prompt,
         status: 'active',
@@ -298,8 +309,6 @@ export const triggerReducer: Reducer<TriggerState> = (state, event) => {
           t.id === d.id
             ? {
                 ...t,
-                ...(d.cron !== undefined && { cron: d.cron }),
-                ...(d.at !== undefined && { at: d.at }),
                 ...(d.agent !== undefined && { agent: d.agent }),
                 ...(d.prompt !== undefined && { prompt: d.prompt }),
                 ...(d.status !== undefined && { status: d.status }),
@@ -351,8 +360,8 @@ export type PlaybookState = { playbooks: Playbook[] }
 /** Parse YAML-ish frontmatter from markdown. Only extracts name and description. */
 function parseFrontmatter(content: string): { name: string; description: string } {
   const match = content.match(/^---\s*\n([\s\S]*?)\n---/)
-  if (!match) return { name: '', description: '' }
-  const fm = match[1]!
+  const fm = match?.[1]
+  if (!fm) return { name: '', description: '' }
   const fmLines = fm.split('\n')
   const name = fm.match(/^name:\s*(.+)/m)?.[1]?.trim() ?? ''
   let description = ''

@@ -47,7 +47,8 @@ export function createStore(backend: StoreBackend): EventStore {
     async read(opts) {
       let events = await backend.readAll()
       if (opts?.stream) events = events.filter((e) => e.stream === opts.stream)
-      if (opts?.afterId) events = events.filter((e) => e.id > opts.afterId!)
+      const afterId = opts?.afterId
+      if (afterId !== undefined) events = events.filter((e) => e.id > afterId)
       if (opts?.types) {
         const set = new Set(opts.types)
         events = events.filter((e) => set.has(e.type))
@@ -100,9 +101,10 @@ export function jsonlBackend(path: string): StoreBackend {
       if (!(await file.exists())) return 0
       const text = await file.text()
       const lines = text.trimEnd().split('\n')
-      if (lines.length === 0 || lines[0] === '') return 0
+      const lastLine = lines.at(-1)
+      if (!lastLine) return 0
       try {
-        const last = JSON.parse(lines.at(-1)!) as StoredEvent
+        const last = JSON.parse(lastLine) as StoredEvent
         return last.id
       } catch {
         return 0

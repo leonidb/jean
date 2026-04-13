@@ -138,7 +138,9 @@ describe('migrateBoard', () => {
   test('migrates legacy statuses in snapshot', () => {
     const board: Board = {
       tasks: [
+        // biome-ignore lint/suspicious/noExplicitAny: legacy value for migration test
         { id: '001', title: 'A', description: '', status: 'inbox' as any, queue: 'q', createdAt: '', updatedAt: '' },
+        // biome-ignore lint/suspicious/noExplicitAny: legacy value for migration test
         { id: '002', title: 'B', description: '', status: 'active' as any, queue: 'q', createdAt: '', updatedAt: '' },
         { id: '003', title: 'C', description: '', status: 'done', queue: 'q', createdAt: '', updatedAt: '' },
       ],

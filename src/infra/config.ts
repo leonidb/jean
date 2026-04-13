@@ -60,15 +60,16 @@ export function getByPath(obj: Record<string, unknown>, path: string): unknown {
 
 export function setByPath(obj: Record<string, unknown>, path: string, value: unknown): void {
   const parts = path.split('.')
+  const last = parts.pop()
+  if (last === undefined) return
   let current = obj
-  for (let i = 0; i < parts.length - 1; i++) {
-    const part = parts[i]!
+  for (const part of parts) {
     if (current[part] == null || typeof current[part] !== 'object') {
       current[part] = {}
     }
     current = current[part] as Record<string, unknown>
   }
-  current[parts[parts.length - 1]!] = value
+  current[last] = value
 }
 
 // ── Validation ──────────────────────────────────────────────────

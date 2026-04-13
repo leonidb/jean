@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdirSync, rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
+import type { DeliverMsg, OutboundMsg } from './protocol.ts'
+
+const isDeliver = (m: OutboundMsg): m is DeliverMsg => m.type === 'deliver'
 
 const TEST_PORT = 8796
 const DATA_DIR = '/tmp/jean-test-flow'
@@ -33,17 +36,21 @@ afterAll(() => {
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 
-function connectAgent(name: string, role: string): Promise<{ ws: WebSocket; messages: any[]; baselineCount: number }> {
+function connectAgent(
+  name: string,
+  role: string,
+): Promise<{ ws: WebSocket; messages: OutboundMsg[]; baselineCount: number }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(WS_URL)
-    const messages: any[] = []
+    const messages: OutboundMsg[] = []
     let resolved = false
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'register', agent: name, role }))
     }
     ws.onmessage = (e) => {
-      messages.push(JSON.parse(String(e.data)))
-      if (messages.at(-1).type === 'registered' && !resolved) {
+      const msg = JSON.parse(String(e.data)) as OutboundMsg
+      messages.push(msg)
+      if (msg.type === 'registered' && !resolved) {
         resolved = true
         if (role === 'sensei') {
           setTimeout(() => resolve({ ws, messages, baselineCount: messages.length }), 100)
@@ -57,16 +64,21 @@ function connectAgent(name: string, role: string): Promise<{ ws: WebSocket; mess
   })
 }
 
-function waitForMessage(messages: any[], predicate: (m: any) => boolean, timeoutMs = 3000): Promise<any> {
+function waitForMessage<T extends OutboundMsg>(
+  messages: OutboundMsg[],
+  predicate: (m: OutboundMsg) => m is T,
+  timeoutMs = 3000,
+): Promise<T> {
   const found = messages.find(predicate)
   if (found) return Promise.resolve(found)
   return new Promise((resolve, reject) => {
     const start = messages.length
     const interval = setInterval(() => {
       for (let i = start; i < messages.length; i++) {
-        if (predicate(messages[i])) {
+        const msg = messages[i]
+        if (msg && predicate(msg)) {
           clearInterval(interval)
-          resolve(messages[i])
+          resolve(msg)
           return
         }
       }
@@ -108,7 +120,7 @@ describe('full lifecycle', () => {
       body: JSON.stringify({ agent: 'flow-sensei' }),
     })
     await Bun.sleep(200)
-    const nudge = senseiMsgs.slice(senseiBaseline).find((m) => m.type === 'deliver' && m.from === 'infra')
+    const nudge = senseiMsgs.slice(senseiBaseline).find((m): m is DeliverMsg => isDeliver(m) && m.from === 'infra')
     expect(nudge).toBeDefined()
     expect(nudge?.text).toContain('Events pending')
 
@@ -138,7 +150,10 @@ describe('full lifecycle', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ to: 'flow-worker', from: 'flow-sensei', text: 'Work on this task', taskId: task.id }),
     })
-    const delivery = await waitForMessage(workerMsgs, (m) => m.type === 'deliver' && m.text === 'Work on this task')
+    const delivery = await waitForMessage(
+      workerMsgs,
+      (m): m is DeliverMsg => isDeliver(m) && m.text === 'Work on this task',
+    )
     expect(delivery.from).toBe('flow-sensei')
     expect(delivery.taskId).toBe(task.id)
 
@@ -199,7 +214,7 @@ describe('full lifecycle', () => {
     })
 
     const finalPending = await fetch(`${BASE}/events/pending`)
-    const finalEvents = (await finalPending.json()) as { events: Array<any> }
+    const finalEvents = (await finalPending.json()) as { events: unknown[] }
     expect(finalEvents.events.length).toBe(0)
 
     // Verify board reflects the full lifecycle
@@ -283,7 +298,9 @@ describe('history', () => {
     // Get the event and ack it
     const pending = await fetch(`${BASE}/events?agent=ack-hist-worker`)
     const events = (await pending.json()) as { events: Array<{ id: number }> }
-    const eventId = events.events[0]!.id
+    const firstEvent = events.events[0]
+    if (!firstEvent) throw new Error('expected at least one pending event')
+    const eventId = firstEvent.id
     await fetch(`${BASE}/events/${eventId}/ack`, { method: 'POST' })
     await Bun.sleep(100)
 
@@ -312,7 +329,10 @@ describe('history', () => {
     const res = await fetch(`${BASE}/history`)
     const data = (await res.json()) as { events: Array<{ id: number }> }
     for (let i = 1; i < data.events.length; i++) {
-      expect(data.events[i]!.id).toBeGreaterThan(data.events[i - 1]!.id)
+      const curr = data.events[i]
+      const prev = data.events[i - 1]
+      if (!curr || !prev) throw new Error('unexpected undefined event in sequence')
+      expect(curr.id).toBeGreaterThan(prev.id)
     }
   })
 })

@@ -126,6 +126,7 @@ async function cmdBoard() {
   for (const task of board.tasks) {
     const status = task.status ?? 'unknown'
     groups[status] ??= []
+    // biome-ignore lint/style/noNonNullAssertion: initialized by ??= above
     groups[status]!.push(task)
   }
 
@@ -635,8 +636,9 @@ function cmdDojoInit(args: string[]) {
   // Config
   const config: JeanConfig = {}
   for (let i = 0; i < args.length; i++) {
-    if (!args[i]?.startsWith('--')) continue
-    const key = args[i]!.slice(2)
+    const arg = args[i]
+    if (!arg?.startsWith('--')) continue
+    const key = arg.slice(2)
     if (key === 'git') continue // not a config key
     const raw = args[i + 1]
     if (!raw || raw.startsWith('--')) {
@@ -1281,7 +1283,11 @@ function cmdAgentTag(args: string[]) {
     return
   }
 
-  const meta = readAgentMeta(agent.path)!
+  const meta = readAgentMeta(agent.path)
+  if (!meta) {
+    console.error(`Could not read metadata for agent "${name}".`)
+    process.exit(1)
+  }
   if (removeMode) {
     meta.tags = meta.tags.filter((t) => !tags.includes(t))
   } else {

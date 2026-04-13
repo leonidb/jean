@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdirSync, rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
+import type { OutboundMsg } from './protocol.ts'
 
 const TEST_PORT = 8795
 const DATA_DIR = '/tmp/jean-test-queue'
@@ -36,16 +37,16 @@ const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 function connectAgent(
   name: string,
   role: string = 'worker',
-): Promise<{ ws: WebSocket; messages: any[]; baselineCount: number }> {
+): Promise<{ ws: WebSocket; messages: OutboundMsg[]; baselineCount: number }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(WS_URL)
-    const messages: any[] = []
+    const messages: OutboundMsg[] = []
     let resolved = false
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'register', agent: name, role }))
     }
     ws.onmessage = (e) => {
-      const msg = JSON.parse(String(e.data))
+      const msg = JSON.parse(String(e.data)) as OutboundMsg
       messages.push(msg)
       if (msg.type === 'registered' && !resolved) {
         resolved = true
@@ -123,7 +124,8 @@ describe('event queue', () => {
     // Get the event
     const res = await fetch(`${BASE}/events/pending?agent=ack-worker`)
     const data = (await res.json()) as { events: Array<{ id: number }> }
-    const event = data.events[0]!
+    const event = data.events[0]
+    if (!event) throw new Error('expected pending event for ack-worker')
 
     // Ack it
     const ackRes = await fetch(`${BASE}/events/${event.id}/ack`, { method: 'POST' })
@@ -230,7 +232,7 @@ describe('sensei nudge', () => {
   })
 
   test('worker event is queued even when sensei is busy', async () => {
-    const { ws: sensei, messages, baselineCount } = await connectAgent('busy-sensei', 'sensei')
+    const { ws: sensei } = await connectAgent('busy-sensei', 'sensei')
     const { ws: worker } = await connectAgent('busy-worker')
 
     // Worker sends reply
@@ -313,8 +315,8 @@ describe('role-based routing', () => {
 
     // Reply should be in the queue
     const res = await fetch(`${BASE}/events/pending?agent=routing-worker`)
-    const data = (await res.json()) as { events: Array<{ text: string }> }
-    expect(data.events.some((e) => (e as any).data?.text === 'routed reply')).toBe(true)
+    const data = (await res.json()) as { events: Array<{ type: string; data?: { text?: string } }> }
+    expect(data.events.some((e) => e.data?.text === 'routed reply')).toBe(true)
 
     // Sensei should NOT have received it directly (it's not idle)
     const directDelivery = senseiMsgs.find((m) => m.type === 'deliver' && m.text === 'routed reply')

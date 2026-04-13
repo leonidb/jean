@@ -191,13 +191,41 @@ describe('trigger CRUD', () => {
     expect(trigger.status).toBe('disabled')
   })
 
-  test('PATCH /triggers/:id rejects invalid cron', async () => {
+  test('PATCH /triggers/:id rejects schedule changes', async () => {
+    const cronRes = await fetch(`${BASE}/triggers/morning`, {
+      method: 'PATCH',
+      headers: json,
+      body: JSON.stringify({ cron: '* * * * *' }),
+    })
+    expect(cronRes.status).toBe(400)
+    const atRes = await fetch(`${BASE}/triggers/morning`, {
+      method: 'PATCH',
+      headers: json,
+      body: JSON.stringify({ at: '2099-01-01T00:00:00Z' }),
+    })
+    expect(atRes.status).toBe(400)
+  })
+
+  test('PATCH /triggers/:id rejects unknown fields', async () => {
     const res = await fetch(`${BASE}/triggers/morning`, {
       method: 'PATCH',
       headers: json,
-      body: JSON.stringify({ cron: 'bad' }),
+      body: JSON.stringify({ junk: 'x', prompt: 'valid' }),
     })
     expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toContain('junk')
+  })
+
+  test('PATCH /triggers/:id rejects wrong types', async () => {
+    const res = await fetch(`${BASE}/triggers/morning`, {
+      method: 'PATCH',
+      headers: json,
+      body: JSON.stringify({ agent: 123 }),
+    })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toContain('agent')
   })
 
   test('PATCH /triggers/:id returns 404 for unknown', async () => {
