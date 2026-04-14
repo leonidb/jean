@@ -24,6 +24,15 @@ export type ReplyMsg = {
   text: string
 }
 
+/** Agent sends a message to another agent/channel (via the `send` tool). `from` is overridden to the connected agent. */
+export type SendMsg = {
+  type: 'send'
+  from: string
+  to: string
+  text: string
+  taskId?: string
+}
+
 // ── Infrastructure → Channel plugin ───────────────────────────────
 
 /** Push a message into the agent's Claude session */
@@ -79,5 +88,5 @@ export type UpdateStatusRequest = {
 
 // ── Union types ───────────────────────────────────────────────────
 
-export type InboundMsg = RegisterMsg | ReplyMsg
+export type InboundMsg = RegisterMsg | ReplyMsg | SendMsg
 export type OutboundMsg = DeliverMsg | RegisteredMsg

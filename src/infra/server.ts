@@ -189,6 +189,28 @@ function deliverToAgent(agentName: string, msg: DeliverMsg): boolean {
   return entry.deliver(msg)
 }
 
+/** Route a message to an agent: deliver, mark busy, record 'send' event. Shared by HTTP /send and WS 'send'. */
+async function routeSend(args: { from: string; to: string; text: string; taskId?: string }): Promise<boolean> {
+  const delivered = deliverToAgent(args.to, {
+    type: 'deliver',
+    from: args.from,
+    text: args.text,
+    taskId: args.taskId,
+  })
+  if (delivered) {
+    const entry = agents.get(args.to)
+    if (entry && entry.role === 'worker') entry.idle = false
+  }
+  const stream = args.taskId ? taskStream(args.taskId) : agentStream(args.to)
+  await record('send', stream, {
+    agent: args.to,
+    from: args.from,
+    text: args.text,
+    delivered,
+  } satisfies SendData)
+  return delivered
+}
+
 // ── WebSocket helpers ────────────────────────────────────────────
 
 type AgentSocket = ServerWebSocket<{ agent?: string; role?: AgentRole }>
@@ -726,23 +748,12 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         if (!body.to || !body.text) {
           return Response.json({ error: 'missing to or text' }, { status: 400 })
         }
-        const delivered = deliverToAgent(body.to, {
-          type: 'deliver',
+        const delivered = await routeSend({
           from: body.from ?? 'api',
+          to: body.to,
           text: body.text,
           taskId: body.taskId,
         })
-        if (delivered) {
-          const entry = agents.get(body.to)
-          if (entry && entry.role === 'worker') entry.idle = false
-        }
-        const stream = body.taskId ? taskStream(body.taskId) : agentStream(body.to)
-        void record('send', stream, {
-          agent: body.to,
-          from: body.from ?? 'api',
-          text: body.text,
-          delivered,
-        } satisfies SendData)
         return Response.json({ delivered })
       })()
     }
@@ -1246,6 +1257,16 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
                 delivered: true,
               } satisfies SendData)
             }
+            break
+          }
+
+          case 'send': {
+            // `from` comes from the WS session, never the wire — prevents spoofing.
+            const from = ws.data.agent
+            if (!from || !msg.to || !msg.text) break
+            routeSend({ from, to: msg.to, text: msg.text, taskId: msg.taskId }).catch((err) => {
+              process.stderr.write(`[jean] ws send from ${from} → ${msg.to} failed: ${err}\n`)
+            })
             break
           }
         }

@@ -44,6 +44,14 @@ function discoverInfraWsUrl(): string {
   if (process.env.JEAN_INFRA_URL) return process.env.JEAN_INFRA_URL
   return `ws://127.0.0.1:${discoverPort()}/ws`
 }
+
+/** Discover infra HTTP base URL for the `infra` tool. */
+function discoverInfraHttpBase(): string {
+  if (process.env.JEAN_INFRA_URL) {
+    return process.env.JEAN_INFRA_URL.replace(/^ws/, 'http').replace(/\/ws$/, '')
+  }
+  return `http://127.0.0.1:${discoverPort()}`
+}
 const SESSION_ID = crypto.randomUUID()
 /** Session file lives under the dojo so two dojos with same-named agents don't collide */
 const SESSION_FILE = DOJO_ROOT ? resolve(DOJO_ROOT, '.jean', 'sessions', `${AGENT_NAME}.id`) : null
@@ -83,8 +91,8 @@ const mcp = new Server(
         ? [
             `You are the sensei (orchestrator) in the Jean system, agent "${AGENT_NAME}".`,
             `When you receive any message from Jean, FIRST load the jean-sensei skill, then follow its instructions.`,
-            `You manage the board and agents via curl to the infra URL. Discover it once per session: INFRA=$(jean infra url)`,
-            `The reply tool is ONLY for reporting to the human. Use curl for all system interactions.`,
+            `Use the \`send\` tool to message agents and channels. Use the \`infra\` tool for all other API calls (board, tasks, triggers, playbooks, events).`,
+            `The \`reply\` tool is ONLY for reporting to the human who invoked you directly.`,
           ].join('\n')
         : [
             `You are connected to the Jean orchestration system as agent "${AGENT_NAME}".`,
@@ -107,12 +115,50 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object' as const,
         properties: {
-          text: {
-            type: 'string',
-            description: 'The message to send to the orchestrator',
-          },
+          text: { type: 'string', description: 'The message to send to the orchestrator' },
         },
         required: ['text'],
+      },
+    },
+    {
+      name: 'send',
+      description:
+        'Send a message to another agent or channel in the Jean system. ' +
+        'Use this instead of curl for all agent-to-agent and agent-to-channel messaging. ' +
+        'The `from` field is always set to your own agent name — you cannot spoof it.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          to: { type: 'string', description: 'Target agent or channel name' },
+          text: { type: 'string', description: 'Message body' },
+          taskId: { type: 'string', description: 'Optional task ID to scope the message to a task' },
+        },
+        required: ['to', 'text'],
+      },
+    },
+    {
+      name: 'infra',
+      description:
+        'Call the Jean infrastructure HTTP API. Use this instead of curl for board, tasks, triggers, events, playbooks, permissions. ' +
+        'Path must start with "/" (e.g. "/board", "/tasks", "/triggers"). ' +
+        'Responses above ~48KB are truncated — always paginate large endpoints (e.g. "/history?last=20").',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          method: {
+            type: 'string',
+            enum: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
+            description: 'HTTP method',
+          },
+          path: {
+            type: 'string',
+            description: 'API path starting with "/" — e.g. "/board" or "/tasks/001/status"',
+          },
+          body: {
+            description: 'Optional JSON body for POST/PATCH/PUT. Pass a structured object, not a string.',
+          },
+        },
+        required: ['method', 'path'],
       },
     },
   ],
@@ -134,6 +180,63 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     return {
       content: [{ type: 'text' as const, text: `Sent to orchestrator.` }],
+    }
+  }
+
+  if (req.params.name === 'send') {
+    const to = (args.to as string)?.trim()
+    const text = (args.text as string)?.trim()
+    const taskId = (args.taskId as string | undefined)?.trim() || undefined
+    if (!to || !text) {
+      return {
+        content: [{ type: 'text' as const, text: 'send requires non-empty `to` and `text`.' }],
+        isError: true,
+      }
+    }
+    sendToInfra({ type: 'send', from: AGENT_NAME, to, text, ...(taskId && { taskId }) })
+    return {
+      content: [{ type: 'text' as const, text: `Sent to ${to}${taskId ? ` (task ${taskId})` : ''}.` }],
+    }
+  }
+
+  if (req.params.name === 'infra') {
+    const method = typeof args.method === 'string' ? args.method.toUpperCase() : ''
+    const path = typeof args.path === 'string' ? args.path : ''
+    if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(method)) {
+      return {
+        content: [{ type: 'text' as const, text: `infra: invalid method "${args.method}"` }],
+        isError: true,
+      }
+    }
+    if (!path.startsWith('/')) {
+      return {
+        content: [{ type: 'text' as const, text: 'infra: path must start with "/"' }],
+        isError: true,
+      }
+    }
+    const url = `${discoverInfraHttpBase()}${path}`
+    try {
+      const init: RequestInit = { method }
+      if (args.body !== undefined && method !== 'GET') {
+        init.body = JSON.stringify(args.body)
+        init.headers = { 'content-type': 'application/json' }
+      }
+      const res = await fetch(url, init)
+      const raw = await res.text()
+      const MAX_BODY = 48 * 1024
+      const body =
+        raw.length > MAX_BODY
+          ? `${raw.slice(0, MAX_BODY)}\n\n[truncated: ${raw.length - MAX_BODY} more bytes — use pagination]`
+          : raw
+      return {
+        content: [{ type: 'text' as const, text: `${res.status} ${res.statusText}\n${body}` }],
+        ...(res.status >= 400 && { isError: true }),
+      }
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `infra: request failed — ${err}` }],
+        isError: true,
+      }
     }
   }
 

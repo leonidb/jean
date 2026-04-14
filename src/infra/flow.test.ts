@@ -337,6 +337,50 @@ describe('history', () => {
   })
 })
 
+describe('WS send message', () => {
+  test('agent sends via ws send → recipient receives and event recorded', async () => {
+    const { ws: senderWs } = await connectAgent('send-from', 'sensei')
+    const { messages: recvMsgs, ws: recvWs } = await connectAgent('send-to', 'worker')
+
+    senderWs.send(JSON.stringify({ type: 'send', from: 'send-from', to: 'send-to', text: 'hello via send tool' }))
+
+    const delivery = await waitForMessage(
+      recvMsgs,
+      (m): m is DeliverMsg => isDeliver(m) && m.text === 'hello via send tool',
+    )
+    expect(delivery.from).toBe('send-from')
+
+    // Send event should be in history
+    await Bun.sleep(100)
+    const histRes = await fetch(`${BASE}/history?last=10`)
+    const hist = (await histRes.json()) as {
+      events: Array<{ type: string; data: Record<string, unknown> }>
+    }
+    const sendEvent = hist.events.find((e) => e.type === 'send' && e.data?.text === 'hello via send tool')
+    expect(sendEvent).toBeDefined()
+    expect(sendEvent?.data?.from).toBe('send-from')
+    expect(sendEvent?.data?.delivered).toBe(true)
+
+    senderWs.close()
+    recvWs.close()
+  })
+
+  test('ws send ignores payloads without an authenticated sender', async () => {
+    // A raw ws connection that hasn't registered → ws.data.agent is undefined, send should be dropped
+    const ws = new WebSocket(WS_URL)
+    await new Promise<void>((resolve) => {
+      ws.onopen = () => resolve()
+    })
+    ws.send(JSON.stringify({ type: 'send', from: 'spoofed', to: 'anyone', text: 'should not route' }))
+    await Bun.sleep(100)
+    const hist = (await (await fetch(`${BASE}/history?last=20`)).json()) as {
+      events: Array<{ type: string; data: Record<string, unknown> }>
+    }
+    expect(hist.events.some((e) => e.type === 'send' && e.data?.text === 'should not route')).toBe(false)
+    ws.close()
+  })
+})
+
 describe('board persistence', () => {
   test('tasks are persisted in event history', async () => {
     // Create a task
