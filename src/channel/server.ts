@@ -146,6 +146,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         isError: true,
       }
     }
+    if (AGENT_ROLE !== 'sensei' && method !== 'GET') {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `infra: ${AGENT_ROLE}s are read-only — only GET is allowed. Ask the sensei via reply if you need a state change.`,
+          },
+        ],
+        isError: true,
+      }
+    }
     if (!path.startsWith('/')) {
       return {
         content: [{ type: 'text' as const, text: 'infra: path must start with "/"' }],

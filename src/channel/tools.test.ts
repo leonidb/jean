@@ -1,10 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { buildInstructions, buildTools, INFRA_TOOL, REPLY_TOOL, SEND_TOOL } from './tools.ts'
-
-/** SDK types `inputSchema.properties` as optional `Record<string, unknown>`; tests assert known shape. */
-function propsOf(tool: { inputSchema: { properties?: Record<string, unknown> } }): Record<string, unknown> {
-  return tool.inputSchema.properties ?? {}
-}
+import { buildInfraTool, buildInstructions, buildTools, REPLY_TOOL, SEND_TOOL } from './tools.ts'
 
 describe('buildTools', () => {
   test('sensei gets send + infra, no reply', () => {
@@ -13,14 +8,43 @@ describe('buildTools', () => {
     expect(names).not.toContain('reply')
   })
 
-  test('worker gets reply only', () => {
+  test('worker gets reply + infra, no send', () => {
     const names = buildTools('worker').map((t) => t.name)
-    expect(names).toEqual(['reply'])
+    expect(names).toEqual(['reply', 'infra'])
+    expect(names).not.toContain('send')
   })
 
-  test('user role matches worker (non-sensei has reply only)', () => {
+  test('user role matches worker (non-sensei is read-only)', () => {
     const names = buildTools('user').map((t) => t.name)
-    expect(names).toEqual(['reply'])
+    expect(names).toEqual(['reply', 'infra'])
+  })
+})
+
+/** SDK types `inputSchema.properties` as optional `Record<string, unknown>`; tests assert known shape. */
+function methodEnumOf(tool: { inputSchema: { properties?: Record<string, unknown> } }): string[] {
+  const method = tool.inputSchema.properties?.method as { enum?: string[] } | undefined
+  return method?.enum ?? []
+}
+
+function propsOf(tool: { inputSchema: { properties?: Record<string, unknown> } }): Record<string, unknown> {
+  return tool.inputSchema.properties ?? {}
+}
+
+describe('buildInfraTool', () => {
+  test('sensei infra exposes all HTTP verbs', () => {
+    const tool = buildInfraTool('sensei')
+    expect(methodEnumOf(tool)).toEqual(['GET', 'POST', 'PATCH', 'PUT', 'DELETE'])
+    expect(propsOf(tool).body).toBeDefined()
+  })
+
+  test('worker infra is GET-only', () => {
+    const tool = buildInfraTool('worker')
+    expect(methodEnumOf(tool)).toEqual(['GET'])
+    expect(propsOf(tool).body).toBeUndefined()
+  })
+
+  test('user infra is GET-only (same as worker)', () => {
+    expect(methodEnumOf(buildInfraTool('user'))).toEqual(['GET'])
   })
 })
 
@@ -34,12 +58,6 @@ describe('tool shapes', () => {
     expect(SEND_TOOL.inputSchema.required).toEqual(['to', 'text'])
     expect(propsOf(SEND_TOOL).taskId).toBeDefined()
   })
-
-  test('sensei infra exposes all HTTP verbs', () => {
-    const method = propsOf(INFRA_TOOL).method as { enum?: string[] } | undefined
-    expect(method?.enum).toEqual(['GET', 'POST', 'PATCH', 'PUT', 'DELETE'])
-    expect(propsOf(INFRA_TOOL).body).toBeDefined()
-  })
 })
 
 describe('buildInstructions', () => {
@@ -51,9 +69,16 @@ describe('buildInstructions', () => {
     expect(instr).not.toContain('`reply`')
   })
 
-  test('worker instructions mention reply', () => {
+  test('worker instructions mention reply and infra with read-only note', () => {
     const instr = buildInstructions('worker', 'scratch')
     expect(instr).toContain('scratch')
     expect(instr).toContain('`reply`')
+    expect(instr).toContain('`infra`')
+    expect(instr).toContain('read-only')
+  })
+
+  test('worker instructions steer state changes back to sensei', () => {
+    const instr = buildInstructions('worker', 'x')
+    expect(instr).toContain("sensei's job")
   })
 })
