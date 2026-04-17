@@ -697,9 +697,36 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
     const taskGetMatch = path.match(/^\/tasks\/(\w+)$/)
     if (taskGetMatch && req.method === 'GET') {
-      const task = boardProjection.state.tasks.find((t) => t.id === taskGetMatch[1])
-      if (!task) return Response.json({ error: 'not found' }, { status: 404 })
-      return Response.json(task)
+      return (async () => {
+        const taskId = taskGetMatch[1]
+        if (!taskId) return Response.json({ error: 'not found' }, { status: 404 })
+        const task = boardProjection.state.tasks.find((t) => t.id === taskId)
+        if (!task) return Response.json({ error: 'not found' }, { status: 404 })
+        const include = new Set((url.searchParams.get('include') ?? '').split(',').filter(Boolean))
+        if (include.size === 0) return Response.json(task)
+        const enriched: Record<string, unknown> = { ...task }
+        if (include.has('comments')) {
+          const events = await store.read({ stream: taskStream(taskId) })
+          enriched.comments = events.flatMap((e) => {
+            if (e.type === 'reply') {
+              const d = e.data as ReplyData
+              return [{ ts: e.ts, from: d.agent, text: d.text }]
+            }
+            if (e.type === 'send') {
+              const d = e.data as SendData
+              return [{ ts: e.ts, from: d.from, to: d.agent, text: d.text }]
+            }
+            return []
+          })
+        }
+        if (include.has('playbook') && task.playbook) {
+          const playbook = playbookProjection.state.playbooks.find((p) => p.id === task.playbook)
+          if (playbook) {
+            enriched.playbook = { id: playbook.id, name: playbook.name, content: playbook.content }
+          }
+        }
+        return Response.json(enriched)
+      })()
     }
 
     const statusMatch = path.match(/^\/tasks\/(\w+)\/status$/)
