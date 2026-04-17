@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import { buildInfraTool, buildInstructions, buildTools, REPLY_TOOL, resolveReplyTaskId, SEND_TOOL } from './tools.ts'
+import {
+  buildInfraTool,
+  buildInstructions,
+  buildTools,
+  formatInfraResponse,
+  INFRA_MAX_BODY_BYTES,
+  REPLY_TOOL,
+  resolveReplyTaskId,
+  SEND_TOOL,
+} from './tools.ts'
 
 describe('buildTools', () => {
   test('sensei gets send + comment + infra (no reply — sensei messages have explicit recipients)', () => {
@@ -87,6 +96,55 @@ describe('resolveReplyTaskId', () => {
   test('returns undefined when neither source has a value', () => {
     expect(resolveReplyTaskId({}, undefined)).toBeUndefined()
     expect(resolveReplyTaskId({ taskId: '' }, undefined)).toBeUndefined()
+  })
+})
+
+describe('formatInfraResponse', () => {
+  test('2xx success returns body raw, no status prefix, not an error', () => {
+    const res = formatInfraResponse(200, 'OK', '{"tasks":[]}')
+    expect(res.text).toBe('{"tasks":[]}')
+    expect(res.isError).toBe(false)
+  })
+
+  test('201 Created also treated as success', () => {
+    const res = formatInfraResponse(201, 'Created', '{"id":"001"}')
+    expect(res.text).toBe('{"id":"001"}')
+    expect(res.isError).toBe(false)
+  })
+
+  test('4xx error prepends the status line and flags isError', () => {
+    const res = formatInfraResponse(404, 'Not Found', '{"error":"not found"}')
+    expect(res.text).toBe('404 Not Found\n{"error":"not found"}')
+    expect(res.isError).toBe(true)
+  })
+
+  test('5xx error prepends status and flags isError', () => {
+    const res = formatInfraResponse(500, 'Internal Server Error', '')
+    expect(res.text).toBe('500 Internal Server Error\n')
+    expect(res.isError).toBe(true)
+  })
+
+  test('long body is truncated with a pagination hint', () => {
+    const bigBody = 'x'.repeat(INFRA_MAX_BODY_BYTES + 500)
+    const res = formatInfraResponse(200, 'OK', bigBody)
+    expect(res.text.length).toBeLessThan(bigBody.length)
+    expect(res.text).toContain('[truncated: 500 more chars')
+    expect(res.isError).toBe(false)
+  })
+
+  test('truncation applies on error too, with status prefix still present', () => {
+    const bigBody = 'y'.repeat(INFRA_MAX_BODY_BYTES + 100)
+    const res = formatInfraResponse(400, 'Bad Request', bigBody)
+    expect(res.text.startsWith('400 Bad Request\n')).toBe(true)
+    expect(res.text).toContain('[truncated: 100 more chars')
+    expect(res.isError).toBe(true)
+  })
+
+  test('body at exactly the limit is NOT truncated', () => {
+    const body = 'z'.repeat(INFRA_MAX_BODY_BYTES)
+    const res = formatInfraResponse(200, 'OK', body)
+    expect(res.text).toBe(body)
+    expect(res.text).not.toContain('[truncated')
   })
 })
 

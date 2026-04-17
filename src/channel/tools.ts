@@ -69,17 +69,24 @@ const METHODS_BY_ROLE: Record<AgentRole, string[]> = {
   user: ['GET'],
 }
 
+/**
+ * Max response body delivered to the agent. Measured in UTF-16 code units (JavaScript `string.length`);
+ * for ASCII JSON — the common case here — this equals bytes. The marker and user-facing docs round to KB.
+ */
+export const INFRA_MAX_BODY_BYTES = 48 * 1024
+export const INFRA_MAX_BODY_KB = INFRA_MAX_BODY_BYTES / 1024
+
 const SENSEI_INFRA_DESCRIPTION =
   'Call the Jean infrastructure HTTP API. Use this for board, tasks, triggers, events, playbooks, permissions. ' +
   'Path must start with "/" (e.g. "/board", "/tasks", "/triggers"). ' +
-  'Responses above ~48KB are truncated — always paginate large endpoints (e.g. "/history?last=20").'
+  `Responses above ~${INFRA_MAX_BODY_KB}KB are truncated — always paginate large endpoints (e.g. "/history?last=20").`
 
 const READONLY_INFRA_DESCRIPTION =
   'Read-only Jean infrastructure HTTP API (GET only). Use this to look up context for the work you are doing — ' +
   'task comments, the board, related tasks, connected agents. Most useful: ' +
   '`/tasks/<id>?include=comments` returns a task plus the curated comments; add `messages` for the full correspondence too. ' +
   'Use these when you need "what was discussed/decided about this task". ' +
-  'Responses above ~48KB are truncated — paginate with `?last=N` on history endpoints. ' +
+  `Responses above ~${INFRA_MAX_BODY_KB}KB are truncated — paginate with \`?last=N\` on history endpoints. ` +
   "State changes are the sensei's job; if you need something written, ask via `reply`."
 
 export function buildInfraTool(role: AgentRole): Tool {
@@ -125,6 +132,25 @@ export function optionalString(args: Record<string, unknown>, key: string): stri
   if (typeof raw !== 'string') return undefined
   const trimmed = raw.trim()
   return trimmed || undefined
+}
+
+/**
+ * Format an infra HTTP response for the MCP tool result. On 2xx the raw body is returned as-is
+ * (server already returns structured JSON; adding a "200 OK\n" prefix is pure noise). On 4xx/5xx
+ * the status line is prepended since an empty or malformed body can still carry useful signal via status.
+ * Long bodies are truncated with a pagination hint.
+ */
+export function formatInfraResponse(
+  status: number,
+  statusText: string,
+  rawBody: string,
+): { text: string; isError: boolean } {
+  const body =
+    rawBody.length <= INFRA_MAX_BODY_BYTES
+      ? rawBody
+      : `${rawBody.slice(0, INFRA_MAX_BODY_BYTES)}\n\n[truncated: ${rawBody.length - INFRA_MAX_BODY_BYTES} more chars — use pagination]`
+  const isError = status >= 400
+  return { text: isError ? `${status} ${statusText}\n${body}` : body, isError }
 }
 
 /** Resolve the taskId to attach to a reply tool call. Explicit arg wins; fall back to the most recent deliver's taskId. */

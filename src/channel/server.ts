@@ -19,7 +19,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { AgentRole, DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 import { findDojoFrom, readRuntimeFiles } from '../probe.ts'
-import { buildInstructions, buildTools, optionalString, resolveReplyTaskId } from './tools.ts'
+import { buildInstructions, buildTools, formatInfraResponse, optionalString, resolveReplyTaskId } from './tools.ts'
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE: AgentRole = ((): AgentRole => {
@@ -187,15 +187,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         init.headers = { 'content-type': 'application/json' }
       }
       const res = await fetch(url, init)
-      const raw = await res.text()
-      const MAX_BODY = 48 * 1024
-      const body =
-        raw.length > MAX_BODY
-          ? `${raw.slice(0, MAX_BODY)}\n\n[truncated: ${raw.length - MAX_BODY} more bytes — use pagination]`
-          : raw
+      const { text, isError } = formatInfraResponse(res.status, res.statusText, await res.text())
       return {
-        content: [{ type: 'text' as const, text: `${res.status} ${res.statusText}\n${body}` }],
-        ...(res.status >= 400 && { isError: true }),
+        content: [{ type: 'text' as const, text }],
+        ...(isError && { isError: true }),
       }
     } catch (err) {
       return {
