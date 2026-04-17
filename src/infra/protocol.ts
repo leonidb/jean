@@ -25,6 +25,19 @@ export type ReplyMsg = {
   taskId?: string
 }
 
+/**
+ * Agent comments substantively on a task (via the `comment` tool).
+ * Distinct from `reply` — deliberate, curated, surfaced via ?include=comments.
+ * `taskId` is required (unlike ReplyMsg, which falls back to the most recent deliver's taskId) —
+ * comments are named acts, not conversational responses, so attribution must be explicit.
+ */
+export type TaskCommentMsg = {
+  type: 'task-comment'
+  from: string
+  taskId: string
+  text: string
+}
+
 /** Agent sends a message to another agent/channel (via the `send` tool). `from` is overridden to the connected agent. */
 export type SendMsg = {
   type: 'send'
@@ -89,5 +102,5 @@ export type UpdateStatusRequest = {
 
 // ── Union types ───────────────────────────────────────────────────
 
-export type InboundMsg = RegisterMsg | ReplyMsg | SendMsg
+export type InboundMsg = RegisterMsg | ReplyMsg | TaskCommentMsg | SendMsg
 export type OutboundMsg = DeliverMsg | RegisteredMsg

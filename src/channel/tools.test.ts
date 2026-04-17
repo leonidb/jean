@@ -2,21 +2,21 @@ import { describe, expect, test } from 'bun:test'
 import { buildInfraTool, buildInstructions, buildTools, REPLY_TOOL, resolveReplyTaskId, SEND_TOOL } from './tools.ts'
 
 describe('buildTools', () => {
-  test('sensei gets send + infra, no reply', () => {
+  test('sensei gets send + comment + infra (no reply — sensei messages have explicit recipients)', () => {
     const names = buildTools('sensei').map((t) => t.name)
-    expect(names).toEqual(['send', 'infra'])
+    expect(names).toEqual(['send', 'comment', 'infra'])
     expect(names).not.toContain('reply')
   })
 
-  test('worker gets reply + infra, no send', () => {
+  test('worker gets reply + comment + infra (no send — only sensei routes messages)', () => {
     const names = buildTools('worker').map((t) => t.name)
-    expect(names).toEqual(['reply', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'infra'])
     expect(names).not.toContain('send')
   })
 
-  test('user role matches worker (non-sensei is read-only)', () => {
+  test('user role matches worker (non-sensei has same toolset)', () => {
     const names = buildTools('user').map((t) => t.name)
-    expect(names).toEqual(['reply', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'infra'])
   })
 })
 

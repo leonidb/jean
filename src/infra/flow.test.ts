@@ -450,6 +450,50 @@ describe('WS send message', () => {
 
     ws.close()
   })
+
+  test('sensei-authored task-comment records but does NOT nudge sensei', async () => {
+    // Create a task
+    const createRes = await fetch(`${BASE}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'sensei-comment task', description: '', queue: 'test-worker' }),
+    })
+    const task = (await createRes.json()) as { id: string }
+
+    // Connect as sensei; note baseline message count after register
+    const { ws, messages } = await connectAgent('comment-origin-sensei', 'sensei')
+    // Consume the 'You just connected' message so our baseline is stable
+    await Bun.sleep(150)
+    const baseline = messages.length
+
+    ws.send(
+      JSON.stringify({
+        type: 'task-comment',
+        from: 'comment-origin-sensei',
+        taskId: task.id,
+        text: 'sensei-authored decision recorded on task',
+      }),
+    )
+    await Bun.sleep(250)
+
+    // Comment is recorded in history
+    const hist = (await (await fetch(`${BASE}/history?taskId=${task.id}`)).json()) as {
+      events: Array<{ type: string; data: Record<string, unknown> }>
+    }
+    const commentEvent = hist.events.find(
+      (e) => e.type === 'task-comment' && e.data?.text === 'sensei-authored decision recorded on task',
+    )
+    expect(commentEvent).toBeDefined()
+    expect(commentEvent?.data.role).toBe('sensei')
+
+    // But the sensei did NOT receive a nudge as a result of its own comment
+    const nudge = messages
+      .slice(baseline)
+      .find((m): m is DeliverMsg => isDeliver(m) && m.from === 'infra' && m.text.includes('Events pending'))
+    expect(nudge).toBeUndefined()
+
+    ws.close()
+  })
 })
 
 describe('board persistence', () => {

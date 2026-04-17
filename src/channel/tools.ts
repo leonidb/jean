@@ -28,6 +28,23 @@ export const REPLY_TOOL: Tool = {
   },
 }
 
+export const COMMENT_TOOL: Tool = {
+  name: 'comment',
+  description:
+    'Record a substantive comment on a task. Distinct from `reply`: `reply` is conversation (messages, chatter, short acks); ' +
+    '`comment` is a curated, deliberate note the sensei or human will want to read when scanning the task. ' +
+    'Use `comment` when: you found something worth recording, a blocker is resolved, a phase is complete, or the task state has meaningfully advanced. ' +
+    'Use `reply` for everything else. Requires an explicit `taskId`.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      taskId: { type: 'string', description: 'The task this comment is about' },
+      text: { type: 'string', description: 'The comment text — substantive, self-contained' },
+    },
+    required: ['taskId', 'text'],
+  },
+}
+
 export const SEND_TOOL: Tool = {
   name: 'send',
   description:
@@ -60,8 +77,8 @@ const SENSEI_INFRA_DESCRIPTION =
 const READONLY_INFRA_DESCRIPTION =
   'Read-only Jean infrastructure HTTP API (GET only). Use this to look up context for the work you are doing — ' +
   'task comments, the board, related tasks, connected agents. Most useful: ' +
-  '`/tasks/<id>?include=comments` returns a task plus the full conversation (worker replies + sensei sends) — ' +
-  'this is the canonical source for "what was discussed/decided about this task". ' +
+  '`/tasks/<id>?include=comments` returns a task plus the curated comments; add `messages` for the full correspondence too. ' +
+  'Use these when you need "what was discussed/decided about this task". ' +
   'Responses above ~48KB are truncated — paginate with `?last=N` on history endpoints. ' +
   "State changes are the sensei's job; if you need something written, ask via `reply`."
 
@@ -98,18 +115,24 @@ export function buildInfraTool(role: AgentRole): Tool {
 
 /** The MCP tool list exposed to Claude for a given role. */
 export function buildTools(role: AgentRole): Tool[] {
-  if (role === 'sensei') return [SEND_TOOL, buildInfraTool(role)]
-  return [REPLY_TOOL, buildInfraTool(role)]
+  if (role === 'sensei') return [SEND_TOOL, COMMENT_TOOL, buildInfraTool(role)]
+  return [REPLY_TOOL, COMMENT_TOOL, buildInfraTool(role)]
 }
 
-/** Resolve the taskId to attach to a reply tool call. Explicit arg wins; fall back to the most recent deliver's taskId. Empty/non-string explicit is ignored. */
+/** Read a tool argument that should be a non-empty string. Non-string, empty, or whitespace-only values return undefined. */
+export function optionalString(args: Record<string, unknown>, key: string): string | undefined {
+  const raw = args[key]
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  return trimmed || undefined
+}
+
+/** Resolve the taskId to attach to a reply tool call. Explicit arg wins; fall back to the most recent deliver's taskId. */
 export function resolveReplyTaskId(
   args: Record<string, unknown>,
   lastDeliverTaskId: string | undefined,
 ): string | undefined {
-  const raw = args.taskId
-  const explicit = typeof raw === 'string' ? raw.trim() : ''
-  return explicit || lastDeliverTaskId
+  return optionalString(args, 'taskId') ?? lastDeliverTaskId
 }
 
 /** System prompt wired into the MCP server's `instructions` field. */
@@ -118,14 +141,14 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
     return [
       `You are the sensei (orchestrator) in the Jean system, agent "${agentName}".`,
       `When you receive any message from Jean, FIRST load the jean-sensei skill, then follow its instructions.`,
-      `Use the \`send\` tool to message any agent or channel (including the human via the Slack channel). Use the \`infra\` tool for all other API calls (board, tasks, triggers, playbooks, events).`,
+      `Use the \`send\` tool to message any agent or channel (including the human via the Slack channel). Use the \`comment\` tool to record durable decisions/context on a task (visible to workers via ?include=comments). Use the \`infra\` tool for all other API calls (board, tasks, triggers, playbooks, events).`,
     ].join('\n')
   }
   return [
     `You are connected to the Jean orchestration system as agent "${agentName}".`,
     `Messages from the orchestrator arrive as <channel source="jean" ...> tags.`,
-    `Use the \`reply\` tool to send messages back to the orchestrator.`,
-    `Use the \`infra\` tool (read-only — GET only) to look up context: \`GET /tasks/<id>?include=comments\` for the full conversation on a task you're working on, \`GET /board\` for related tasks, \`GET /agents\` to see who else is connected. State changes are the sensei's job — if you need something written, ask via \`reply\`.`,
+    `Use the \`reply\` tool for conversation with the orchestrator (including short acks, questions, "still working"). Use the \`comment\` tool when you have something substantive worth recording on a task — findings, blocker resolved, phase done. Comments are curated; replies are chat.`,
+    `Use the \`infra\` tool (read-only — GET only) to look up context: \`GET /tasks/<id>?include=comments,messages\` for both the curated comments and the full correspondence on a task you're working on, \`GET /board\` for related tasks, \`GET /agents\` to see who else is connected. State changes are the sensei's job — if you need something written, ask via \`reply\`.`,
     `When you finish a task or get stuck, just stop — the orchestrator will check on you.`,
   ].join('\n')
 }

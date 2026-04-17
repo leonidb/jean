@@ -19,7 +19,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { AgentRole, DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 import { findDojoFrom, readRuntimeFiles } from '../probe.ts'
-import { buildInstructions, buildTools, resolveReplyTaskId } from './tools.ts'
+import { buildInstructions, buildTools, optionalString, resolveReplyTaskId } from './tools.ts'
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE: AgentRole = ((): AgentRole => {
@@ -122,10 +122,25 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
   }
 
+  if (req.params.name === 'comment') {
+    const taskId = optionalString(args, 'taskId')
+    const text = optionalString(args, 'text')
+    if (!taskId || !text) {
+      return {
+        content: [{ type: 'text' as const, text: 'comment requires non-empty `taskId` and `text`.' }],
+        isError: true,
+      }
+    }
+    sendToInfra({ type: 'task-comment', from: AGENT_NAME, taskId, text })
+    return {
+      content: [{ type: 'text' as const, text: `Comment recorded on task ${taskId}.` }],
+    }
+  }
+
   if (req.params.name === 'send') {
-    const to = (args.to as string)?.trim()
-    const text = (args.text as string)?.trim()
-    const taskId = (args.taskId as string | undefined)?.trim() || undefined
+    const to = optionalString(args, 'to')
+    const text = optionalString(args, 'text')
+    const taskId = optionalString(args, 'taskId')
     if (!to || !text) {
       return {
         content: [{ type: 'text' as const, text: 'send requires non-empty `to` and `text`.' }],

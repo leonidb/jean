@@ -65,7 +65,7 @@ infra(method="POST", path="/events/ack", body={"upToId": <highest_id>})
 
 ## Loading a task — the canonical call
 
-Whenever you touch a task — to update status, send a follow-up, decide what's next — load it with both the conversation and the playbook attached:
+Whenever you touch a task — to update status, send a follow-up, decide what's next — load it with the curated comments and the playbook:
 
 ```
 infra(method="GET", path="/tasks/<id>?include=comments,playbook")
@@ -73,31 +73,32 @@ infra(method="GET", path="/tasks/<id>?include=comments,playbook")
 
 This single call returns:
 - the task fields (title, description, status, queue, agent, …)
-- a **`comments`** array — every reply/send on the task's stream (worker findings, your own messages). The substantive thinking lives here, not in task descriptions, scratchpads, or external notes. Read these before reaching for anything else.
+- a **`comments`** array — curated `task-comment` events workers emit for substantive updates (findings, blockers resolved, milestones). High-signal. Read these first.
 - a **`playbook`** object (if the task has one) with the full markdown content. **Read it before any state transition** — the playbook defines the task's lifecycle. Don't assume you remember the rules from a previous task.
 
-Use this call as your default. Only fall back to the lighter forms when you specifically don't need the conversation/playbook.
+Need the full chat (worker replies, your own sends — lower signal, higher volume)? Add `messages` to the include list: `?include=comments,messages,playbook`. Useful for diagnosing why a task stalled or what the back-and-forth looked like; usually not needed for routine work.
 
-**Never read worker worktree scratchpads** — the equivalent content lives in `comments`. Scratchpads are stale by design.
+**Never read worker worktree scratchpads** — the equivalent content lives in `comments` and `messages`. Scratchpads are stale by design.
 
 ## Looking up what's been said about a topic
 
 When the human asks "what did we discuss / decide / find about X":
 1. `infra(method="GET", path="/board")` or `/tasks?status=...` to find tasks whose title/description mentions X.
-2. For each candidate, the canonical task-load above with `?include=comments,playbook`.
+2. For each candidate, the canonical task-load above with `?include=comments,playbook`. Add `messages` only if `comments` turns up thin.
 3. Only after that, consult external sources (open-threads files, research notes, gh comments, memory) — these supplement, they don't replace, the task history.
 
 ## API reference
 
 Read operations:
 ```
-infra(method="GET", path="/agents")                                       // connected agents
-infra(method="GET", path="/events")                                       // pending events
-infra(method="GET", path="/board")                                        // current board
-infra(method="GET", path="/tasks/<id>?include=comments,playbook")         // canonical task load — use this by default
-infra(method="GET", path="/tasks/<id>")                                   // bare task state — only when you don't need conversation/playbook
-infra(method="GET", path="/history?taskId=001")                           // raw event stream (rarely needed)
-infra(method="GET", path="/history?last=20")                              // recent events across all streams
+infra(method="GET", path="/agents")                                                // connected agents
+infra(method="GET", path="/events")                                                // pending events
+infra(method="GET", path="/board")                                                 // current board
+infra(method="GET", path="/tasks/<id>?include=comments,playbook")                  // canonical task load — use by default
+infra(method="GET", path="/tasks/<id>?include=comments,messages,playbook")         // add messages when you need the full chat
+infra(method="GET", path="/tasks/<id>")                                            // bare task state — only when neither comments nor playbook are needed
+infra(method="GET", path="/history?taskId=001")                                    // raw event stream (rarely needed)
+infra(method="GET", path="/history?last=20")                                       // recent events across all streams
 ```
 
 Tasks:

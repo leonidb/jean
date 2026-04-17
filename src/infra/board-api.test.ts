@@ -121,42 +121,40 @@ describe('board CRUD', () => {
     expect(res.status).toBe(404)
   })
 
-  test('GET /tasks/:id?include=comments returns reply and send events as comments', async () => {
+  test('GET /tasks/:id?include=messages returns reply and send events', async () => {
     const createRes = await fetch(`${BASE}/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'Comments task', description: 'has chatter', queue: 'comment-worker' }),
+      body: JSON.stringify({ title: 'Messages task', description: 'has chatter', queue: 'msg-worker' }),
     })
     const created = (await createRes.json()) as { id: string }
 
-    // Send a message into the task
     await fetch(`${BASE}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ to: 'comment-worker', from: 'sensei', text: 'do the thing', taskId: created.id }),
+      body: JSON.stringify({ to: 'msg-worker', from: 'sensei', text: 'do the thing', taskId: created.id }),
     })
-    // Simulate a worker reply by recording it via WS would need a connection — instead post via /send from the worker
     await fetch(`${BASE}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ to: 'sensei', from: 'comment-worker', text: 'thing done', taskId: created.id }),
+      body: JSON.stringify({ to: 'sensei', from: 'msg-worker', text: 'thing done', taskId: created.id }),
     })
 
-    const res = await fetch(`${BASE}/tasks/${created.id}?include=comments`)
+    const res = await fetch(`${BASE}/tasks/${created.id}?include=messages`)
     const task = (await res.json()) as {
       id: string
       title: string
-      comments: Array<{ ts: string; from: string; text: string; to?: string }>
+      messages: Array<{ ts: string; from: string; text: string; to?: string }>
     }
     expect(task.id).toBe(created.id)
-    expect(task.comments.length).toBeGreaterThanOrEqual(2)
-    expect(
-      task.comments.some((c) => c.from === 'sensei' && c.text === 'do the thing' && c.to === 'comment-worker'),
-    ).toBe(true)
-    expect(task.comments.some((c) => c.from === 'comment-worker' && c.text === 'thing done')).toBe(true)
+    expect(task.messages.length).toBeGreaterThanOrEqual(2)
+    expect(task.messages.some((m) => m.from === 'sensei' && m.text === 'do the thing' && m.to === 'msg-worker')).toBe(
+      true,
+    )
+    expect(task.messages.some((m) => m.from === 'msg-worker' && m.text === 'thing done')).toBe(true)
   })
 
-  test('GET /tasks/:id without include returns no comments field', async () => {
+  test('GET /tasks/:id without include returns no messages/comments fields', async () => {
     const createRes = await fetch(`${BASE}/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -164,8 +162,9 @@ describe('board CRUD', () => {
     })
     const created = (await createRes.json()) as { id: string }
     const res = await fetch(`${BASE}/tasks/${created.id}`)
-    const task = (await res.json()) as { id: string; comments?: unknown }
+    const task = (await res.json()) as { id: string; messages?: unknown; comments?: unknown }
     expect(task.id).toBe(created.id)
+    expect(task.messages).toBeUndefined()
     expect(task.comments).toBeUndefined()
   })
 
@@ -206,7 +205,97 @@ describe('board CRUD', () => {
     expect(task.playbook).toBeUndefined()
   })
 
-  test('GET /tasks/:id?include=comments,playbook returns both', async () => {
+  test('GET /tasks/:id?include=comments returns only task-comment events (curated, not chat)', async () => {
+    const createRes = await fetch(`${BASE}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Curated task', description: '', queue: 'curated-worker' }),
+    })
+    const created = (await createRes.json()) as { id: string }
+
+    // Chat message (reply/send) — should NOT appear in comments
+    await fetch(`${BASE}/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'curated-worker', from: 'sensei', text: 'just chatting', taskId: created.id }),
+    })
+
+    // Curated comment — should appear
+    const ws = new WebSocket(`ws://127.0.0.1:${TEST_PORT}/ws`)
+    await new Promise<void>((res, rej) => {
+      ws.onopen = () => res()
+      ws.onerror = () => rej(new Error('ws error'))
+    })
+    ws.send(JSON.stringify({ type: 'register', agent: 'curated-worker', role: 'worker' }))
+    await Bun.sleep(100)
+    ws.send(
+      JSON.stringify({
+        type: 'task-comment',
+        from: 'curated-worker',
+        taskId: created.id,
+        text: 'Finding: root cause is X',
+      }),
+    )
+    await Bun.sleep(200)
+
+    const res = await fetch(`${BASE}/tasks/${created.id}?include=comments`)
+    const task = (await res.json()) as {
+      id: string
+      comments: Array<{ ts: string; from: string; text: string }>
+    }
+    expect(task.comments.some((c) => c.text === 'Finding: root cause is X' && c.from === 'curated-worker')).toBe(true)
+    // Chat message must NOT leak into comments
+    expect(task.comments.some((c) => c.text === 'just chatting')).toBe(false)
+
+    ws.close()
+  })
+
+  test('GET /tasks/:id?include=comments,messages returns both, loading stream once', async () => {
+    const createRes = await fetch(`${BASE}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Both task', description: '', queue: 'both-worker' }),
+    })
+    const created = (await createRes.json()) as { id: string }
+
+    await fetch(`${BASE}/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'both-worker', from: 'sensei', text: 'kickoff', taskId: created.id }),
+    })
+
+    const ws = new WebSocket(`ws://127.0.0.1:${TEST_PORT}/ws`)
+    await new Promise<void>((res) => {
+      ws.onopen = () => res()
+    })
+    ws.send(JSON.stringify({ type: 'register', agent: 'both-worker', role: 'worker' }))
+    await Bun.sleep(100)
+    ws.send(
+      JSON.stringify({
+        type: 'task-comment',
+        from: 'both-worker',
+        taskId: created.id,
+        text: 'milestone reached',
+      }),
+    )
+    await Bun.sleep(200)
+
+    const res = await fetch(`${BASE}/tasks/${created.id}?include=comments,messages`)
+    const task = (await res.json()) as {
+      id: string
+      comments: Array<{ text: string }>
+      messages: Array<{ text: string }>
+    }
+    expect(task.comments.some((c) => c.text === 'milestone reached')).toBe(true)
+    expect(task.messages.some((m) => m.text === 'kickoff')).toBe(true)
+    // Make sure comments don't leak into messages and vice versa
+    expect(task.comments.some((c) => c.text === 'kickoff')).toBe(false)
+    expect(task.messages.some((m) => m.text === 'milestone reached')).toBe(false)
+
+    ws.close()
+  })
+
+  test('GET /tasks/:id?include=messages,playbook returns both', async () => {
     const createRes = await fetch(`${BASE}/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -225,13 +314,13 @@ describe('board CRUD', () => {
       body: JSON.stringify({ to: 'reviewer', from: 'sensei', text: 'kick off review', taskId: created.id }),
     })
 
-    const res = await fetch(`${BASE}/tasks/${created.id}?include=comments,playbook`)
+    const res = await fetch(`${BASE}/tasks/${created.id}?include=messages,playbook`)
     const task = (await res.json()) as {
       id: string
-      comments?: Array<{ text: string }>
+      messages?: Array<{ text: string }>
       playbook?: { id: string }
     }
-    expect(task.comments?.some((c) => c.text === 'kick off review')).toBe(true)
+    expect(task.messages?.some((m) => m.text === 'kick off review')).toBe(true)
     expect(task.playbook?.id).toBe('review')
   })
 

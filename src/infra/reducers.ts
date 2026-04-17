@@ -45,6 +45,13 @@ export type ReplyData = {
   text: string
 }
 
+/** Substantive comment on a task. Distinct from reply — curated, deliberate, surfaced via ?include=comments. Emitted by workers or by the sensei. */
+export type TaskCommentData = {
+  agent: string
+  role: AgentRole
+  text: string
+}
+
 export type AgentIdleData = {
   agent: string
   role: AgentRole
@@ -248,6 +255,13 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
     case 'playbook-updated':
     case 'playbook-removed':
       return [...state, event]
+
+    case 'task-comment': {
+      const d = event.data as TaskCommentData
+      // Sensei-authored comments don't self-nudge; worker comments do.
+      if (d.role === 'sensei') return state
+      return [...state, event]
+    }
 
     case 'agent-idle': {
       const d = event.data as AgentIdleData

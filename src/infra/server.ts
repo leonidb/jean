@@ -60,6 +60,7 @@ import {
   type SendData,
   type StartData,
   SYSTEM_STREAM,
+  type TaskCommentData,
   type TaskCreatedData,
   type TaskRevertedData,
   type TaskStatusData,
@@ -110,6 +111,7 @@ const pendingProjection = createProjection<PendingState>({
   filter: {
     types: [
       'reply',
+      'task-comment',
       'agent-idle',
       'task-created',
       'trigger-fired',
@@ -715,9 +717,21 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         const include = new Set((url.searchParams.get('include') ?? '').split(',').filter(Boolean))
         if (include.size === 0) return Response.json(task)
         const enriched: Record<string, unknown> = { ...task }
+        // Load the task's event stream once if any include flag needs it. Add new stream-backed flags here.
+        const STREAM_INCLUDES = ['comments', 'messages'] as const
+        const needsStream = STREAM_INCLUDES.some((k) => include.has(k))
+        const events = needsStream ? await store.read({ stream: taskStream(taskId) }) : []
         if (include.has('comments')) {
-          const events = await store.read({ stream: taskStream(taskId) })
+          // Curated task-comment events — deliberate notes worth reading as a summary.
           enriched.comments = events.flatMap((e) => {
+            if (e.type !== 'task-comment') return []
+            const d = e.data as TaskCommentData
+            return [{ ts: e.ts, from: d.agent, text: d.text }]
+          })
+        }
+        if (include.has('messages')) {
+          // Chat-level reply/send events — full correspondence, higher volume, useful for diagnostics.
+          enriched.messages = events.flatMap((e) => {
             if (e.type === 'reply') {
               const d = e.data as ReplyData
               return [{ ts: e.ts, from: d.agent, text: d.text }]
@@ -1338,6 +1352,19 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             routeSend({ from, to: msg.to, text: msg.text, taskId: msg.taskId }).catch((err) => {
               process.stderr.write(`[jean] ws send from ${from} → ${msg.to} failed: ${err}\n`)
             })
+            break
+          }
+
+          case 'task-comment': {
+            // `from` comes from the WS session. Comment requires an explicit taskId from the sender.
+            const from = ws.data.agent
+            if (!from || !msg.taskId || !msg.text) break
+            const role = agents.get(from)?.role ?? 'worker'
+            void record('task-comment', taskStream(msg.taskId), {
+              agent: from,
+              role,
+              text: msg.text,
+            } satisfies TaskCommentData)
             break
           }
         }
