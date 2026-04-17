@@ -309,6 +309,7 @@ function pendingByAgent(): Record<string, number> {
 // ── Sensei nudge ──────────────────────────────────────────────────
 
 function nudgeSenseiIfIdle(force = false) {
+  if (!config.autoNudge) return
   const sensei = findSensei()
   if (!sensei?.idle) return
   if (!force && pendingProjection.state.length === 0) return
@@ -382,6 +383,14 @@ async function fireTrigger(trigger: Trigger) {
     agent: trigger.agent,
     prompt: trigger.prompt,
   } satisfies TriggerFiredData)
+
+  // autoNudge=false: suppress delivery to a sensei target. trigger-fired still records.
+  if (!config.autoNudge && agents.get(trigger.agent)?.role === 'sensei') {
+    process.stderr.write(
+      `[jean] trigger ${trigger.id} fired — skipping delivery to sensei "${trigger.agent}" (autoNudge=false)\n`,
+    )
+    return
+  }
 
   const delivered = deliverToAgent(trigger.agent, {
     type: 'deliver',
