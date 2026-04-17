@@ -61,6 +61,7 @@ import {
   type StartData,
   SYSTEM_STREAM,
   type TaskCreatedData,
+  type TaskRevertedData,
   type TaskStatusData,
   type TaskUpdatedData,
   TRIGGERS_STREAM,
@@ -95,7 +96,7 @@ const boardProjection = createProjection<Board>({
   store,
   reducer: boardReducer,
   initial: { tasks: [] },
-  filter: { types: ['task-created', 'task-status', 'task-updated'] },
+  filter: { types: ['task-created', 'task-status', 'task-updated', 'task-reverted'] },
   snapshots: fileSnapshotBackend(SNAPSHOT_DIR),
   snapshotEvery: 50,
   migrate: migrateBoard,
@@ -757,6 +758,42 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         } satisfies TaskStatusData)
         const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
         return Response.json(updated)
+      })()
+    }
+
+    const revertMatch = path.match(/^\/tasks\/(\w+)\/revert$/)
+    if (revertMatch && req.method === 'POST') {
+      return (async () => {
+        const taskId = revertMatch[1]
+        if (!taskId) return Response.json({ error: 'not found' }, { status: 404 })
+        const task = boardProjection.state.tasks.find((t) => t.id === taskId)
+        if (!task) return Response.json({ error: 'not found' }, { status: 404 })
+        const body = (await req.json().catch(() => ({}))) as { actor?: string }
+
+        // Rebuild the task's status stack from its event stream.
+        const events = await store.read({ stream: taskStream(taskId) })
+        const stack: TaskStatus[] = []
+        for (const e of events) {
+          if (e.type === 'task-created') stack.push('todo')
+          else if (e.type === 'task-status') stack.push((e.data as TaskStatusData).to)
+          else if (e.type === 'task-reverted') {
+            const target = (e.data as TaskRevertedData).to
+            while (stack.length > 0 && stack[stack.length - 1] !== target) stack.pop()
+          }
+        }
+
+        if (stack.length <= 1) {
+          return Response.json({ error: 'nothing to revert — task has no prior status to return to' }, { status: 400 })
+        }
+        const from = stack[stack.length - 1] as TaskStatus
+        const to = stack[stack.length - 2] as TaskStatus
+        await record('task-reverted', taskStream(taskId), {
+          from,
+          to,
+          actor: body.actor ?? 'api',
+        } satisfies TaskRevertedData)
+        const updated = boardProjection.state.tasks.find((t) => t.id === taskId)
+        return Response.json({ ...updated, reverted: { from, to } })
       })()
     }
 

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { Subprocess } from 'bun'
+import type { TaskStatus } from './board.ts'
 
 const TEST_PORT = 8798
 const DATA_DIR = '/tmp/jean-test-board-api'
@@ -302,5 +303,112 @@ describe('board CRUD', () => {
     })
     const updated = (await res.json()) as { updatedAt: string }
     expect(updated.updatedAt).not.toBe(created.updatedAt)
+  })
+})
+
+describe('POST /tasks/:id/revert', () => {
+  async function createAndTransition(title: string, statuses: TaskStatus[]): Promise<{ id: string }> {
+    const createRes = await fetch(`${BASE}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title, description: '', queue: 'scratch' }),
+    })
+    const created = (await createRes.json()) as { id: string }
+    for (const status of statuses) {
+      await fetch(`${BASE}/tasks/${created.id}/status`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+    }
+    return created
+  }
+
+  test('pops the most recent status change (done → in-progress)', async () => {
+    const { id } = await createAndTransition('revert test', ['assigned', 'in-progress', 'done'])
+
+    const res = await fetch(`${BASE}/tasks/${id}/revert`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ actor: 'test' }),
+    })
+    expect(res.status).toBe(200)
+    const task = (await res.json()) as { id: string; status: string }
+    expect(task.status).toBe('in-progress')
+
+    const histRes = await fetch(`${BASE}/history?taskId=${id}`)
+    const hist = (await histRes.json()) as { events: Array<{ type: string; data: Record<string, unknown> }> }
+    const revertEvent = hist.events.find((e) => e.type === 'task-reverted')
+    expect(revertEvent).toBeDefined()
+    expect(revertEvent?.data.from).toBe('done')
+    expect(revertEvent?.data.to).toBe('in-progress')
+    expect(revertEvent?.data.actor).toBe('test')
+  })
+
+  test('supports multi-step revert via repeated calls', async () => {
+    const { id } = await createAndTransition('multi revert', ['assigned', 'in-progress', 'done'])
+
+    // first undo: done → in-progress
+    let res = await fetch(`${BASE}/tasks/${id}/revert`, { method: 'POST' })
+    let task = (await res.json()) as { status: string }
+    expect(task.status).toBe('in-progress')
+
+    // second undo: in-progress → assigned
+    res = await fetch(`${BASE}/tasks/${id}/revert`, { method: 'POST' })
+    task = (await res.json()) as { status: string }
+    expect(task.status).toBe('assigned')
+
+    // third undo: assigned → todo
+    res = await fetch(`${BASE}/tasks/${id}/revert`, { method: 'POST' })
+    task = (await res.json()) as { status: string }
+    expect(task.status).toBe('todo')
+
+    // fourth undo: 400 — nothing left to pop
+    res = await fetch(`${BASE}/tasks/${id}/revert`, { method: 'POST' })
+    expect(res.status).toBe(400)
+  })
+
+  test('reverting does NOT re-visit popped states (cannot go back to done after reverting)', async () => {
+    const { id } = await createAndTransition('stack test', ['assigned', 'in-progress', 'done'])
+
+    // undo once: done → in-progress. Now `done` is off the stack.
+    await fetch(`${BASE}/tasks/${id}/revert`, { method: 'POST' })
+    // undo again: in-progress → assigned, NOT in-progress → done
+    const res = await fetch(`${BASE}/tasks/${id}/revert`, { method: 'POST' })
+    const task = (await res.json()) as { status: string }
+    expect(task.status).toBe('assigned')
+  })
+
+  test('fresh task (no transitions) returns 400', async () => {
+    const createRes = await fetch(`${BASE}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'fresh', description: '', queue: 'scratch' }),
+    })
+    const created = (await createRes.json()) as { id: string }
+
+    const res = await fetch(`${BASE}/tasks/${created.id}/revert`, { method: 'POST' })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toContain('nothing to revert')
+  })
+
+  test('404 for unknown task', async () => {
+    const res = await fetch(`${BASE}/tasks/999999/revert`, { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+
+  test('forward DAG transitions still forbidden on reverted tasks', async () => {
+    // After reverting to in-progress, normal PATCH /status/done should still work (it's a legal forward edge).
+    const { id } = await createAndTransition('re-transition', ['assigned', 'in-progress', 'done'])
+    await fetch(`${BASE}/tasks/${id}/revert`, { method: 'POST' })
+    const res = await fetch(`${BASE}/tasks/${id}/status`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'done' }),
+    })
+    expect(res.status).toBe(200)
+    const task = (await res.json()) as { status: string }
+    expect(task.status).toBe('done')
   })
 })

@@ -17,6 +17,7 @@
  *   jean agent tag <name> [tags..] [--remove]   View or manage tags
  *   jean agent remove <name> [--force] [--keep] Remove an agent
  *   jean task log <id>                          Show task event history
+ *   jean task undo <id> [--actor <name>]        Revert the most recent status change
  *   jean playbook list                          List loaded playbooks
  *   jean infra start                            Start infrastructure server
  *   jean infra stop                             Stop infrastructure server
@@ -388,9 +389,40 @@ async function cmdTask(args: string[]) {
     case 'log':
       await cmdTaskLog(args[1])
       break
+    case 'undo':
+      await cmdTaskUndo(args[1], args.slice(2))
+      break
     default:
-      console.error('Usage: jean task <log> <id>')
+      console.error('Usage: jean task <log|undo> <id>')
       process.exit(1)
+  }
+}
+
+async function cmdTaskUndo(id: string | undefined, opts: string[]) {
+  if (!id) {
+    console.error('Usage: jean task undo <id> [--actor <name>]')
+    process.exit(1)
+  }
+  const actor = flagValue(opts, '--actor') ?? 'cli'
+  const res = await infraFetch(`/tasks/${id}/revert`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ actor }),
+  })
+  const body = (await res.json()) as {
+    error?: string
+    id?: string
+    status?: string
+    reverted?: { from: string; to: string }
+  }
+  if (!res.ok || body.error) {
+    console.error(`Error: ${body.error ?? res.statusText}`)
+    process.exit(1)
+  }
+  if (body.reverted) {
+    console.log(`Reverted task ${id}: ${body.reverted.from} → ${body.reverted.to}`)
+  } else {
+    console.log(`Reverted task ${id}. Status: ${body.status}`)
   }
 }
 
@@ -1404,6 +1436,7 @@ Commands:
   jean permissions [agent]                    Show permission requests by agent
 
   jean task log <id>                          Show task event history
+  jean task undo <id> [--actor <name>]        Revert the most recent status change
   jean playbook list                          List loaded playbooks
 
   jean trigger add [options]                  Create a scheduled trigger

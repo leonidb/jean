@@ -27,6 +27,13 @@ export type TaskStatusData = {
   actor?: string
 }
 
+/** Revert the task to a previous status (stack-pop semantics). Bypasses canTransition; the DAG is only for forward progress. */
+export type TaskRevertedData = {
+  from: TaskStatus
+  to: TaskStatus
+  actor?: string
+}
+
 export type TaskUpdatedData = {
   agent?: string
   description?: string
@@ -150,11 +157,22 @@ export function agentFromEvent(event: StoredEvent): string | undefined {
 
 // ── Board reducer ────────────────────────────────────────────────
 
+/** Replace one task in the board state, leaving others untouched. Returns the same Board reference if taskId not found. */
+function updateTask(state: Board, taskId: string, update: (t: Task) => Task): Board {
+  let changed = false
+  const tasks = state.tasks.map((t) => {
+    if (t.id !== taskId) return t
+    changed = true
+    return update(t)
+  })
+  return changed ? { tasks } : state
+}
+
 export const boardReducer: Reducer<Board> = (state, event) => {
+  const taskId = taskIdFromStream(event.stream)
   switch (event.type) {
     case 'task-created': {
       const d = event.data as TaskCreatedData
-      const taskId = taskIdFromStream(event.stream)
       if (!taskId) return state
       const task: Task = {
         id: taskId,
@@ -171,36 +189,31 @@ export const boardReducer: Reducer<Board> = (state, event) => {
 
     case 'task-status': {
       const d = event.data as TaskStatusData
-      const taskId = taskIdFromStream(event.stream)
       if (!taskId) return state
       const to = migrateStatus(d.to)
-      return {
-        tasks: state.tasks.map((t) => {
-          if (t.id !== taskId) return t
-          const updated = { ...t, status: to, updatedAt: event.ts }
-          // When starting a task, ensure agent is set (default to queue)
-          if (to === 'in-progress' && !updated.agent) updated.agent = t.queue
-          return updated
-        }),
-      }
+      return updateTask(state, taskId, (t) => {
+        const updated = { ...t, status: to, updatedAt: event.ts }
+        // When starting a task, ensure agent is set (default to queue)
+        if (to === 'in-progress' && !updated.agent) updated.agent = t.queue
+        return updated
+      })
+    }
+
+    case 'task-reverted': {
+      const d = event.data as TaskRevertedData
+      if (!taskId) return state
+      return updateTask(state, taskId, (t) => ({ ...t, status: migrateStatus(d.to), updatedAt: event.ts }))
     }
 
     case 'task-updated': {
       const d = event.data as TaskUpdatedData
-      const taskId = taskIdFromStream(event.stream)
       if (!taskId) return state
-      return {
-        tasks: state.tasks.map((t) =>
-          t.id === taskId
-            ? {
-                ...t,
-                ...(d.agent !== undefined && { agent: d.agent }),
-                ...(d.description !== undefined && { description: d.description }),
-                updatedAt: event.ts,
-              }
-            : t,
-        ),
-      }
+      return updateTask(state, taskId, (t) => ({
+        ...t,
+        ...(d.agent !== undefined && { agent: d.agent }),
+        ...(d.description !== undefined && { description: d.description }),
+        updatedAt: event.ts,
+      }))
     }
 
     default:

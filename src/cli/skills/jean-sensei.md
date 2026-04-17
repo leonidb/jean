@@ -106,7 +106,13 @@ infra(method="POST",  path="/tasks",
       body={"title":"...","description":"...","queue":"<agent>","actor":"sensei"})
 infra(method="PATCH", path="/tasks/<id>/status",
       body={"status":"assigned"})          // todo → assigned → in-progress ↔ waiting → done
+infra(method="POST",  path="/tasks/<id>/revert",
+      body={"actor":"sensei"})             // undo — pops the most recent status change (e.g. done → in-progress)
 ```
+
+If you mark a task to a wrong status, use `revert` to pop back. It bypasses the forward DAG
+(so `done → in-progress` is only possible this way) and records a distinct `task-reverted`
+event so history shows the correction was intentional. Repeat to unwind multiple steps.
 
 Messaging:
 ```

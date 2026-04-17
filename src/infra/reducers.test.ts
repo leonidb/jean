@@ -16,6 +16,7 @@ import {
   playbookReducer,
   SYSTEM_STREAM,
   type TaskCreatedData,
+  type TaskRevertedData,
   type TaskStatusData,
   type TaskUpdatedData,
   TRIGGERS_STREAM,
@@ -64,6 +65,31 @@ describe('boardReducer', () => {
     } satisfies TaskStatusData)
     const board = boardReducer(boardReducer(empty, e1), e2)
     expect(board.tasks[0]?.status).toBe('in-progress')
+  })
+
+  test('task-reverted sets status to `to`, bypassing the DAG', () => {
+    const e1 = makeEvent(1, 'task-created', taskStream('001'), {
+      title: 'T',
+      description: '',
+      queue: 'q',
+    } satisfies TaskCreatedData)
+    const e2 = makeEvent(2, 'task-status', taskStream('001'), {
+      from: 'todo',
+      to: 'in-progress',
+    } satisfies TaskStatusData)
+    const e3 = makeEvent(3, 'task-status', taskStream('001'), {
+      from: 'in-progress',
+      to: 'done',
+    } satisfies TaskStatusData)
+    // `done → in-progress` is forbidden by canTransition, but task-reverted bypasses that.
+    const e4 = makeEvent(4, 'task-reverted', taskStream('001'), {
+      from: 'done',
+      to: 'in-progress',
+      actor: 'cli',
+    } satisfies TaskRevertedData)
+    const board = [e1, e2, e3, e4].reduce(boardReducer, empty)
+    expect(board.tasks[0]?.status).toBe('in-progress')
+    expect(board.tasks[0]?.updatedAt).toBe(e4.ts)
   })
 
   test('task-updated updates fields', () => {
