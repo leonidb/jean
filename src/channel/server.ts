@@ -17,11 +17,17 @@ import { dirname, resolve } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import type { DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
+import type { AgentRole, DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 import { findDojoFrom, readRuntimeFiles } from '../probe.ts'
+import { buildInstructions, buildTools } from './tools.ts'
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
-const AGENT_ROLE = process.env.JEAN_ROLE ?? 'worker'
+const AGENT_ROLE: AgentRole = ((): AgentRole => {
+  const raw = process.env.JEAN_ROLE ?? 'worker'
+  if (raw === 'sensei' || raw === 'worker' || raw === 'user') return raw
+  process.stderr.write(`[jean] JEAN_ROLE="${raw}" is not a known role — falling back to worker\n`)
+  return 'worker'
+})()
 
 /** Locate dojo root: JEAN_DOJO env var (validated) > walk up from cwd. */
 function discoverDojoRoot(): string | null {
@@ -86,82 +92,14 @@ const mcp = new Server(
   { name: 'jean', version: '0.1.0' },
   {
     capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
-    instructions:
-      AGENT_ROLE === 'sensei'
-        ? [
-            `You are the sensei (orchestrator) in the Jean system, agent "${AGENT_NAME}".`,
-            `When you receive any message from Jean, FIRST load the jean-sensei skill, then follow its instructions.`,
-            `Use the \`send\` tool to message agents and channels. Use the \`infra\` tool for all other API calls (board, tasks, triggers, playbooks, events).`,
-            `The \`reply\` tool is ONLY for reporting to the human who invoked you directly.`,
-          ].join('\n')
-        : [
-            `You are connected to the Jean orchestration system as agent "${AGENT_NAME}".`,
-            `Messages from the orchestrator arrive as <channel source="jean" ...> tags.`,
-            `Use the reply tool to send messages back to the orchestrator.`,
-            `When you finish a task or get stuck, just stop — the orchestrator will check on you.`,
-          ].join('\n'),
+    instructions: buildInstructions(AGENT_ROLE, AGENT_NAME),
   },
 )
 
 // ── Tools ──────────────────────────────────────────────────────────
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: 'reply',
-      description:
-        'Send a message to the orchestrator through the Jean channel. ' +
-        'Use this to report progress, ask questions, or share results.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          text: { type: 'string', description: 'The message to send to the orchestrator' },
-        },
-        required: ['text'],
-      },
-    },
-    {
-      name: 'send',
-      description:
-        'Send a message to another agent or channel in the Jean system. ' +
-        'Use this instead of curl for all agent-to-agent and agent-to-channel messaging. ' +
-        'The `from` field is always set to your own agent name — you cannot spoof it.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          to: { type: 'string', description: 'Target agent or channel name' },
-          text: { type: 'string', description: 'Message body' },
-          taskId: { type: 'string', description: 'Optional task ID to scope the message to a task' },
-        },
-        required: ['to', 'text'],
-      },
-    },
-    {
-      name: 'infra',
-      description:
-        'Call the Jean infrastructure HTTP API. Use this instead of curl for board, tasks, triggers, events, playbooks, permissions. ' +
-        'Path must start with "/" (e.g. "/board", "/tasks", "/triggers"). ' +
-        'Responses above ~48KB are truncated — always paginate large endpoints (e.g. "/history?last=20").',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          method: {
-            type: 'string',
-            enum: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
-            description: 'HTTP method',
-          },
-          path: {
-            type: 'string',
-            description: 'API path starting with "/" — e.g. "/board" or "/tasks/001/status"',
-          },
-          body: {
-            description: 'Optional JSON body for POST/PATCH/PUT. Pass a structured object, not a string.',
-          },
-        },
-        required: ['method', 'path'],
-      },
-    },
-  ],
+  tools: buildTools(AGENT_ROLE),
 }))
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {

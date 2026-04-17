@@ -379,6 +379,22 @@ describe('WS send message', () => {
     expect(hist.events.some((e) => e.type === 'send' && e.data?.text === 'should not route')).toBe(false)
     ws.close()
   })
+
+  test('ws reply from sensei is dropped — no reply or send event recorded', async () => {
+    const { ws } = await connectAgent('reply-drop-sensei', 'sensei')
+
+    const marker = 'sensei reply that should be black-holed'
+    ws.send(JSON.stringify({ type: 'reply', from: 'reply-drop-sensei', text: marker }))
+    await Bun.sleep(150)
+
+    const hist = (await (await fetch(`${BASE}/history?last=30`)).json()) as {
+      events: Array<{ type: string; data: Record<string, unknown> }>
+    }
+    expect(hist.events.some((e) => e.type === 'reply' && e.data?.text === marker)).toBe(false)
+    expect(hist.events.some((e) => e.type === 'send' && e.data?.text === marker)).toBe(false)
+
+    ws.close()
+  })
 })
 
 describe('board persistence', () => {

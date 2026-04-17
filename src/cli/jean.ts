@@ -886,6 +886,7 @@ function cmdAgent(args: string[]) {
 // ── Agent helpers ─────────────────────────────────────────────────
 
 import type { AgentRole } from '../infra/protocol.ts'
+import { defaultPermissions } from './permissions.ts'
 
 type AgentMeta = { name: string; tags: string[]; role: AgentRole }
 type AgentInfo = AgentMeta & { path: string; branch?: string }
@@ -1147,15 +1148,6 @@ function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
   console.log(
     `\n${DIM}Or manually: cd ${targetPath} && claude ${agentLaunchFlags(targetPath)} --dangerously-load-development-channels server:jean${RESET}`,
   )
-}
-
-function defaultPermissions(role: AgentRole): string[] {
-  const base = ['mcp__jean__reply']
-  if (role === 'sensei') {
-    return [...base, 'Read', 'Glob', 'Grep', 'Bash(curl:*)', 'Bash(git:*)']
-  }
-  // worker and user
-  return [...base, 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git:*)']
 }
 
 function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: string[], dojoRoot: string) {

@@ -1245,18 +1245,15 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
           case 'reply': {
             const sender = agents.get(msg.from)
+            if (sender?.role === 'sensei') {
+              process.stderr.write(
+                `[jean] dropping reply from sensei ${msg.from} — sensei must use send with an explicit recipient\n`,
+              )
+              break
+            }
             const taskId = inferTaskId(msg.from)
             const stream = taskId ? taskStream(taskId) : agentStream(msg.from)
-            if (sender?.role !== 'sensei') {
-              void record('reply', stream, { agent: msg.from, text: msg.text } satisfies ReplyData)
-            } else {
-              void record('send', stream, {
-                agent: msg.from,
-                from: msg.from,
-                text: msg.text,
-                delivered: true,
-              } satisfies SendData)
-            }
+            void record('reply', stream, { agent: msg.from, text: msg.text } satisfies ReplyData)
             break
           }
 
