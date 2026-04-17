@@ -206,13 +206,13 @@ describe('pendingReducer', () => {
     expect(state.length).toBe(1)
   })
 
-  test('worker agent-idle adds to pending', () => {
+  test('worker agent-idle does NOT add to pending (idle is diagnostic-only)', () => {
     const e = makeEvent(1, 'agent-idle', agentStream('scratch'), {
       agent: 'scratch',
       role: 'worker',
     } satisfies AgentIdleData)
     const state = pendingReducer([], e)
-    expect(state.length).toBe(1)
+    expect(state.length).toBe(0)
   })
 
   test('sensei agent-idle does NOT add to pending', () => {
@@ -222,6 +222,16 @@ describe('pendingReducer', () => {
     } satisfies AgentIdleData)
     const state = pendingReducer([], e)
     expect(state.length).toBe(0)
+  })
+
+  test('worker task-comment adds to pending (curated, replaces idle as the wake signal)', () => {
+    const e = makeEvent(1, 'task-comment', taskStream('001'), {
+      agent: 'scratch',
+      role: 'worker',
+      text: 'finding: X',
+    })
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(1)
   })
 
   test('ack removes events by ID', () => {

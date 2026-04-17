@@ -263,11 +263,8 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
       return [...state, event]
     }
 
-    case 'agent-idle': {
-      const d = event.data as AgentIdleData
-      if (d.role === 'sensei') return state
-      return [...state, event]
-    }
+    // agent-idle deliberately NOT in pending: idle is diagnostic only. Workers signal meaningful
+    // progress via reply/task-comment — those wake the sensei. Stop-hook firings don't.
 
     case 'ack': {
       const d = event.data as AckData

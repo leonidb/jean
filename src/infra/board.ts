@@ -7,6 +7,15 @@
 
 // ── Types ──────────────────────────────────────────────────────────
 
+/**
+ * Task lifecycle states.
+ * - `todo`: created, not yet dispatched.
+ * - `assigned`: claimed by a worker but not started.
+ * - `in-progress`: worker is actively holding the task. The only status that implies the worker's session is busy.
+ * - `waiting`: paused for external input (human answer, API response, time). The worker is NOT busy on this task;
+ *   it can be idle or working on something else. Server-side busy/idle derivation must not count `waiting` as busy.
+ * - `done`, `cancelled`: terminal.
+ */
 export type TaskStatus = 'todo' | 'assigned' | 'in-progress' | 'waiting' | 'done' | 'cancelled'
 
 export type Task = {

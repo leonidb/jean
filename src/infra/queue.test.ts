@@ -80,7 +80,7 @@ describe('event queue', () => {
     ws.close()
   })
 
-  test('agent idle creates a queued event', async () => {
+  test('agent idle does NOT create a queued event (diagnostic-only) but IS recorded in history', async () => {
     const { ws } = await connectAgent('idle-worker')
 
     await fetch(`${BASE}/agent-idle`, {
@@ -89,9 +89,17 @@ describe('event queue', () => {
       body: JSON.stringify({ agent: 'idle-worker' }),
     })
 
-    const res = await fetch(`${BASE}/events/pending?agent=idle-worker`)
-    const data = (await res.json()) as { events: Array<{ type: string; agent: string }> }
-    expect(data.events.some((e) => e.type === 'agent-idle')).toBe(true)
+    // Not in pending — idle no longer wakes the sensei
+    const pendingRes = await fetch(`${BASE}/events/pending?agent=idle-worker`)
+    const pending = (await pendingRes.json()) as { events: Array<{ type: string }> }
+    expect(pending.events.some((e) => e.type === 'agent-idle')).toBe(false)
+
+    // But still recorded in history for diagnostic/observability purposes
+    const histRes = await fetch(`${BASE}/history`)
+    const hist = (await histRes.json()) as {
+      events: Array<{ type: string; data: Record<string, unknown> }>
+    }
+    expect(hist.events.some((e) => e.type === 'agent-idle' && e.data?.agent === 'idle-worker')).toBe(true)
 
     ws.close()
   })
@@ -279,7 +287,7 @@ describe('sensei nudge', () => {
     sensei.close()
   })
 
-  test('worker going idle creates actionable event', async () => {
+  test('worker going idle records diagnostically but is NOT actionable (no pending)', async () => {
     const { ws: worker } = await connectAgent('idle-actionable-worker')
 
     await fetch(`${BASE}/agent-idle`, {
@@ -288,9 +296,15 @@ describe('sensei nudge', () => {
       body: JSON.stringify({ agent: 'idle-actionable-worker' }),
     })
 
-    const res = await fetch(`${BASE}/events?agent=idle-actionable-worker`)
-    const data = (await res.json()) as { events: Array<{ type: string }> }
-    expect(data.events.some((e) => e.type === 'agent-idle')).toBe(true)
+    // /events (pending) should not include the idle
+    const pendingRes = await fetch(`${BASE}/events?agent=idle-actionable-worker`)
+    const pending = (await pendingRes.json()) as { events: Array<{ type: string }> }
+    expect(pending.events.some((e) => e.type === 'agent-idle')).toBe(false)
+
+    // But /history does
+    const histRes = await fetch(`${BASE}/history`)
+    const hist = (await histRes.json()) as { events: Array<{ type: string; agent: string }> }
+    expect(hist.events.some((e) => e.type === 'agent-idle' && e.agent === 'idle-actionable-worker')).toBe(true)
 
     worker.close()
   })

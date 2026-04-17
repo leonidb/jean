@@ -112,7 +112,6 @@ const pendingProjection = createProjection<PendingState>({
     types: [
       'reply',
       'task-comment',
-      'agent-idle',
       'task-created',
       'trigger-fired',
       'playbook-created',
@@ -1281,8 +1280,9 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
             ws.data.agent = msg.agent
             ws.data.role = msg.role
+            // Only `in-progress` counts as busy (see TaskStatus doc in board.ts — `waiting` is paused, not active).
             const hasActiveTask = boardProjection.state.tasks.some(
-              (t) => t.agent === msg.agent && (t.status === 'in-progress' || t.status === 'waiting'),
+              (t) => t.agent === msg.agent && t.status === 'in-progress',
             )
             const idle = !hasActiveTask
             const sessionId = msg.sessionId

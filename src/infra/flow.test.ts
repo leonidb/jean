@@ -166,7 +166,7 @@ describe('full lifecycle', () => {
     const replyEvents = (await replyPending.json()) as { events: Array<{ type: string; data: { text: string } }> }
     expect(replyEvents.events.some((e) => e.type === 'reply' && e.data.text === 'Task complete. All good.')).toBe(true)
 
-    // 9. Worker goes idle
+    // 9. Worker goes idle — recorded diagnostically in history, NOT added to pending
     await fetch(`${BASE}/agent-idle`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -175,7 +175,11 @@ describe('full lifecycle', () => {
     await Bun.sleep(100)
     const idlePending = await fetch(`${BASE}/events/pending?agent=flow-worker`)
     const idleEvents = (await idlePending.json()) as { events: Array<{ type: string }> }
-    expect(idleEvents.events.some((e) => e.type === 'agent-idle')).toBe(true)
+    expect(idleEvents.events.some((e) => e.type === 'agent-idle')).toBe(false)
+    const idleHist = (await (await fetch(`${BASE}/history`)).json()) as {
+      events: Array<{ type: string; agent: string }>
+    }
+    expect(idleHist.events.some((e) => e.type === 'agent-idle' && e.agent === 'flow-worker')).toBe(true)
 
     // 10. Signal sensei idle → gets nudged again
     // Reset sensei messages to track new nudge
@@ -491,6 +495,42 @@ describe('WS send message', () => {
       .slice(baseline)
       .find((m): m is DeliverMsg => isDeliver(m) && m.from === 'infra' && m.text.includes('Events pending'))
     expect(nudge).toBeUndefined()
+
+    ws.close()
+  })
+})
+
+describe('idle state derivation', () => {
+  test('worker with a waiting-status task registers as idle (waiting = paused, not busy)', async () => {
+    // Create a task and move it through assigned → in-progress → waiting
+    const createRes = await fetch(`${BASE}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Waiting task', description: '', queue: 'waiting-worker' }),
+    })
+    const task = (await createRes.json()) as { id: string }
+
+    await fetch(`${BASE}/tasks/${task.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: 'waiting-worker' }),
+    })
+    for (const status of ['assigned', 'in-progress', 'waiting']) {
+      await fetch(`${BASE}/tasks/${task.id}/status`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+    }
+
+    // Now register a new worker session under that name — the task's in `waiting`, so the worker should be idle.
+    const { ws } = await connectAgent('waiting-worker', 'worker')
+    const data = (await (await fetch(`${BASE}/agents`)).json()) as {
+      agents: Array<{ name: string; role: string; idle: boolean }>
+    }
+    const entry = data.agents.find((a) => a.name === 'waiting-worker')
+    expect(entry).toBeDefined()
+    expect(entry?.idle).toBe(true)
 
     ws.close()
   })
