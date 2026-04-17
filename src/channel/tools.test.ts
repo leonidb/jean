@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { buildInfraTool, buildInstructions, buildTools, REPLY_TOOL, SEND_TOOL } from './tools.ts'
+import { buildInfraTool, buildInstructions, buildTools, REPLY_TOOL, resolveReplyTaskId, SEND_TOOL } from './tools.ts'
 
 describe('buildTools', () => {
   test('sensei gets send + infra, no reply', () => {
@@ -49,14 +49,44 @@ describe('buildInfraTool', () => {
 })
 
 describe('tool shapes', () => {
-  test('reply requires text only', () => {
+  test('reply requires text only; taskId is optional', () => {
     expect(REPLY_TOOL.inputSchema.required).toEqual(['text'])
     expect(propsOf(REPLY_TOOL).text).toBeDefined()
+    expect(propsOf(REPLY_TOOL).taskId).toBeDefined()
   })
 
   test('send requires to and text, taskId optional', () => {
     expect(SEND_TOOL.inputSchema.required).toEqual(['to', 'text'])
     expect(propsOf(SEND_TOOL).taskId).toBeDefined()
+  })
+})
+
+describe('resolveReplyTaskId', () => {
+  test('explicit arg wins over the last-deliver fallback', () => {
+    expect(resolveReplyTaskId({ taskId: '020' }, '018')).toBe('020')
+  })
+
+  test('falls back to last-deliver when no explicit arg', () => {
+    expect(resolveReplyTaskId({}, '018')).toBe('018')
+  })
+
+  test('trims whitespace around explicit arg', () => {
+    expect(resolveReplyTaskId({ taskId: '  020  ' }, '018')).toBe('020')
+  })
+
+  test('empty-string explicit is ignored (falls back)', () => {
+    expect(resolveReplyTaskId({ taskId: '' }, '018')).toBe('018')
+    expect(resolveReplyTaskId({ taskId: '   ' }, '018')).toBe('018')
+  })
+
+  test('non-string explicit is ignored', () => {
+    expect(resolveReplyTaskId({ taskId: 42 }, '018')).toBe('018')
+    expect(resolveReplyTaskId({ taskId: null }, '018')).toBe('018')
+  })
+
+  test('returns undefined when neither source has a value', () => {
+    expect(resolveReplyTaskId({}, undefined)).toBeUndefined()
+    expect(resolveReplyTaskId({ taskId: '' }, undefined)).toBeUndefined()
   })
 })
 

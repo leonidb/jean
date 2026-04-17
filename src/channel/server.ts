@@ -19,7 +19,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { AgentRole, DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
 import { findDojoFrom, readRuntimeFiles } from '../probe.ts'
-import { buildInstructions, buildTools } from './tools.ts'
+import { buildInstructions, buildTools, resolveReplyTaskId } from './tools.ts'
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE: AgentRole = ((): AgentRole => {
@@ -113,11 +113,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         isError: true,
       }
     }
+    const taskId = resolveReplyTaskId(args, lastDeliverTaskId)
 
-    sendToInfra({ type: 'reply', from: AGENT_NAME, text: text.trim() })
+    sendToInfra({ type: 'reply', from: AGENT_NAME, text: text.trim(), ...(taskId && { taskId }) })
 
     return {
-      content: [{ type: 'text' as const, text: `Sent to orchestrator.` }],
+      content: [{ type: 'text' as const, text: `Sent to orchestrator${taskId ? ` (task ${taskId})` : ''}.` }],
     }
   }
 
@@ -199,6 +200,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+/** Most recent deliver's taskId — attached to outbound replies so the server doesn't have to infer it. */
+let lastDeliverTaskId: string | undefined
 
 function deliver(from: string, text: string, meta: Record<string, string> = {}) {
   void mcp.notification({
@@ -244,6 +247,7 @@ function connectToInfra() {
             break
 
           case 'deliver':
+            if (msg.taskId) lastDeliverTaskId = msg.taskId
             deliver(msg.from, msg.text, msg.taskId ? { taskId: msg.taskId } : {})
             break
         }

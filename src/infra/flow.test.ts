@@ -274,11 +274,10 @@ describe('history', () => {
       body: JSON.stringify({ status: 'in-progress' }),
     })
 
-    // Worker replies — taskId should be inferred
+    // Worker replies without an explicit taskId — server falls back to inference (legacy path)
     ws.send(JSON.stringify({ type: 'reply', from: 'infer-worker', text: 'inferred reply' }))
     await Bun.sleep(200)
 
-    // Check pending events — the reply should have the taskId
     const res = await fetch(`${BASE}/events?agent=infer-worker`)
     const data = (await res.json()) as {
       events: Array<{ type: string; taskId?: string; data: Record<string, unknown> }>
@@ -286,6 +285,62 @@ describe('history', () => {
     const reply = data.events.find((e) => e.type === 'reply' && e.data?.text === 'inferred reply')
     expect(reply).toBeDefined()
     expect(reply?.taskId).toBe(task.id)
+
+    ws.close()
+  })
+
+  test('worker reply with explicit taskId stamps that task, overriding inference', async () => {
+    // Create two in-progress tasks for the SAME worker — this is the scenario where inference goes wrong.
+    const { ws } = await connectAgent('multi-task-worker', 'worker')
+
+    const createA = await fetch(`${BASE}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Older task A', description: '', queue: 'multi-task-worker' }),
+    })
+    const taskA = (await createA.json()) as { id: string }
+    for (const status of ['assigned', 'in-progress']) {
+      await fetch(`${BASE}/tasks/${taskA.id}/status`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+    }
+
+    const createB = await fetch(`${BASE}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Newer task B', description: '', queue: 'multi-task-worker' }),
+    })
+    const taskB = (await createB.json()) as { id: string }
+    for (const status of ['assigned', 'in-progress']) {
+      await fetch(`${BASE}/tasks/${taskB.id}/status`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+    }
+
+    // Worker replies to task B *explicitly*. Without this fix, inference would stamp task A (first match).
+    ws.send(
+      JSON.stringify({
+        type: 'reply',
+        from: 'multi-task-worker',
+        text: 'about task B specifically',
+        taskId: taskB.id,
+      }),
+    )
+    await Bun.sleep(200)
+
+    const histRes = await fetch(`${BASE}/history?taskId=${taskB.id}`)
+    const hist = (await histRes.json()) as { events: Array<{ type: string; data: { text?: string } }> }
+    expect(hist.events.some((e) => e.type === 'reply' && e.data?.text === 'about task B specifically')).toBe(true)
+
+    // And crucially, task A's history should NOT have this reply.
+    const histA = (await (await fetch(`${BASE}/history?taskId=${taskA.id}`)).json()) as {
+      events: Array<{ type: string; data: { text?: string } }>
+    }
+    expect(histA.events.some((e) => e.type === 'reply' && e.data?.text === 'about task B specifically')).toBe(false)
 
     ws.close()
   })

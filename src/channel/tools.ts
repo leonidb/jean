@@ -11,11 +11,18 @@ export const REPLY_TOOL: Tool = {
   name: 'reply',
   description:
     'Send a message to the orchestrator through the Jean channel. ' +
-    'Use this to report progress, ask questions, or share results.',
+    'Use this to report progress, ask questions, or share results. ' +
+    'The reply is automatically attributed to the task of the most recent incoming message; ' +
+    'pass `taskId` explicitly only when responding to an older or different task.',
   inputSchema: {
     type: 'object',
     properties: {
       text: { type: 'string', description: 'The message to send to the orchestrator' },
+      taskId: {
+        type: 'string',
+        description:
+          'Optional — overrides the auto-attached taskId when you are replying to a task other than the most recent one',
+      },
     },
     required: ['text'],
   },
@@ -93,6 +100,16 @@ export function buildInfraTool(role: AgentRole): Tool {
 export function buildTools(role: AgentRole): Tool[] {
   if (role === 'sensei') return [SEND_TOOL, buildInfraTool(role)]
   return [REPLY_TOOL, buildInfraTool(role)]
+}
+
+/** Resolve the taskId to attach to a reply tool call. Explicit arg wins; fall back to the most recent deliver's taskId. Empty/non-string explicit is ignored. */
+export function resolveReplyTaskId(
+  args: Record<string, unknown>,
+  lastDeliverTaskId: string | undefined,
+): string | undefined {
+  const raw = args.taskId
+  const explicit = typeof raw === 'string' ? raw.trim() : ''
+  return explicit || lastDeliverTaskId
 }
 
 /** System prompt wired into the MCP server's `instructions` field. */

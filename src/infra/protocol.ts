@@ -17,11 +17,12 @@ export type RegisterMsg = {
   tags?: string[]
 }
 
-/** Agent sends a reply (via the `reply` tool in the channel plugin) */
+/** Agent sends a reply (via the `reply` tool in the channel plugin). `taskId` flows through from the deliver being replied to. */
 export type ReplyMsg = {
   type: 'reply'
   from: string
   text: string
+  taskId?: string
 }
 
 /** Agent sends a message to another agent/channel (via the `send` tool). `from` is overridden to the connected agent. */

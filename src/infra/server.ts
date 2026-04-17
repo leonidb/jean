@@ -1324,7 +1324,8 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
               )
               break
             }
-            const taskId = inferTaskId(msg.from)
+            // Prefer taskId carried on the message (flowed through from deliver); fall back to inference for legacy clients.
+            const taskId = msg.taskId ?? inferTaskId(msg.from)
             const stream = taskId ? taskStream(taskId) : agentStream(msg.from)
             void record('reply', stream, { agent: msg.from, text: msg.text } satisfies ReplyData)
             break
