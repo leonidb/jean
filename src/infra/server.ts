@@ -312,11 +312,10 @@ function pendingByAgent(): Record<string, number> {
 
 // ── Sensei nudge ──────────────────────────────────────────────────
 
-function nudgeSenseiIfIdle(force = false) {
-  if (!config.autoNudge) return
+function nudgeSenseiIfIdle() {
   const sensei = findSensei()
   if (!sensei?.idle) return
-  if (!force && pendingProjection.state.length === 0) return
+  if (pendingProjection.state.length === 0) return
 
   sensei.idle = false
   sensei.deliver({
@@ -387,14 +386,6 @@ async function fireTrigger(trigger: Trigger) {
     agent: trigger.agent,
     prompt: trigger.prompt,
   } satisfies TriggerFiredData)
-
-  // autoNudge=false: suppress delivery to a sensei target. trigger-fired still records.
-  if (!config.autoNudge && agents.get(trigger.agent)?.role === 'sensei') {
-    process.stderr.write(
-      `[jean] trigger ${trigger.id} fired — skipping delivery to sensei "${trigger.agent}" (autoNudge=false)\n`,
-    )
-    return
-  }
 
   const delivered = deliverToAgent(trigger.agent, {
     type: 'deliver',
@@ -1315,20 +1306,9 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
                   text: 'You just connected. Check the board and events to get up to date.',
                 })
               }, 500)
-            } else if (idle) {
-              if (pendingProjection.state.length > 0) {
-                nudgeSenseiIfIdle()
-              } else {
-                const hasWork = boardProjection.state.tasks.some(
-                  (t) =>
-                    t.status === 'todo' ||
-                    t.status === 'assigned' ||
-                    t.status === 'in-progress' ||
-                    t.status === 'waiting',
-                )
-                if (hasWork) nudgeSenseiIfIdle(true)
-              }
             }
+            // Worker/user register events enter pending via the reducer; the post-record nudge
+            // in record() wakes the sensei if idle. No explicit nudge needed here.
             break
           }
 

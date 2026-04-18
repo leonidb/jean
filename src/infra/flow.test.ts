@@ -15,7 +15,7 @@ beforeAll(async () => {
   } catch {}
   mkdirSync(DATA_DIR, { recursive: true })
   server = Bun.spawn(['bun', 'run', 'src/infra/server.ts'], {
-    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_DATA_DIR: DATA_DIR, JEAN_AUTO_NUDGE: 'true' },
+    env: { ...process.env, JEAN_PORT: String(TEST_PORT), JEAN_DATA_DIR: DATA_DIR },
     stdout: 'ignore',
     stderr: 'pipe',
   })

@@ -8,9 +8,8 @@ import { resolve } from 'node:path'
 
 // ── Schema ──────────────────────────────────────────────────────
 
-export const CONFIG_SCHEMA: Record<string, 'string' | 'number' | 'boolean'> = {
+export const CONFIG_SCHEMA: Record<string, 'string' | 'number'> = {
   port: 'number',
-  autoNudge: 'boolean',
   'slack.appToken': 'string',
   'slack.botToken': 'string',
   'slack.channel': 'string',
@@ -18,15 +17,6 @@ export const CONFIG_SCHEMA: Record<string, 'string' | 'number' | 'boolean'> = {
 
 export type JeanConfig = {
   port?: number
-  /**
-   * When true, the sensei receives autonomous channel deliveries:
-   * - `nudgeSenseiIfIdle()` pings on pending events (worker-idle, reply, task-created, trigger-fired, …)
-   * - cron/one-off triggers whose target is the sensei get delivered
-   * When false (default), those pings are skipped — events still record, triggers still fire,
-   * but the sensei only wakes on explicit `jean send sensei "..."` invocation. Worker-targeting
-   * triggers are unaffected either way.
-   */
-  autoNudge?: boolean
   slack?: {
     appToken?: string
     botToken?: string
@@ -97,11 +87,6 @@ export function parseConfigValue(key: string, raw: string): { value: unknown } |
     if (Number.isNaN(n)) return { error: `${key} must be a number` }
     return { value: n }
   }
-  if (type === 'boolean') {
-    if (raw === 'true' || raw === '1') return { value: true }
-    if (raw === 'false' || raw === '0') return { value: false }
-    return { error: `${key} must be true or false` }
-  }
   return { value: raw }
 }
 
@@ -113,9 +98,6 @@ export function resolveConfig(dataDir: string): JeanConfig {
   if (process.env.JEAN_PORT) {
     const p = Number(process.env.JEAN_PORT)
     if (!Number.isNaN(p)) config.port = p
-  }
-  if (process.env.JEAN_AUTO_NUDGE) {
-    config.autoNudge = process.env.JEAN_AUTO_NUDGE === 'true' || process.env.JEAN_AUTO_NUDGE === '1'
   }
   if (process.env.SLACK_APP_TOKEN || process.env.SLACK_BOT_TOKEN || process.env.SLACK_CHANNEL) {
     config.slack ??= {}

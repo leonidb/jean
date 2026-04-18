@@ -231,20 +231,21 @@ Alternatives considered:
 
 Why message-thread attribution won: the `taskId` is already known at deliver time (sensei set it when dispatching). The plugin carries it forward through to the reply. Explicit override handles multi-task cases cleanly. Legacy inference stays as fallback for older clients; removed once rollout is complete.
 
-## 19. Autonomous sensei wake-ups: opt-in via `autoNudge` config
+## 19. Autonomous sensei wake-ups: always on; noise control at the event source
 
-**Chosen: `autoNudge: boolean` config flag, default `false`.**
+**Chosen: no config flag. Any event that enters `pending` wakes an idle sensei; any trigger targeting the sensei delivers.**
 
-Two code paths pull the sensei in without explicit human action — `nudgeSenseiIfIdle()` (fires on every pending-bucket event) and `fireTrigger()` (cron/one-off targeting the sensei). Both now no-op when `autoNudge` is false.
+Prior iteration introduced `autoNudge: boolean` (default `false`) to suppress autonomous wake-ups, on the theory that an unreliable sensei does net damage when woken too often.
 
-Prior state: both paths fired unconditionally; sensei got pulled in many times per hour in a working dojo.
+Why that was reverted (2026-04-18): with the gate off, the sensei never saw Slack inbound (`reply` from the Slack channel-agent), never saw worker join/leave (added to `pending` by decision #75), never saw trigger fires that targeted it. Every legitimate signal was also blocked. The gate had no way to distinguish "noisy" from "needed."
 
-Alternatives considered:
-- **Keep nudges on by default**: rejected. When the sensei is unreliable, autonomous wake-ups do net damage (sticky `done` marks, misattributed replies, wasted tokens). Autonomy cost > value until the sensei is trusted.
-- **Gate specific triggers instead of a global switch**: rejected as too granular. Users who want autonomy want it all; users who don't want it all off.
-- **Turn off at the Stop-hook level**: rejected. Stop hooks are agent-side; the server should control its own nudge policy.
+The actual noise source was agent-idle Stop-hook firings. Those were removed from `pending` at the reducer level (decision #21) — the noise is gone, so the gate is guarding nothing useful.
 
-Why opt-in default-off won: shrinks Jean's blast radius. Explicit `jean send sensei "..."` still works — sensei is a tool you call, not an agent that calls you. Worker-targeting triggers are unaffected (cron data-pulls still fire). Flip the flag when the sensei is reliable again.
+Alternatives re-examined:
+- **Keep `autoNudge` but change default to `true`**: rejected. The knob still lets users re-break themselves with a config mistake; no real signal would come from leaving it off.
+- **Gate per-event-type (e.g. wake on `register` but not on `reply`)**: rejected as premature. No evidence that any pending-eligible event is the wrong wake source today. If replies become noisy again, the right fix is debouncing (batch within N seconds), not a binary kill switch.
+
+What stays: the set of events that enter `pending` is the policy. Adding an event to pending means "sensei should see this." Removing one means "diagnostic only" (the agent-idle treatment). No global override.
 
 ## 20. Task reverts: `task-reverted` event, not DAG backward edges
 
