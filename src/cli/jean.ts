@@ -714,25 +714,19 @@ function readSkillTemplate(name: string): string {
   return readFileSync(resolve(cliDir(), 'skills', `${name}.md`), 'utf8')
 }
 
-/** Ship framework skills into a role's skill directory */
-function shipRoleSkills(jeanDir: string, role: AgentRole, skillNames: string[]) {
-  const roleSkillBase = resolve(jeanDir, 'roles', role, '.claude', 'skills')
-  for (const name of skillNames) {
-    const skillDir = resolve(roleSkillBase, name)
-    mkdirSync(skillDir, { recursive: true })
-    writeFileSync(resolve(skillDir, 'SKILL.md'), readSkillTemplate(name))
-  }
-}
-
-const FRAMEWORK_SKILLS: Record<AgentRole, string[]> = {
+const FRAMEWORK_SKILLS: Partial<Record<AgentRole, string[]>> = {
   sensei: ['create-playbook', 'jean-sensei'],
   worker: ['jean-worker'],
-  user: [],
 }
 
 function shipFrameworkSkills(jeanDir: string) {
-  for (const role of Object.keys(FRAMEWORK_SKILLS) as AgentRole[]) {
-    shipRoleSkills(jeanDir, role, FRAMEWORK_SKILLS[role])
+  for (const [role, names] of Object.entries(FRAMEWORK_SKILLS)) {
+    if (!names) continue
+    for (const name of names) {
+      const skillDir = resolve(jeanDir, 'roles', role, '.claude', 'skills', name)
+      mkdirSync(skillDir, { recursive: true })
+      writeFileSync(resolve(skillDir, 'SKILL.md'), readSkillTemplate(name))
+    }
   }
 }
 
@@ -930,6 +924,8 @@ function cmdAgent(args: string[]) {
 import type { AgentRole } from '../infra/protocol.ts'
 import { defaultPermissions } from './permissions.ts'
 
+const AGENT_ROLES: readonly AgentRole[] = ['worker', 'sensei', 'user']
+
 type AgentMeta = { name: string; tags: string[]; role: AgentRole }
 type AgentInfo = AgentMeta & { path: string; branch?: string }
 
@@ -1049,9 +1045,8 @@ function isWorktreeDirty(path: string): boolean {
 function cmdAgentAdd(args: string[]) {
   const existingMode = args.includes('--existing')
 
-  const VALID_ROLES = new Set(['worker', 'sensei', 'user'])
   const roleStr = flagValue(args, '--role') ?? 'worker'
-  if (!VALID_ROLES.has(roleStr)) {
+  if (!(AGENT_ROLES as readonly string[]).includes(roleStr)) {
     console.error(`Invalid role "${roleStr}". Must be: worker, sensei, or user.`)
     process.exit(1)
   }
