@@ -183,3 +183,124 @@ agent/
 **Why worktrees over clones:** Industry research (Apr 2026) showed cloud systems use VMs/containers, local systems use worktrees. Nobody uses full clones for multi-agent setups. Worktrees are lighter (shared object store), faster to create, and provide instant branch visibility. Clones sit in an awkward middle — heavier than worktrees, less isolated than containers. If isolation needs grow beyond worktrees, the upgrade path is containers.
 
 **Launch:** `cd <agent> && claude --add-dir work --add-dir ../../.jean --add-dir ../../.jean/roles/<role> ...`
+
+## 16. Agent tool surfaces: role-scoped MCP toolsets
+
+**Chosen: per-role tool lists — sensei and workers get different MCP tools, not the same set.**
+
+- Sensei: `send` + `comment` + `infra` (no `reply`).
+- Worker/user: `reply` + `comment` + `infra` (GET-only, no `send`).
+
+Prior state: both roles shared `reply`; sensei also shelled out via `Bash(curl:*)` for state changes.
+
+Alternatives considered:
+- **Keep sensei's `reply` and auto-route it**: rejected because `reply` has no recipient, so routing requires inference ("reply to who?"). Previous implementation silently recorded a fake `send` event with `delivered: true` but no actual delivery — the Slack black hole.
+- **Workers get full `infra` including writes**: rejected. Workers orchestrating state changes violates the "sensei orchestrates, workers do" boundary. Workers can request changes via `reply` to the sensei.
+- **Sensei uses curl, no MCP tools**: rejected. Curl hits Claude Code's sandbox heuristics ("expansion obfuscation") on JSON heredocs, blocking autonomous/triggered flows with permission prompts.
+
+Why role-scoped MCP won: each role's available actions match its responsibilities. Send forces an explicit recipient (no more black holes). Workers get lookup without write authority. Tool schemas are role-aware at `ListTools` time — GET-only enum for workers is declared in the schema, enforced at runtime too.
+
+## 17. Task event tiers: `task-comment` (curated) vs `reply`/`send` (chat)
+
+**Chosen: two distinct event types with separate `?include=` flags.**
+
+- `task-comment` events: worker- or sensei-emitted deliberate notes. Surfaced via `?include=comments`.
+- `reply` + `send` events: conversational, higher-volume. Surfaced via `?include=messages`.
+
+Prior state: everything was `reply`/`send`; task histories mixed substantive findings with chatter.
+
+Alternatives considered:
+- **Save only explicit updates, no correspondence**: rejected. Losing diagnostic value is a one-way door — when a task goes sideways you want the full chatter available.
+- **Save everything undifferentiated (prior behavior)**: rejected. Signal-to-noise was poor; the sensei had to filter.
+- **Filter at read time via heuristics (length, keywords)**: rejected as fragile.
+
+Why explicit tiering won: workers decide which tier an event belongs to at emission. Default path (`reply`) is zero-friction; deliberate path (`comment`) is explicit. Both layers are captured; the sensei reads `comments` by default and opts into `messages` for diagnostics. Maps to real-world patterns (GitHub PR comments vs status checks, Slack messages vs pinned decisions).
+
+**Naming note:** `?include=comments` used to mean reply+send (the chat tier). That was renamed to `?include=messages`; the new `?include=comments` means curated task-comment events. Semantic swap was safe because no dojos had reconnected since the prior meaning landed.
+
+## 18. Reply attribution: taskId flows with the message thread
+
+**Chosen: `ReplyMsg` carries optional `taskId`; the channel plugin attaches it from the most recent `deliver`. Agent can override explicitly.**
+
+Prior state: server inferred `taskId` from board state — "first in-progress task assigned to this worker."
+
+Alternatives considered:
+- **Keep server-side inference** (prior behavior): rejected. Long-lived workers hold multiple in-progress tasks simultaneously; inference picks wrong whenever there's >1 candidate. Observed: replies about task 020 got stamped with task 018 because 018 was iteration-first. Task 018's history became a misleading catch-all.
+- **Require agent to always specify `taskId`**: rejected as ergonomically heavy. In the common case (one deliver → one reply) the correlation is obvious.
+- **Enforce single-in-progress task per worker** to eliminate ambiguity at the state layer: rejected. Constrains legitimate patterns (workers context-switching across related tasks), and state-based attribution has its own races.
+
+Why message-thread attribution won: the `taskId` is already known at deliver time (sensei set it when dispatching). The plugin carries it forward through to the reply. Explicit override handles multi-task cases cleanly. Legacy inference stays as fallback for older clients; removed once rollout is complete.
+
+## 19. Autonomous sensei wake-ups: opt-in via `autoNudge` config
+
+**Chosen: `autoNudge: boolean` config flag, default `false`.**
+
+Two code paths pull the sensei in without explicit human action — `nudgeSenseiIfIdle()` (fires on every pending-bucket event) and `fireTrigger()` (cron/one-off targeting the sensei). Both now no-op when `autoNudge` is false.
+
+Prior state: both paths fired unconditionally; sensei got pulled in many times per hour in a working dojo.
+
+Alternatives considered:
+- **Keep nudges on by default**: rejected. When the sensei is unreliable, autonomous wake-ups do net damage (sticky `done` marks, misattributed replies, wasted tokens). Autonomy cost > value until the sensei is trusted.
+- **Gate specific triggers instead of a global switch**: rejected as too granular. Users who want autonomy want it all; users who don't want it all off.
+- **Turn off at the Stop-hook level**: rejected. Stop hooks are agent-side; the server should control its own nudge policy.
+
+Why opt-in default-off won: shrinks Jean's blast radius. Explicit `jean send sensei "..."` still works — sensei is a tool you call, not an agent that calls you. Worker-targeting triggers are unaffected (cron data-pulls still fire). Flip the flag when the sensei is reliable again.
+
+## 20. Task reverts: `task-reverted` event, not DAG backward edges
+
+**Chosen: new `task-reverted` event type bypasses `canTransition`. DAG stays forward-only.**
+
+`boardReducer` applies reverts unconditionally (no canTransition check). History shows corrections as a distinct event type, not as "another status change."
+
+Prior state: no revert mechanism. The sensei marking `done` prematurely was sticky damage — only way back was a chain of sideways transitions that corrupted history.
+
+Alternatives considered:
+- **Widen `canTransition` to allow `done → in-progress`, `cancelled → waiting`, etc.**: rejected. Blurs the semantic of terminal states. If `done` has outgoing edges, `done` is just another status, not "this work is closed." Also loses the audit distinction between "forward progress" and "correction."
+- **Generic `force-status` mechanism**: rejected as too permissive. Revert is specifically "go back to a prior state," not "set to anything."
+- **Per-endpoint revert** (separate endpoints for each kind of backward transition): rejected as ceremony.
+
+Why `task-reverted` as a distinct event won: small DAG stays comprehensible (`todo → assigned → in-progress ↔ waiting → done/cancelled`). Reverts are first-class in history (auditable). Bypassing `canTransition` is the event type's defining feature, not a special case.
+
+**Semantics: stack-pop.** Handler rebuilds the status stack from the task's event stream and reverts to one level below current. Repeated calls unwind further. Cannot re-reach already-popped states (would be "redo," not undo).
+
+## 21. Idle events are diagnostic; `waiting` ≠ busy
+
+**Chosen: `agent-idle` events record to history only, not to the pending bucket. `waiting` status no longer counts as busy.**
+
+Two coupled changes:
+1. Register-time `hasActiveTask` check counts only `in-progress` tasks (not `waiting`).
+2. `agent-idle` removed from `pendingProjection` filter + reducer.
+
+Prior state: `waiting` tasks blocked workers from registering idle; every Stop-hook firing entered pending (318/1134 events = 28% noise) and triggered nudges.
+
+Alternatives considered:
+- **Dedupe idle events** (transition-only recording): rejected. If idle is purely diagnostic, every Stop-hook firing IS a lifecycle event worth preserving. Dedup would save storage but lose signal.
+- **Emit idle events but mark them low-priority for the sensei**: rejected as indirection — nothing downstream reads priority.
+- **Keep `waiting` as busy**: rejected. `waiting` means "paused for external input" — the worker's session isn't occupied, it can take other work.
+
+Why this won: audit of the code showed **no sensei decision reads `worker.idle`**. The real signal ("worker has something to say") flows through `reply` and `task-comment` events, which do enter pending. Demoting idle to diagnostic preserves observability (still in `/history` for retrospectives) while cutting the pending-noise that was driving 28% of nudges. `waiting` fix was a latent bug: the register handler was marking workers busy on status they weren't actively holding.
+
+## 22. Canonical task load: `?include=comments,playbook` attaches the playbook
+
+**Chosen: `GET /tasks/<id>?include=comments,playbook` is the default task-load call. Playbook content ships alongside task data.**
+
+Prior state: playbooks lived behind a separate `GET /playbooks/<id>`. The sensei had to remember to fetch the playbook for any task it was working on.
+
+Alternatives considered:
+- **Auto-inject playbook on every status transition**: rejected. Couples lifecycle to IO, surprising side effects.
+- **Sensei is trusted to fetch the playbook when needed**: rejected by observation. The sensei closed task 033 despite its playbook's "wait for PR merged" rule because it never re-read the playbook. No amount of skill wording fixed this reliably.
+- **Skill says "always load the playbook"**: tried, ineffective. A habit the sensei has to remember vs. a field that arrives in the response.
+
+Why attach-on-load won: if the playbook is in the same response as the conversation, there's no separate ritual to forget. `?include=comments,playbook` makes the playbook arrive with the context the sensei is already reading. Low-cost endpoint extension, high behavioral effect.
+
+## 23. `infra` tool response: strip status prefix on success
+
+**Chosen: on 2xx, return the raw body. On 4xx/5xx, prepend `${status} ${statusText}` and set `isError`.**
+
+Prior state: every response wrapped as `${status} ${statusText}\n${body}`.
+
+Alternatives considered:
+- **Always envelope as JSON `{status, statusText, body}`**: rejected. Adds indirection on every call. For success responses the body IS the message; wrapping makes the agent peel off `.body` every read. Also awkward when body is non-JSON (fallback handling).
+- **Never include status, rely only on `isError`**: rejected. Empty 5xx bodies or malformed 4xx would lose the status-code signal entirely. Status line has real info when body doesn't.
+
+Why strip-on-success won: our server returns structured JSON on both paths (`{tasks: [...]}` vs `{error: "..."}`), so the body already carries everything the agent needs on 2xx. Status-line prefix adds tokens and one mental skip-past step per call. On error, the status line is kept because empty/unhelpful bodies aren't uncommon and the status carries signal the body might miss. The MCP `isError` flag still tells the agent which mode to parse in.
