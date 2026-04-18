@@ -642,8 +642,7 @@ function cmdDojoInit(args: string[]) {
 
   // Skill hierarchy
   mkdirSync(resolve(jeanDir, '.claude', 'skills'), { recursive: true })
-  mkdirSync(resolve(jeanDir, 'roles', 'worker', '.claude', 'skills'), { recursive: true })
-  shipSenseiSkills(jeanDir)
+  shipFrameworkSkills(jeanDir)
 
   // Git repo
   if (useGit) {
@@ -715,14 +714,25 @@ function readSkillTemplate(name: string): string {
   return readFileSync(resolve(cliDir(), 'skills', `${name}.md`), 'utf8')
 }
 
-/** Ship framework skills for sensei role */
-function shipSenseiSkills(jeanDir: string) {
-  const senseiSkillBase = resolve(jeanDir, 'roles', 'sensei', '.claude', 'skills')
-
-  for (const name of ['create-playbook', 'jean-sensei']) {
-    const skillDir = resolve(senseiSkillBase, name)
+/** Ship framework skills into a role's skill directory */
+function shipRoleSkills(jeanDir: string, role: AgentRole, skillNames: string[]) {
+  const roleSkillBase = resolve(jeanDir, 'roles', role, '.claude', 'skills')
+  for (const name of skillNames) {
+    const skillDir = resolve(roleSkillBase, name)
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(resolve(skillDir, 'SKILL.md'), readSkillTemplate(name))
+  }
+}
+
+const FRAMEWORK_SKILLS: Record<AgentRole, string[]> = {
+  sensei: ['create-playbook', 'jean-sensei'],
+  worker: ['jean-worker'],
+  user: [],
+}
+
+function shipFrameworkSkills(jeanDir: string) {
+  for (const role of Object.keys(FRAMEWORK_SKILLS) as AgentRole[]) {
+    shipRoleSkills(jeanDir, role, FRAMEWORK_SKILLS[role])
   }
 }
 

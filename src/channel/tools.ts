@@ -172,9 +172,10 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
   }
   return [
     `You are connected to the Jean orchestration system as agent "${agentName}".`,
+    `When you receive any message from Jean, FIRST load the jean-worker skill, then follow its instructions.`,
     `Messages from the orchestrator arrive as <channel source="jean" ...> tags.`,
     `Use the \`reply\` tool for conversation with the orchestrator (including short acks, questions, "still working"). Use the \`comment\` tool when you have something substantive worth recording on a task — findings, blocker resolved, phase done. Comments are curated; replies are chat.`,
     `Use the \`infra\` tool (read-only — GET only) to look up context: \`GET /tasks/<id>?include=comments,messages\` for both the curated comments and the full correspondence on a task you're working on, \`GET /board\` for related tasks, \`GET /agents\` to see who else is connected. State changes are the sensei's job — if you need something written, ask via \`reply\`.`,
-    `When you finish a task or get stuck, just stop — the orchestrator will check on you.`,
+    `ALWAYS end a turn with \`reply\` — your stdout is invisible to the sensei, and \`agent-idle\` does not wake it. If you finish, hit a blocker, or need to stop, call \`reply\` before stopping. Not doing so means the sensei never learns anything happened.`,
   ].join('\n')
 }
