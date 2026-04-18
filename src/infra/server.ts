@@ -112,6 +112,8 @@ const pendingProjection = createProjection<PendingState>({
     types: [
       'reply',
       'task-comment',
+      'register',
+      'disconnect',
       'task-created',
       'trigger-fired',
       'playbook-created',

@@ -224,6 +224,32 @@ describe('pendingReducer', () => {
     expect(state.length).toBe(0)
   })
 
+  test('worker register adds to pending (sensei should see new agents)', () => {
+    const e = makeEvent(1, 'register', agentStream('scratch'), {
+      agent: 'scratch',
+      role: 'worker',
+      idle: true,
+    })
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(1)
+  })
+
+  test('sensei register does NOT add to pending (no self-nudge)', () => {
+    const e = makeEvent(1, 'register', agentStream('sensei'), {
+      agent: 'sensei',
+      role: 'sensei',
+      idle: true,
+    })
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(0)
+  })
+
+  test('disconnect adds to pending (sensei should see agents leaving)', () => {
+    const e = makeEvent(1, 'disconnect', agentStream('scratch'), { agent: 'scratch' })
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(1)
+  })
+
   test('worker task-comment adds to pending (curated, replaces idle as the wake signal)', () => {
     const e = makeEvent(1, 'task-comment', taskStream('001'), {
       agent: 'scratch',

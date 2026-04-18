@@ -157,22 +157,24 @@ describe('event queue', () => {
     ws.send(JSON.stringify({ type: 'reply', from: 'batch-worker', text: 'msg 3' }))
     await Bun.sleep(100)
 
-    // Get events
+    // Get events — filter to replies (register event also lands in pending now)
     const res = await fetch(`${BASE}/events/pending?agent=batch-worker`)
-    const data = (await res.json()) as { events: Array<{ id: number }> }
-    expect(data.events.length).toBe(3)
+    const data = (await res.json()) as { events: Array<{ id: number; type: string }> }
+    const replies = data.events.filter((e) => e.type === 'reply')
+    expect(replies.length).toBe(3)
 
-    // Ack up to the second event
-    const secondId = data.events[1]?.id
+    // Ack up to the second reply
+    const secondId = replies[1]?.id
     const ackRes = await fetch(`${BASE}/events/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: 'batch-worker', upToId: secondId }),
     })
     const ackData = (await ackRes.json()) as { acknowledged: number }
-    expect(ackData.acknowledged).toBe(2)
+    // register event is earlier than reply[0] so acking up to secondId also clears register.
+    expect(ackData.acknowledged).toBe(3)
 
-    // Third event should still be there
+    // Third reply should still be there
     const after = await fetch(`${BASE}/events/pending?agent=batch-worker`)
     const afterData = (await after.json()) as { events: Array<{ id: number }> }
     expect(afterData.events.length).toBe(1)
@@ -190,10 +192,11 @@ describe('event queue', () => {
     await Bun.sleep(100)
 
     const res = await fetch(`${BASE}/events/pending?agent=fifo-worker`)
-    const data = (await res.json()) as { events: Array<{ data: { text: string } }> }
-    expect(data.events[0]?.data.text).toBe('first')
-    expect(data.events[1]?.data.text).toBe('second')
-    expect(data.events[2]?.data.text).toBe('third')
+    const data = (await res.json()) as { events: Array<{ type: string; data: { text?: string } }> }
+    const replies = data.events.filter((e) => e.type === 'reply')
+    expect(replies[0]?.data.text).toBe('first')
+    expect(replies[1]?.data.text).toBe('second')
+    expect(replies[2]?.data.text).toBe('third')
 
     ws.close()
   })

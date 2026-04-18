@@ -10,8 +10,8 @@ import { mkdirSync, rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
 import type { DeliverMsg, OutboundMsg } from './protocol.ts'
 
-const TEST_PORT = 8795
-const DATA_DIR = '/tmp/jean-test-auto-nudge'
+const TEST_PORT = 8794
+const DATA_DIR = '/tmp/jean-test-auto-nudge-8794'
 let server: Subprocess
 
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`

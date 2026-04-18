@@ -263,6 +263,18 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
       return [...state, event]
     }
 
+    case 'register': {
+      // Sensei's own registration doesn't self-nudge (also redundant with the connect-time welcome message).
+      const d = event.data as RegisterData
+      if (d.role === 'sensei') return state
+      return [...state, event]
+    }
+
+    case 'disconnect':
+      // Always notify on disconnect — if the disconnecting agent IS the sensei, findSensei() returns undefined
+      // and the nudge is a no-op; when the sensei reconnects it sees the disconnect in pending.
+      return [...state, event]
+
     // agent-idle deliberately NOT in pending: idle is diagnostic only. Workers signal meaningful
     // progress via reply/task-comment — those wake the sensei. Stop-hook firings don't.
 
