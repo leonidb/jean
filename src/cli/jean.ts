@@ -71,45 +71,50 @@ const BOLD = '\x1b[1m'
 const DIM = '\x1b[2m'
 const GREEN = '\x1b[32m'
 
-switch (command) {
-  case 'board':
-    await cmdBoard()
-    break
-  case 'peek':
-    cmdPeek(args[1])
-    break
-  case 'send':
-    await cmdSend(args[1], args.slice(2).join(' '))
-    break
-  case 'status':
-    await cmdStatus()
-    break
-  case 'dojo':
-    await cmdDojo(args.slice(1))
-    break
-  case 'config':
-    cmdConfig(args.slice(1))
-    break
-  case 'infra':
-    await cmdInfra(args.slice(1))
-    break
-  case 'agent':
-    cmdAgent(args.slice(1))
-    break
-  case 'permissions':
-    await cmdPermissions(args[1])
-    break
-  case 'trigger':
-    await cmdTrigger(args.slice(1))
-    break
-  case 'task':
-    await cmdTask(args.slice(1))
-    break
-  case 'playbook':
-    await cmdPlaybook(args.slice(1))
-    break
-  default:
-    printUsage()
+// Dispatch is wrapped so all module-level declarations finish evaluating before
+// any command handler runs — otherwise a handler reached via top-level await can
+// reference a `const` declared further down that's still in its temporal dead zone.
+async function main() {
+  switch (command) {
+    case 'board':
+      await cmdBoard()
+      break
+    case 'peek':
+      cmdPeek(args[1])
+      break
+    case 'send':
+      await cmdSend(args[1], args.slice(2).join(' '))
+      break
+    case 'status':
+      await cmdStatus()
+      break
+    case 'dojo':
+      await cmdDojo(args.slice(1))
+      break
+    case 'config':
+      cmdConfig(args.slice(1))
+      break
+    case 'infra':
+      await cmdInfra(args.slice(1))
+      break
+    case 'agent':
+      cmdAgent(args.slice(1))
+      break
+    case 'permissions':
+      await cmdPermissions(args[1])
+      break
+    case 'trigger':
+      await cmdTrigger(args.slice(1))
+      break
+    case 'task':
+      await cmdTask(args.slice(1))
+      break
+    case 'playbook':
+      await cmdPlaybook(args.slice(1))
+      break
+    default:
+      printUsage()
+  }
 }
 
 // ── Commands ───────────────────────────────────────────────────────
@@ -624,86 +629,6 @@ async function cmdDojo(args: string[]) {
   }
 }
 
-function cmdDojoInit(args: string[]) {
-  const useGit = args.includes('--git')
-  // First non-flag arg is the path (skip --git and --key value pairs)
-  const targetPath = args.find((a) => !a.startsWith('--'))
-  const dojoRoot = resolve(targetPath ?? '.')
-
-  const jeanDir = resolve(dojoRoot, '.jean')
-  if (existsSync(jeanDir)) {
-    console.error(`Already a Jean dojo: ${jeanDir} exists.`)
-    process.exit(1)
-  }
-
-  // Core directories
-  mkdirSync(resolve(jeanDir, 'playbooks'), { recursive: true })
-  mkdirSync(resolve(jeanDir, 'context'), { recursive: true })
-
-  // Skill hierarchy
-  mkdirSync(resolve(jeanDir, '.claude', 'skills'), { recursive: true })
-  shipFrameworkSkills(jeanDir)
-
-  // Git repo
-  if (useGit) {
-    const bareDir = resolve(jeanDir, '.bare')
-    const gitOpts = { stdout: 'pipe' as const, stderr: 'pipe' as const }
-    const gitCheck = (result: { exitCode: number; stderr: { toString(): string } }, label: string) => {
-      if (result.exitCode !== 0) {
-        console.error(`git ${label} failed: ${result.stderr.toString().trim()}`)
-        process.exit(1)
-      }
-    }
-    gitCheck(Bun.spawnSync(['git', 'init', '--bare', bareDir], gitOpts), 'init --bare')
-    gitCheck(Bun.spawnSync(['git', '-C', bareDir, 'symbolic-ref', 'HEAD', 'refs/heads/main'], gitOpts), 'symbolic-ref')
-    // Initial commit with .gitignore (temp file — worktrees will have it via checkout)
-    writeFileSync(resolve(dojoRoot, '.gitignore'), '.jean/\n')
-    const env = { ...process.env, GIT_DIR: bareDir, GIT_WORK_TREE: dojoRoot }
-    gitCheck(Bun.spawnSync(['git', 'add', '.gitignore'], { ...gitOpts, env }), 'add')
-    gitCheck(Bun.spawnSync(['git', 'commit', '-m', 'Initial commit'], { ...gitOpts, env }), 'commit')
-    unlinkSync(resolve(dojoRoot, '.gitignore'))
-  }
-
-  // Config
-  const config: JeanConfig = {}
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]
-    if (!arg?.startsWith('--')) continue
-    const key = arg.slice(2)
-    if (key === 'git') continue // not a config key
-    const raw = args[i + 1]
-    if (!raw || raw.startsWith('--')) {
-      console.error(`Missing value for --${key}`)
-      process.exit(1)
-    }
-    applyConfigEntry(config, key, raw)
-    i++ // skip value
-  }
-
-  if (Object.keys(config).length > 0) {
-    writeConfig(jeanDir, config)
-  }
-
-  console.log(`${GREEN}Dojo initialized at ${dojoRoot}${RESET}`)
-  console.log()
-  console.log(`  ${dojoRoot}/`)
-  console.log(`    .jean/`)
-  if (useGit) {
-    console.log(`      .bare/          ${DIM}← git bare repo${RESET}`)
-  }
-  console.log(`      .claude/skills/ ${DIM}← shared dojo skills${RESET}`)
-  console.log(`      roles/          ${DIM}← role-specific skills${RESET}`)
-  console.log(`      playbooks/      ${DIM}← flow definitions${RESET}`)
-  console.log(`      context/        ${DIM}← shared project context${RESET}`)
-  if (Object.keys(config).length > 0) {
-    console.log(`      jean.config.json ${DIM}← configuration${RESET}`)
-  }
-  console.log()
-  console.log(`Next steps:`)
-  console.log(`  jean infra start    ${DIM}← start infrastructure${RESET}`)
-  console.log(`  jean agent add <name> ${DIM}← add your first agent${RESET}`)
-}
-
 /** Directory containing the CLI source (used for resolving co-located assets) */
 function cliDir(): string {
   return dirname(Bun.main)
@@ -728,6 +653,96 @@ function shipFrameworkSkills(jeanDir: string) {
       writeFileSync(resolve(skillDir, 'SKILL.md'), readSkillTemplate(name))
     }
   }
+}
+
+const SEED_CONTEXT_README = `# Dojo context
+
+Describe what this dojo is for — the project, the goals, links to external references.
+Agents read everything in this directory when orienting.
+
+Add more files alongside this one as the project's context grows.
+`
+
+function cmdDojoInit(args: string[]) {
+  const useGit = args.includes('--git')
+  // First non-flag arg is the path (skip --git and --key value pairs)
+  const targetPath = args.find((a) => !a.startsWith('--'))
+  const dojoRoot = resolve(targetPath ?? '.')
+
+  const jeanDir = resolve(dojoRoot, '.jean')
+  if (existsSync(jeanDir)) {
+    console.error(`Already a Jean dojo: ${jeanDir} exists.`)
+    process.exit(1)
+  }
+
+  // Core directories
+  mkdirSync(resolve(jeanDir, 'playbooks'), { recursive: true })
+  mkdirSync(resolve(jeanDir, 'context'), { recursive: true })
+  mkdirSync(resolve(jeanDir, 'sessions'), { recursive: true })
+
+  // Skill hierarchy
+  mkdirSync(resolve(jeanDir, '.claude', 'skills'), { recursive: true })
+  shipFrameworkSkills(jeanDir)
+
+  // Seed context so agents have a starting document to read and extend.
+  writeFileSync(resolve(jeanDir, 'context', 'readme.md'), SEED_CONTEXT_README)
+
+  // Git repo
+  if (useGit) {
+    const bareDir = resolve(jeanDir, '.bare')
+    const gitOpts = { stdout: 'pipe' as const, stderr: 'pipe' as const }
+    const gitCheck = (result: { exitCode: number; stderr: { toString(): string } }, label: string) => {
+      if (result.exitCode !== 0) {
+        console.error(`git ${label} failed: ${result.stderr.toString().trim()}`)
+        process.exit(1)
+      }
+    }
+    gitCheck(Bun.spawnSync(['git', 'init', '--bare', bareDir], gitOpts), 'init --bare')
+    gitCheck(Bun.spawnSync(['git', '-C', bareDir, 'symbolic-ref', 'HEAD', 'refs/heads/main'], gitOpts), 'symbolic-ref')
+    // Initial commit with .gitignore (temp file — worktrees will have it via checkout)
+    writeFileSync(resolve(dojoRoot, '.gitignore'), '.jean/\n')
+    const env = { ...process.env, GIT_DIR: bareDir, GIT_WORK_TREE: dojoRoot }
+    gitCheck(Bun.spawnSync(['git', 'add', '.gitignore'], { ...gitOpts, env }), 'add')
+    gitCheck(Bun.spawnSync(['git', 'commit', '-m', 'Initial commit'], { ...gitOpts, env }), 'commit')
+    unlinkSync(resolve(dojoRoot, '.gitignore'))
+    // Pre-populate the shared worktree exclude so every future agent worktree starts clean.
+    ensureGitExclude(bareDir)
+  }
+
+  // Config — always write the file so `jean.config.json` is a discoverable surface.
+  const config: JeanConfig = {}
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (!arg?.startsWith('--')) continue
+    const key = arg.slice(2)
+    if (key === 'git') continue // not a config key
+    const raw = args[i + 1]
+    if (!raw || raw.startsWith('--')) {
+      console.error(`Missing value for --${key}`)
+      process.exit(1)
+    }
+    applyConfigEntry(config, key, raw)
+    i++ // skip value
+  }
+  writeConfig(jeanDir, config)
+
+  console.log(`${GREEN}Dojo initialized at ${dojoRoot}${RESET}`)
+  console.log()
+  console.log(`  ${dojoRoot}/`)
+  console.log(`    .jean/`)
+  if (useGit) {
+    console.log(`      .bare/           ${DIM}← git bare repo${RESET}`)
+  }
+  console.log(`      .claude/skills/  ${DIM}← shared dojo skills${RESET}`)
+  console.log(`      roles/           ${DIM}← role-specific skills${RESET}`)
+  console.log(`      playbooks/       ${DIM}← flow definitions${RESET}`)
+  console.log(`      context/         ${DIM}← shared project context${RESET}`)
+  console.log(`      sessions/        ${DIM}← agent session handles${RESET}`)
+  console.log(`      jean.config.json ${DIM}← configuration${RESET}`)
+  console.log()
+  console.log(`Next steps:`)
+  console.log(`  jean infra start      ${DIM}← start infrastructure${RESET}`)
+  console.log(`  jean agent add <name> ${DIM}← add your first agent${RESET}`)
 }
 
 // ── Infra subcommands ────────────────────────────────────────────
@@ -1491,3 +1506,5 @@ function statusColor(status: string): string {
       return ''
   }
 }
+
+await main()
