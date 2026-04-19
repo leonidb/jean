@@ -112,6 +112,9 @@ async function main() {
     case 'playbook':
       await cmdPlaybook(args.slice(1))
       break
+    case 'satori':
+      cmdSatori()
+      break
     default:
       printUsage()
   }
@@ -644,13 +647,18 @@ const FRAMEWORK_SKILLS: Partial<Record<AgentRole, string[]>> = {
   worker: ['jean-worker'],
 }
 
+/** Copy a framework skill template into `<parentDir>/.claude/skills/<name>/SKILL.md`. */
+function shipSkill(parentDir: string, name: string) {
+  const skillDir = resolve(parentDir, '.claude', 'skills', name)
+  mkdirSync(skillDir, { recursive: true })
+  writeFileSync(resolve(skillDir, 'SKILL.md'), readSkillTemplate(name))
+}
+
 function shipFrameworkSkills(jeanDir: string) {
   for (const [role, names] of Object.entries(FRAMEWORK_SKILLS)) {
     if (!names) continue
     for (const name of names) {
-      const skillDir = resolve(jeanDir, 'roles', role, '.claude', 'skills', name)
-      mkdirSync(skillDir, { recursive: true })
-      writeFileSync(resolve(skillDir, 'SKILL.md'), readSkillTemplate(name))
+      shipSkill(resolve(jeanDir, 'roles', role), name)
     }
   }
 }
@@ -741,8 +749,36 @@ function cmdDojoInit(args: string[]) {
   console.log(`      jean.config.json ${DIM}← configuration${RESET}`)
   console.log()
   console.log(`Next steps:`)
-  console.log(`  jean infra start      ${DIM}← start infrastructure${RESET}`)
-  console.log(`  jean agent add <name> ${DIM}← add your first agent${RESET}`)
+  console.log(`  jean satori            ${DIM}← guided setup (recommended)${RESET}`)
+  console.log(`  jean agent add <name>  ${DIM}← or add agents manually${RESET}`)
+  console.log(`  jean infra start       ${DIM}← then start infrastructure${RESET}`)
+}
+
+// ── Satori: guided dojo setup ────────────────────────────────────
+
+function cmdSatori() {
+  const dojoRoot = findDojoRoot()
+  const jeanDir = resolve(dojoRoot, '.jean')
+
+  // Refresh the satori skill on every launch so dojos initialized before this
+  // command existed pick up edits, and so skill changes land without re-init.
+  shipSkill(jeanDir, 'satori')
+
+  console.log(`${GREEN}Starting Satori setup in ${dojoRoot}${RESET}`)
+  console.log(`${DIM}Answer a few questions to bootstrap this dojo. Exit with Ctrl+D when done.${RESET}`)
+  console.log()
+
+  const result = Bun.spawnSync(
+    [
+      'claude',
+      '--add-dir',
+      '.jean',
+      '--append-system-prompt',
+      'Load the satori skill immediately and follow its instructions. Start by checking the dojo state.',
+    ],
+    { cwd: dojoRoot, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' },
+  )
+  process.exit(result.exitCode ?? 1)
 }
 
 // ── Infra subcommands ────────────────────────────────────────────
@@ -1442,6 +1478,7 @@ function printUsage() {
 
 Commands:
   jean dojo init [path] [--git] [--key value ..] Initialize a new dojo
+  jean satori                                 Guided dojo setup (interactive)
   jean config set <key> <value>               Set a config value
   jean config get <key>                       Get a config value
   jean config list                            Show all config
