@@ -48,7 +48,7 @@ describe('jean satori', () => {
 
   test('writes the satori skill into the dojo shared-skills dir before launching claude', () => {
     const dojo = resolve(tmp, 'dojo')
-    const init = runJean(tmp, {}, 'dojo', 'init', dojo, '--git')
+    const init = runJean(tmp, {}, 'dojo', 'init', dojo, '--git', '--port', '8700')
     expect(init.exitCode).toBe(0)
 
     const binDir = stubClaude(tmp)

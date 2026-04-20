@@ -35,7 +35,7 @@ describe('jean dojo init', () => {
 
   test('scaffolds every mechanical surface with --git', () => {
     const dojo = resolve(tmp, 'dojo')
-    const { exitCode } = runInit(dojo, '--git')
+    const { exitCode } = runInit(dojo, '--git', '--port', '8700')
     expect(exitCode).toBe(0)
 
     // Core directories
@@ -59,10 +59,11 @@ describe('jean dojo init', () => {
     expect(exclude).toContain('.jean/')
     expect(exclude).toContain('.claude/settings.local.json')
 
-    // Config file always present so users can discover it
+    // Config captures the port the user explicitly chose.
     const configPath = resolve(dojo, '.jean', 'jean.config.json')
     expect(existsSync(configPath)).toBe(true)
-    expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({})
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
+    expect(cfg.port).toBe(8700)
 
     // Context seeded
     const readmePath = resolve(dojo, '.jean', 'context', 'readme.md')
@@ -70,7 +71,7 @@ describe('jean dojo init', () => {
     expect(readFileSync(readmePath, 'utf8')).toContain('Dojo context')
   })
 
-  test('persists config values passed via --key value', () => {
+  test('persists the port value passed via --port', () => {
     const dojo = resolve(tmp, 'dojo')
     const { exitCode } = runInit(dojo, '--git', '--port', '9123')
     expect(exitCode).toBe(0)
@@ -81,15 +82,15 @@ describe('jean dojo init', () => {
 
   test('refuses to re-init an existing dojo', () => {
     const dojo = resolve(tmp, 'dojo')
-    expect(runInit(dojo, '--git').exitCode).toBe(0)
-    const second = runInit(dojo, '--git')
+    expect(runInit(dojo, '--git', '--port', '8700').exitCode).toBe(0)
+    const second = runInit(dojo, '--git', '--port', '8700')
     expect(second.exitCode).toBe(1)
     expect(second.stderr).toContain('Already a Jean dojo')
   })
 
   test('scaffolds without --git and writes no bare repo', () => {
     const dojo = resolve(tmp, 'dojo')
-    const { exitCode } = runInit(dojo)
+    const { exitCode } = runInit(dojo, '--port', '8700')
     expect(exitCode).toBe(0)
 
     // Mechanical scaffolding still happens
@@ -102,5 +103,14 @@ describe('jean dojo init', () => {
 
     // But the git bits are absent
     expect(existsSync(resolve(dojo, '.jean', '.bare'))).toBe(false)
+  })
+
+  test('errors cleanly when --port is missing', () => {
+    const dojo = resolve(tmp, 'dojo')
+    const { exitCode, stderr } = runInit(dojo, '--git')
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain('--port <N> is required')
+    // No scaffolding should have been left behind on a failed init.
+    expect(existsSync(resolve(dojo, '.jean', 'jean.config.json'))).toBe(false)
   })
 })

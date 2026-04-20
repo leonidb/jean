@@ -627,7 +627,7 @@ async function cmdDojo(args: string[]) {
       cmdDojoInit(args.slice(1))
       break
     default:
-      console.error('Usage: jean dojo init [path] [--git] [--key value ...]')
+      console.error('Usage: jean dojo init [path] --port <N> [--git] [--key value ...]')
       process.exit(1)
   }
 }
@@ -676,10 +676,36 @@ function cmdDojoInit(args: string[]) {
   // First non-flag arg is the path (skip --git and --key value pairs)
   const targetPath = args.find((a) => !a.startsWith('--'))
   const dojoRoot = resolve(targetPath ?? '.')
-
   const jeanDir = resolve(dojoRoot, '.jean')
+
+  // Validate everything that can fail before touching the filesystem. A partially
+  // initialized dojo is hostile — `existsSync(jeanDir)` on a retry would claim
+  // "already a dojo" even though setup never finished.
   if (existsSync(jeanDir)) {
     console.error(`Already a Jean dojo: ${jeanDir} exists.`)
+    process.exit(1)
+  }
+  const config: JeanConfig = {}
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (!arg?.startsWith('--')) continue
+    const key = arg.slice(2)
+    if (key === 'git') continue // not a config key
+    const raw = args[i + 1]
+    if (!raw || raw.startsWith('--')) {
+      console.error(`Missing value for --${key}`)
+      process.exit(1)
+    }
+    applyConfigEntry(config, key, raw)
+    i++ // skip value
+  }
+  // `port` is required and explicit. An auto-picked port is only correct at init
+  // time — a neighbor dojo that happens to be down during the scan would silently
+  // yield its port to the new dojo and collide when it restarts. Make the user pick.
+  if (config.port === undefined) {
+    console.error('--port <N> is required. Pick a unique TCP port for this dojo.')
+    console.error('Example: jean dojo init <path> --git --port 8700')
+    console.error('Each dojo on this machine must use a different port (8700, 8701, ...).')
     process.exit(1)
   }
 
@@ -717,21 +743,6 @@ function cmdDojoInit(args: string[]) {
     ensureGitExclude(bareDir)
   }
 
-  // Config — always write the file so `jean.config.json` is a discoverable surface.
-  const config: JeanConfig = {}
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]
-    if (!arg?.startsWith('--')) continue
-    const key = arg.slice(2)
-    if (key === 'git') continue // not a config key
-    const raw = args[i + 1]
-    if (!raw || raw.startsWith('--')) {
-      console.error(`Missing value for --${key}`)
-      process.exit(1)
-    }
-    applyConfigEntry(config, key, raw)
-    i++ // skip value
-  }
   writeConfig(jeanDir, config)
 
   console.log(`${GREEN}Dojo initialized at ${dojoRoot}${RESET}`)
@@ -1477,7 +1488,10 @@ function printUsage() {
   console.log(`jean — multi-agent orchestration (v0.1.0)
 
 Commands:
-  jean dojo init [path] [--git] [--key value ..] Initialize a new dojo
+  jean dojo init [path] --port <N> [--git]    Initialize a new dojo
+    --port <N>        Unique TCP port for this dojo's infra (required)
+    --git             Create a bare git repo at .jean/.bare/
+    --<key> <value>   Any config key (e.g. --slack.channel "#dev")
   jean satori                                 Guided dojo setup (interactive)
   jean config set <key> <value>               Set a config value
   jean config get <key>                       Get a config value
