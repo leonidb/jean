@@ -113,48 +113,36 @@ export function clearLivenessCache(key?: string): void {
 
 // ── Deliver function for peer entries in the agents map ──────────
 
-export type PeerDeliverArgs = {
-  peer: Peer
-  myIdentity: string
-  targetAgent?: string // defaults to "sensei" — the cross-dojo convention
-}
+/** Cross-dojo convention: peers deliver to the peer's sensei. */
+const PEER_TARGET_AGENT = 'sensei'
 
 /**
- * Returns a deliver function suitable for AgentEntry.deliver. Fire-and-forget
- * HTTP POST to the peer's /send endpoint. Returns true if the POST is
- * initiated; false only if we can't even read the peer's port file (peer
- * clearly offline). The actual HTTP response is awaited asynchronously; on
- * failure we rely on the server's existing `delivered: false` event recording.
- *
- * We intentionally don't await the POST inside deliver (AgentEntry.deliver is
- * sync-return `boolean`). This matches wsDeliver's behavior — it returns true
- * as soon as the WS send is queued.
+ * Returns a deliver function for AgentEntry.deliver. Fire-and-forget: returns
+ * true once the POST is queued, false if we can't even find the peer's port
+ * (peer clearly offline). Matches wsDeliver's sync-return contract — failures
+ * mid-flight surface via the recorded send event's `delivered` flag, which
+ * is a known limitation (see BACKLOG "Proper peer management" for the
+ * WS-connection-bound upgrade that fixes this).
  */
-export function createPeerDeliver(
-  args: PeerDeliverArgs,
-): (msg: { from: string; text: string; taskId?: string }) => boolean {
-  const { peer, myIdentity, targetAgent = 'sensei' } = args
+export function createPeerDeliver(args: {
+  peer: Peer
+  myIdentity: string
+}): (msg: { from: string; text: string; taskId?: string }) => boolean {
+  const { peer, myIdentity } = args
   return (msg) => {
     if (peer.origin.type !== 'local-path') return false
-    const peerJeanDir = resolve(peer.origin.path, '.jean')
-    const { port } = readRuntimeFiles(peerJeanDir)
+    const { port } = readRuntimeFiles(resolve(peer.origin.path, '.jean'))
     if (port === null) return false
-    // Fire-and-forget: we don't block the caller on the peer's response.
-    // Delivery failures surface via the caller's `delivered: false` event when
-    // the fetch rejects.
     void fetch(`http://127.0.0.1:${port}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         from: myIdentity,
-        to: targetAgent,
+        to: PEER_TARGET_AGENT,
         text: msg.text,
         taskId: msg.taskId,
       }),
-    }).catch(() => {
-      /* surfaced via the recorded send event's delivered flag (future) — for
-         now the inflight-delivery best effort is enough */
-    })
+    }).catch(() => {})
     return true
   }
 }

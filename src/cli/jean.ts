@@ -47,7 +47,7 @@ import {
   validateConfigKey,
   writeConfig,
 } from '../infra/config.ts'
-import { identityFromConfig, loadPeers, savePeers } from '../infra/peers.ts'
+import { identityFromConfig, loadPeers, type Peer, savePeers } from '../infra/peers.ts'
 import { findDojoFrom, INFRA_IDENTITY, isProcessAlive, probeInfra, readRuntimeFiles } from '../probe.ts'
 
 const args = process.argv.slice(2)
@@ -249,6 +249,14 @@ function parseFlag(args: string[], name: string): string | undefined {
   return i >= 0 ? args[i + 1] : undefined
 }
 
+function newPeerEntry(originPath: string, description: string): Peer {
+  return {
+    origin: { type: 'local-path', path: originPath },
+    description,
+    addedAt: new Date().toISOString(),
+  }
+}
+
 function cmdPeerAdd(args: string[]) {
   const identity = args.find((a) => !a.startsWith('--'))
   const origin = parseFlag(args, 'origin')
@@ -276,11 +284,7 @@ function cmdPeerAdd(args: string[]) {
     console.error(`Peer "${identity}" already registered. Remove first with: jean peer remove ${identity}`)
     process.exit(1)
   }
-  file.peers[identity] = {
-    origin: { type: 'local-path', path: originReal },
-    description,
-    addedAt: new Date().toISOString(),
-  }
+  file.peers[identity] = newPeerEntry(originReal, description)
   savePeers(jeanDir, file)
   console.log(`${GREEN}Peer registered${RESET}`)
   console.log(`  identity:    ${identity}`)
@@ -292,7 +296,6 @@ function cmdPeerAdd(args: string[]) {
 
 function cmdPeerList() {
   const jeanDir = resolve(findDojoRoot(), '.jean')
-  const { loadPeers } = require('../infra/peers.ts') as typeof import('../infra/peers.ts')
   const file = loadPeers(jeanDir)
   const entries = Object.entries(file.peers)
   if (entries.length === 0) {
@@ -351,20 +354,13 @@ function cmdPeerLink(otherPath?: string) {
 
   const mine = loadPeers(myJean)
   if (!mine.peers[otherIdentity]) {
-    mine.peers[otherIdentity] = {
-      origin: { type: 'local-path', path: otherDojo },
-      description: describe(otherDojo),
-      addedAt: new Date().toISOString(),
-    }
+    mine.peers[otherIdentity] = newPeerEntry(otherDojo, describe(otherDojo))
     savePeers(myJean, mine)
   }
   const theirs = loadPeers(otherJean)
   if (!theirs.peers[myIdentity]) {
-    theirs.peers[myIdentity] = {
-      origin: { type: 'local-path', path: realpathSync(myDojo) },
-      description: describe(realpathSync(myDojo)),
-      addedAt: new Date().toISOString(),
-    }
+    const myReal = realpathSync(myDojo)
+    theirs.peers[myIdentity] = newPeerEntry(myReal, describe(myReal))
     savePeers(otherJean, theirs)
   }
   console.log(`${GREEN}Peer link established${RESET}`)

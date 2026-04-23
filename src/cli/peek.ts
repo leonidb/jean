@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { resolve } from 'node:path'
 import { createStore, jsonlBackend, type StoredEvent } from '../es/index.ts'
 import type { Board, Task } from '../infra/board.ts'
-import { boardReducer, migrateBoard } from '../infra/reducers.ts'
+import { agentFromEvent, boardReducer, migrateBoard } from '../infra/reducers.ts'
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -88,19 +88,16 @@ export async function peekDojo(targetPath: string, opts: PeekOpts = {}): Promise
     identity = typeof cfg.identity === 'string' ? cfg.identity : null
   } catch {}
 
-  // Agent names: union of board.agent + agent-bearing fields on events.
-  // `data.agent` is the canonical "who emitted this" field and safe everywhere.
-  // `data.from` / `data.to` carry agent names ONLY on messaging events (send,
-  // reply) — on task-status they carry status transitions, so restrict the
-  // lookup by event type to avoid polluting the agent list with "todo",
-  // "in-progress", etc.
-  const MESSAGING_EVENTS = new Set(['send', 'reply', 'task-comment'])
+  // Agent names: union of board.agent + agentFromEvent (canonical). Messaging
+  // events (send, reply) additionally carry sender/receiver as from/to —
+  // agentFromEvent only covers data.agent, so merge those in for send/reply.
   const agentSet = new Set<string>()
   for (const t of board.tasks) if (t.agent) agentSet.add(t.agent)
   for (const e of all) {
-    const d = (e.data ?? {}) as Record<string, unknown>
-    if (typeof d.agent === 'string' && d.agent.length > 0) agentSet.add(d.agent)
-    if (MESSAGING_EVENTS.has(e.type)) {
+    const canonical = agentFromEvent(e)
+    if (canonical) agentSet.add(canonical)
+    if (e.type === 'send' || e.type === 'reply' || e.type === 'task-comment') {
+      const d = (e.data ?? {}) as Record<string, unknown>
       if (typeof d.from === 'string' && d.from.length > 0) agentSet.add(d.from)
       if (typeof d.to === 'string' && d.to.length > 0) agentSet.add(d.to)
     }
