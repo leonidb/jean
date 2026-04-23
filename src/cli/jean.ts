@@ -4,7 +4,7 @@
  *
  * Commands:
  *   jean board                                  Show the kanban board
- *   jean peek <agent>                           Connect to an agent
+ *   jean peek <dojo-path>                       Read another dojo's state from disk
  *   jean send <agent> <msg>                     Send a message to an agent
  *   jean status                                 Infrastructure status
  *   jean permissions [agent]                    Show permission requests
@@ -90,7 +90,7 @@ async function main() {
       await cmdBoard()
       break
     case 'peek':
-      cmdPeek(args[1])
+      await cmdPeek(args.slice(1))
       break
     case 'send':
       await cmdSend(args[1], args.slice(2).join(' '))
@@ -168,18 +168,49 @@ async function cmdBoard() {
   console.log()
 }
 
-function cmdPeek(agent?: string) {
-  if (!agent) {
-    console.error('Usage: jean peek <agent-name>')
+async function cmdPeek(args: string[]) {
+  const { formatPeekJson, formatPeekPretty, peekDojo, readCursor, writeCursor } = await import('./peek.ts')
+  const pathArg = args.find((a) => !a.startsWith('--'))
+  if (!pathArg) {
+    console.error('Usage: jean peek <dojo-path> [--since-last | --since <id>] [--last <N>] [--json]')
+    process.exit(1)
+  }
+  const sinceLast = args.includes('--since-last')
+  const asJson = args.includes('--json')
+  const sinceIdx = args.indexOf('--since')
+  const lastIdx = args.indexOf('--last')
+  const explicitSince = sinceIdx >= 0 ? Number(args[sinceIdx + 1]) : undefined
+  const lastN = lastIdx >= 0 ? Number(args[lastIdx + 1]) : undefined
+
+  if (sinceLast && explicitSince !== undefined) {
+    console.error('Cannot combine --since-last with --since <id>. Pick one.')
     process.exit(1)
   }
 
-  console.log(`To connect to agent "${agent}", open its terminal or start a new session:`)
-  console.log()
-  console.log(`  cd <agent-folder>`)
-  console.log(`  claude --dangerously-load-development-channels server:jean`)
-  console.log()
-  console.log('The agent will connect to Jean infrastructure automatically.')
+  // --since-last needs a caller dojo to store the cursor in.
+  const callerDojo = findDojoFrom(process.cwd())
+  if (sinceLast && !callerDojo) {
+    console.error('--since-last requires running from inside a dojo (cursor is stored there).')
+    console.error('Either cd into a dojo, or use --since <id> with an explicit event id.')
+    process.exit(1)
+  }
+
+  const targetPath = resolve(pathArg)
+  let cursorSince: number | undefined
+  if (sinceLast && callerDojo) {
+    cursorSince = readCursor(callerDojo, realpathSync(targetPath)) ?? 0
+  }
+
+  const result = await peekDojo(targetPath, {
+    sinceId: cursorSince ?? explicitSince,
+    lastN,
+  })
+
+  if (sinceLast && callerDojo) {
+    writeCursor(callerDojo, result.target.path, result.cursor.lastEventId)
+  }
+
+  console.log(asJson ? formatPeekJson(result) : formatPeekPretty(result))
 }
 
 async function cmdSend(agent?: string, text?: string) {
@@ -1662,7 +1693,11 @@ Commands:
   jean agent remove <name> [--force] [--keep] Remove an agent
   jean agent start <name>                     Start an agent
 
-  jean peek <agent>                           How to connect to an agent
+  jean peek <dojo-path>                       Read another dojo's state from disk
+    --since-last     Only events since last peek; updates cursor
+    --since <id>     Only events with id > <id>; no cursor update
+    --last <N>       Tail N recent significant events (default 20)
+    --json           Machine-readable output
 
 Environment:
   JEAN_INFRA_URL          Infrastructure URL (overrides port discovery)
