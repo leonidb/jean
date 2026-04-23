@@ -6,8 +6,9 @@
 
 // ── Channel plugin → Infrastructure ───────────────────────────────
 
-/** Plugin identifies itself on connect */
-export type AgentRole = 'worker' | 'sensei' | 'user'
+/** Plugin identifies itself on connect. `peer` = another dojo's sensei,
+ *  registered locally via `jean peer add`; it never holds a local WS. */
+export type AgentRole = 'worker' | 'sensei' | 'user' | 'peer'
 
 export type RegisterMsg = {
   type: 'register'

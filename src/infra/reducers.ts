@@ -62,6 +62,13 @@ export type SendData = {
   from: string
   text: string
   delivered: boolean
+  /** Present when the sender is a registered peer (another dojo's sensei).
+   *  Recorded so sensei's skill can frame the message appropriately. */
+  senderRole?: 'peer'
+  /** Peer description looked up from the receiver's own peers.json at the
+   *  time the event was recorded. Stable — not sent by the peer, can't be
+   *  rewritten per-message. */
+  peerDescription?: string
 }
 
 export type AckData = {

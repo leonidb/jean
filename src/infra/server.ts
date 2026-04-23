@@ -28,6 +28,7 @@ import {
 import { INFRA_IDENTITY, type InfraInfo, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Board, canTransition, type TaskStatus } from './board.ts'
 import { resolveConfig } from './config.ts'
+import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
 import type {
   AgentRole,
   CreateTaskRequest,
@@ -180,6 +181,36 @@ type AgentEntry = {
 
 const agents = new Map<string, AgentEntry>()
 
+// Local dojo's identity — used as the `from` field on outbound peer sends, and
+// as the key under which peers look us up. Falls back to basename of dojo root.
+const MY_IDENTITY = identityFromConfig(DATA_DIR)
+
+// Registered peers — loaded once at startup. Each peer becomes a synthetic
+// entry in the `agents` map (role='peer') whose deliver() does an HTTP POST to
+// the peer's infra /send. Registry is static until restart — `jean peer add`
+// requires `jean infra stop` + start to take effect (acceptable for MVP).
+const peers = new Map<string, Peer>()
+{
+  const loaded = loadPeers(DATA_DIR)
+  for (const [identity, peer] of Object.entries(loaded.peers)) {
+    peers.set(identity, peer)
+    agents.set(identity, {
+      role: 'peer',
+      idle: true,
+      tags: [],
+      deliver: (msg) =>
+        createPeerDeliver({ peer, myIdentity: MY_IDENTITY })({
+          from: msg.from,
+          text: msg.text,
+          taskId: msg.taskId,
+        }),
+    })
+  }
+  if (peers.size > 0) {
+    process.stderr.write(`[jean] loaded ${peers.size} peer(s): ${[...peers.keys()].join(', ')}\n`)
+  }
+}
+
 function findSensei(): AgentEntry | undefined {
   for (const entry of agents.values()) {
     if (entry.role === 'sensei') return entry
@@ -205,12 +236,17 @@ async function routeSend(args: { from: string; to: string; text: string; taskId?
     const entry = agents.get(args.to)
     if (entry && entry.role === 'worker') entry.idle = false
   }
+  // If the sender is a registered peer, enrich the event with the
+  // locally-stored description. The peer can't rewrite this per-message —
+  // it's frozen in our own peers.json until we change it.
+  const senderPeer = peers.get(args.from)
   const stream = args.taskId ? taskStream(args.taskId) : agentStream(args.to)
   await record('send', stream, {
     agent: args.to,
     from: args.from,
     text: args.text,
     delivered,
+    ...(senderPeer && { senderRole: 'peer' as const, peerDescription: senderPeer.description }),
   } satisfies SendData)
   return delivered
 }
@@ -1194,13 +1230,20 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     }
 
     if (path === '/agents') {
-      const list = [...agents.entries()].map(([name, entry]) => ({
-        name,
-        role: entry.role,
-        idle: entry.idle,
-        tags: entry.tags,
-      }))
-      return Response.json({ agents: list })
+      // Liveness is only probed for peers (local agents are "live" by
+      // definition — they hold an open WS). Probe in parallel; per-peer
+      // results are cached for 5s inside peerLiveness().
+      return (async () => {
+        const list = await Promise.all(
+          [...agents.entries()].map(async ([name, entry]) => {
+            const base = { name, role: entry.role, idle: entry.idle, tags: entry.tags }
+            if (entry.role !== 'peer') return base
+            const peer = peers.get(name)
+            return { ...base, liveness: peer ? await peerLiveness(peer) : 'unknown' }
+          }),
+        )
+        return Response.json({ agents: list })
+      })()
     }
 
     // Identity: minimal, used by probes to verify "is this our jean infra?"

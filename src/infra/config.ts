@@ -10,6 +10,7 @@ import { resolve } from 'node:path'
 
 export const CONFIG_SCHEMA: Record<string, 'string' | 'number'> = {
   port: 'number',
+  identity: 'string',
   'slack.appToken': 'string',
   'slack.botToken': 'string',
   'slack.channel': 'string',
@@ -17,6 +18,10 @@ export const CONFIG_SCHEMA: Record<string, 'string' | 'number'> = {
 
 export type JeanConfig = {
   port?: number
+  /** Stable short name for this dojo. Appears as the `from` field on outbound
+   *  peer messages and as the key under which other dojos register us. Set at
+   *  `jean dojo init` (defaults to basename of dojo root) and rarely changed. */
+  identity?: string
   slack?: {
     appToken?: string
     botToken?: string

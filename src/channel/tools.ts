@@ -62,11 +62,15 @@ export const SEND_TOOL: Tool = {
   },
 }
 
-/** HTTP verbs per role. Sensei has full access; workers/users are read-only. */
+/** HTTP verbs per role. Sensei has full access; workers/users are read-only.
+ *  Peers never run as local channels (they don't load this plugin); the entry
+ *  exists only to keep the Record exhaustive and would act as read-only if
+ *  somehow used. */
 const METHODS_BY_ROLE: Record<AgentRole, string[]> = {
   sensei: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
   worker: ['GET'],
   user: ['GET'],
+  peer: ['GET'],
 }
 
 /**

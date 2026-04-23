@@ -47,6 +47,7 @@ import {
   validateConfigKey,
   writeConfig,
 } from '../infra/config.ts'
+import { identityFromConfig, loadPeers, savePeers } from '../infra/peers.ts'
 import { findDojoFrom, INFRA_IDENTITY, isProcessAlive, probeInfra, readRuntimeFiles } from '../probe.ts'
 
 const args = process.argv.slice(2)
@@ -91,6 +92,9 @@ async function main() {
       break
     case 'peek':
       await cmdPeek(args.slice(1))
+      break
+    case 'peer':
+      cmdPeer(args.slice(1))
       break
     case 'send':
       await cmdSend(args[1], args.slice(2).join(' '))
@@ -211,6 +215,161 @@ async function cmdPeek(args: string[]) {
   }
 
   console.log(asJson ? formatPeekJson(result) : formatPeekPretty(result))
+}
+
+// ── Peers ────────────────────────────────────────────────────────
+
+function cmdPeer(args: string[]) {
+  const sub = args[0]
+  switch (sub) {
+    case 'add':
+      cmdPeerAdd(args.slice(1))
+      return
+    case 'list':
+      cmdPeerList()
+      return
+    case 'remove':
+      cmdPeerRemove(args[1])
+      return
+    case 'link':
+      cmdPeerLink(args[1])
+      return
+    default:
+      console.error('Usage: jean peer <add|list|remove|link> ...')
+      console.error('  jean peer add <identity> --origin <path> --description "..."')
+      console.error('  jean peer list')
+      console.error('  jean peer remove <identity>')
+      console.error('  jean peer link <other-dojo-path>')
+      process.exit(1)
+  }
+}
+
+function parseFlag(args: string[], name: string): string | undefined {
+  const i = args.indexOf(`--${name}`)
+  return i >= 0 ? args[i + 1] : undefined
+}
+
+function cmdPeerAdd(args: string[]) {
+  const identity = args.find((a) => !a.startsWith('--'))
+  const origin = parseFlag(args, 'origin')
+  const description = parseFlag(args, 'description')
+
+  if (!identity || !origin || !description) {
+    console.error('Usage: jean peer add <identity> --origin <path> --description "<who this peer is>"')
+    console.error('All three are required. Description cannot be empty.')
+    process.exit(1)
+  }
+  if (description.trim().length === 0) {
+    console.error("Description must be non-empty — it's how sensei recognizes this peer.")
+    process.exit(1)
+  }
+
+  const originReal = realpathSync(resolve(origin))
+  if (!existsSync(resolve(originReal, '.jean'))) {
+    console.error(`Not a Jean dojo: ${originReal} (no .jean/ directory)`)
+    process.exit(1)
+  }
+
+  const jeanDir = resolve(findDojoRoot(), '.jean')
+  const file = loadPeers(jeanDir)
+  if (file.peers[identity]) {
+    console.error(`Peer "${identity}" already registered. Remove first with: jean peer remove ${identity}`)
+    process.exit(1)
+  }
+  file.peers[identity] = {
+    origin: { type: 'local-path', path: originReal },
+    description,
+    addedAt: new Date().toISOString(),
+  }
+  savePeers(jeanDir, file)
+  console.log(`${GREEN}Peer registered${RESET}`)
+  console.log(`  identity:    ${identity}`)
+  console.log(`  origin:      ${originReal}`)
+  console.log(`  description: ${description}`)
+  console.log()
+  console.log(`${DIM}Restart infra to load: jean infra stop && jean infra start${RESET}`)
+}
+
+function cmdPeerList() {
+  const jeanDir = resolve(findDojoRoot(), '.jean')
+  const { loadPeers } = require('../infra/peers.ts') as typeof import('../infra/peers.ts')
+  const file = loadPeers(jeanDir)
+  const entries = Object.entries(file.peers)
+  if (entries.length === 0) {
+    console.log('No peers registered.')
+    console.log(`${DIM}Add one: jean peer add <identity> --origin <path> --description "..."${RESET}`)
+    return
+  }
+  for (const [identity, peer] of entries) {
+    console.log(`${BOLD}${identity}${RESET}`)
+    console.log(`  origin:      ${peer.origin.type === 'local-path' ? peer.origin.path : '(non-local)'}`)
+    console.log(`  description: ${peer.description}`)
+    console.log(`  ${DIM}added ${peer.addedAt}${RESET}`)
+  }
+}
+
+function cmdPeerRemove(identity?: string) {
+  if (!identity) {
+    console.error('Usage: jean peer remove <identity>')
+    process.exit(1)
+  }
+  const jeanDir = resolve(findDojoRoot(), '.jean')
+  const file = loadPeers(jeanDir)
+  if (!file.peers[identity]) {
+    console.error(`Peer "${identity}" not registered.`)
+    process.exit(1)
+  }
+  delete file.peers[identity]
+  savePeers(jeanDir, file)
+  console.log(`Removed peer "${identity}". ${DIM}Restart infra to take effect.${RESET}`)
+}
+
+function cmdPeerLink(otherPath?: string) {
+  if (!otherPath) {
+    console.error('Usage: jean peer link <other-dojo-path>')
+    console.error('Creates mutual registrations: this dojo <-> <other-dojo>.')
+    process.exit(1)
+  }
+  const myDojo = findDojoRoot()
+  const myJean = resolve(myDojo, '.jean')
+  const otherDojo = realpathSync(resolve(otherPath))
+  const otherJean = resolve(otherDojo, '.jean')
+  if (!existsSync(otherJean)) {
+    console.error(`Not a Jean dojo: ${otherDojo}`)
+    process.exit(1)
+  }
+  if (otherDojo === realpathSync(myDojo)) {
+    console.error('Cannot link a dojo to itself.')
+    process.exit(1)
+  }
+
+  const myIdentity = identityFromConfig(myJean)
+  const otherIdentity = identityFromConfig(otherJean)
+
+  const describe = (which: string): string =>
+    `Jean dojo at ${which} (auto-linked ${new Date().toISOString().slice(0, 10)} — edit in peers.json for a better description).`
+
+  const mine = loadPeers(myJean)
+  if (!mine.peers[otherIdentity]) {
+    mine.peers[otherIdentity] = {
+      origin: { type: 'local-path', path: otherDojo },
+      description: describe(otherDojo),
+      addedAt: new Date().toISOString(),
+    }
+    savePeers(myJean, mine)
+  }
+  const theirs = loadPeers(otherJean)
+  if (!theirs.peers[myIdentity]) {
+    theirs.peers[myIdentity] = {
+      origin: { type: 'local-path', path: realpathSync(myDojo) },
+      description: describe(realpathSync(myDojo)),
+      addedAt: new Date().toISOString(),
+    }
+    savePeers(otherJean, theirs)
+  }
+  console.log(`${GREEN}Peer link established${RESET}`)
+  console.log(`  ${myIdentity} ↔ ${otherIdentity}`)
+  console.log(`${DIM}Restart both infras to load — and edit descriptions in each peers.json for clarity.${RESET}`)
 }
 
 async function cmdSend(agent?: string, text?: string) {
@@ -786,6 +945,10 @@ function cmdDojoInit(args: string[]) {
     // Pre-populate the shared worktree exclude so every future agent worktree starts clean.
     ensureGitExclude(bareDir)
   }
+
+  // Default identity = dojo dir basename, unless user provided --identity.
+  // Used as the `from` field when this dojo sends to peers.
+  if (config.identity === undefined) config.identity = basename(dojoRoot)
 
   writeConfig(jeanDir, config)
 
@@ -1698,6 +1861,11 @@ Commands:
     --since <id>     Only events with id > <id>; no cursor update
     --last <N>       Tail N recent significant events (default 20)
     --json           Machine-readable output
+  jean peer add <id> --origin <path> --description "..."
+                                              Register another dojo as a peer
+  jean peer list                              List registered peers
+  jean peer remove <id>                       Unregister a peer
+  jean peer link <other-dojo-path>            Register mutually with another dojo
 
 Environment:
   JEAN_INFRA_URL          Infrastructure URL (overrides port discovery)
