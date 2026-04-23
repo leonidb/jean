@@ -1317,6 +1317,25 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
                   message: 'Another session is already registered for this agent name.',
                 })
                 ws.close()
+                // Route a one-shot notice to sensei so the human has at least one
+                // visible surface to learn about the rejection. Without this,
+                // sensei is blind (we deliberately suppressed the register
+                // event to avoid the nudge-flood problem) and the newcomer's
+                // stderr is easy to miss inside a Claude Code TUI.
+                const sensei = findSensei()
+                if (sensei && sensei.deliver !== wsDeliver(ws)) {
+                  sensei.deliver({
+                    type: 'deliver',
+                    from: 'infra',
+                    text:
+                      `Notice: rejected a duplicate \`${msg.agent}\` session attempt. ` +
+                      `The existing session (sessionId ${existing.sessionId ?? 'unknown'}) is still connected; ` +
+                      `the attempted session (sessionId ${msg.sessionId ?? 'unknown'}) was closed. ` +
+                      `If the human may have started \`jean agent start ${msg.agent}\` twice by accident, ` +
+                      `let them know — only one process per agent name is allowed, and the duplicate's plugin ` +
+                      `has been told to stop reconnecting.`,
+                  })
+                }
                 break
               }
               // Old WS is dead (or same session reconnecting) — replace cleanly.

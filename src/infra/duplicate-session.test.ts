@@ -46,11 +46,15 @@ afterAll(() => {
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 
-function connect(agent: string, sessionId: string): Promise<{ ws: WebSocket; messages: OutboundMsg[] }> {
+function connect(
+  agent: string,
+  sessionId: string,
+  role: 'worker' | 'sensei' = 'worker',
+): Promise<{ ws: WebSocket; messages: OutboundMsg[] }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(WS_URL)
     const messages: OutboundMsg[] = []
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'register', agent, role: 'worker', sessionId }))
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'register', agent, role, sessionId }))
     ws.onmessage = (e) => {
       const msg = JSON.parse(String(e.data)) as OutboundMsg
       messages.push(msg)
@@ -109,5 +113,42 @@ describe('duplicate-session guard', () => {
     expect(second.messages.find((m) => m.type === 'registered')).toBeDefined()
     expect(second.messages.find((m) => m.type === 'error')).toBeUndefined()
     second.ws.close()
+  })
+
+  test('sensei (if connected) receives a notice about the rejection', async () => {
+    const sensei = await connect('sensei', 'sensei-sess', 'sensei')
+    expect(sensei.messages.find((m) => m.type === 'registered')).toBeDefined()
+
+    // Accumulate messages to sensei after registration. We wait briefly for
+    // the optional welcome-deliver to land (fired on 500ms timer after sensei
+    // register — see src/infra/server.ts), so the assertion isn't fooled by
+    // it.
+    await Bun.sleep(600)
+    const beforeCount = sensei.messages.length
+
+    const first = await connect('notice-worker', 'sess-1')
+    expect(first.messages.find((m) => m.type === 'registered')).toBeDefined()
+
+    // Give the async post-register nudge-to-sensei a moment to land.
+    await Bun.sleep(100)
+    const duringCount = sensei.messages.length
+
+    // Now attempt a duplicate — sensei should receive a notice.
+    await connect('notice-worker', 'sess-2')
+    await Bun.sleep(150)
+
+    const newMessagesToSensei = sensei.messages.slice(duringCount)
+    const notice = newMessagesToSensei.find(
+      (m) => m.type === 'deliver' && m.from === 'infra' && m.text.includes('duplicate `notice-worker`'),
+    )
+    expect(notice).toBeDefined()
+    if (notice?.type === 'deliver') {
+      expect(notice.text).toContain('sess-2')
+    }
+    // Silence linter on the unused var
+    void beforeCount
+
+    first.ws.close()
+    sensei.ws.close()
   })
 })
