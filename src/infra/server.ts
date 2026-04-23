@@ -177,6 +177,11 @@ type AgentEntry = {
   tags: string[]
   deliver: (msg: DeliverMsg) => boolean
   close?: () => void
+  /** True while the underlying transport is still open. Used to distinguish
+   *  a legitimate reconnect (old WS is dead) from a concurrent duplicate (old
+   *  WS is still live — two `jean agent start <name>` processes fighting for
+   *  the same slot). Peers and other non-WS agents have no live check. */
+  isLive?: () => boolean
 }
 
 const agents = new Map<string, AgentEntry>()
@@ -1288,13 +1293,34 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           case 'register': {
             const role = msg.role ?? 'worker'
 
-            // Handle existing agent with same name
+            // Handle existing agent with same name.
             const existing = agents.get(msg.agent)
             if (existing && existing.deliver !== wsDeliver(ws)) {
-              if (msg.sessionId && existing.sessionId && msg.sessionId === existing.sessionId) {
-                // Same session reconnecting
-              } else {
-                // New session replacing old one
+              const sameSession = !!msg.sessionId && !!existing.sessionId && msg.sessionId === existing.sessionId
+              const existingStillLive = existing.isLive?.() ?? false
+              // Concurrent duplicate: old WS is still live AND the newcomer has
+              // a different sessionId. This is two `jean agent start <name>`
+              // processes fighting for the same slot. Without this guard, each
+              // kick spawns a reconnect that kicks the other, ping-ponging
+              // forever and firing a nudge on every cycle. Keep the incumbent;
+              // reject the newcomer and tell its plugin to stop reconnecting.
+              if (!sameSession && existingStillLive) {
+                wsSend(ws, {
+                  type: 'deliver',
+                  from: 'infra',
+                  text: `ERROR: agent "${msg.agent}" is already connected from another session (${existing.sessionId ?? 'unknown'}). This session will be closed — only one process per agent name. Stop the other 'jean agent start ${msg.agent}' if this one is the intended instance.`,
+                })
+                wsSend(ws, {
+                  type: 'error',
+                  code: 'duplicate-session',
+                  agent: msg.agent,
+                  message: 'Another session is already registered for this agent name.',
+                })
+                ws.close()
+                break
+              }
+              // Old WS is dead (or same session reconnecting) — replace cleanly.
+              if (!sameSession) {
                 if (ws.data.agent) ws.data.agent = undefined
                 existing.close?.()
               }
@@ -1332,6 +1358,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
                 ws.data.agent = undefined
                 ws.close()
               },
+              isLive: () => ws.readyState === 1,
             })
             wsSend(ws, { type: 'registered', agent: msg.agent, role })
             void record('register', agentStream(msg.agent), {

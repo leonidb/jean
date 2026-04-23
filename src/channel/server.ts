@@ -17,7 +17,7 @@ import { dirname, resolve } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import type { AgentRole, DeliverMsg, RegisteredMsg } from '../infra/protocol.ts'
+import type { AgentRole, DeliverMsg, ErrorMsg, RegisteredMsg } from '../infra/protocol.ts'
 import { findDojoFrom, readRuntimeFiles } from '../probe.ts'
 import { buildInstructions, buildTools, formatInfraResponse, optionalString, resolveReplyTaskId } from './tools.ts'
 
@@ -210,6 +210,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+/** Set when infra sends a fatal ErrorMsg (e.g. duplicate-session). Stops the
+ *  reconnect loop so a rejected plugin doesn't hammer the server forever. */
+let fatalClose = false
 /** Most recent deliver's taskId — attached to outbound replies so the server doesn't have to infer it. */
 let lastDeliverTaskId: string | undefined
 
@@ -248,7 +251,7 @@ function connectToInfra() {
 
     ws.addEventListener('message', (event) => {
       try {
-        const msg = JSON.parse(String(event.data)) as DeliverMsg | RegisteredMsg
+        const msg = JSON.parse(String(event.data)) as DeliverMsg | RegisteredMsg | ErrorMsg
 
         switch (msg.type) {
           case 'registered':
@@ -260,6 +263,14 @@ function connectToInfra() {
             if (msg.taskId) lastDeliverTaskId = msg.taskId
             deliver(msg.from, msg.text, msg.taskId ? { taskId: msg.taskId } : {})
             break
+
+          case 'error':
+            // Infra rejected this connection for a reason the plugin can't
+            // recover from (currently: another session holds this name).
+            // Stop reconnecting so we don't flap — the human must resolve it.
+            process.stderr.write(`[jean] fatal: ${msg.code} — ${msg.message}\n`)
+            fatalClose = true
+            break
         }
       } catch {
         // Ignore malformed messages
@@ -267,6 +278,10 @@ function connectToInfra() {
     })
 
     ws.addEventListener('close', () => {
+      if (fatalClose) {
+        process.stderr.write(`[jean] connection closed (fatal); not reconnecting.\n`)
+        return
+      }
       process.stderr.write(`[jean] disconnected from infra, reconnecting...\n`)
       scheduleReconnect()
     })

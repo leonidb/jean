@@ -65,6 +65,15 @@ export type RegisteredMsg = {
   role: AgentRole
 }
 
+/** Fatal error — infra is closing this connection. Plugin should NOT reconnect.
+ *  The `code` is machine-readable; `message` is human-readable. */
+export type ErrorMsg = {
+  type: 'error'
+  code: 'duplicate-session'
+  agent: string
+  message: string
+}
+
 // ── Infrastructure HTTP endpoints ─────────────────────────────────
 
 /** POST /send — external process pushes a message to an agent */
@@ -104,4 +113,4 @@ export type UpdateStatusRequest = {
 // ── Union types ───────────────────────────────────────────────────
 
 export type InboundMsg = RegisterMsg | ReplyMsg | TaskCommentMsg | SendMsg
-export type OutboundMsg = DeliverMsg | RegisteredMsg
+export type OutboundMsg = DeliverMsg | RegisteredMsg | ErrorMsg
