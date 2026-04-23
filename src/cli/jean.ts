@@ -25,8 +25,18 @@
  *   jean infra url                              Print infra HTTP URL (http://127.0.0.1:PORT)
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
-import { basename, dirname, relative, resolve } from 'node:path'
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { basename, dirname, relative, resolve, sep } from 'node:path'
 import {
   CONFIG_SCHEMA,
   getByPath,
@@ -626,8 +636,11 @@ async function cmdDojo(args: string[]) {
     case 'init':
       cmdDojoInit(args.slice(1))
       break
+    case 'move':
+      cmdDojoMove(args.slice(1))
+      break
     default:
-      console.error('Usage: jean dojo init [path] --port <N> [--git] [--key value ...]')
+      console.error('Usage: jean dojo <init|move> ...')
       process.exit(1)
   }
 }
@@ -765,6 +778,119 @@ function cmdDojoInit(args: string[]) {
   console.log(`  jean infra start       ${DIM}← then start infrastructure${RESET}`)
 }
 
+// ── Dojo move: relocate a dojo on disk ───────────────────────────
+
+/**
+ * Move the current dojo to a new path, repairing git worktrees and rewriting
+ * the only absolute path Jean bakes into agent config (JEAN_DOJO in
+ * .jean/.mcp.json). Intended to keep a dojo move down to a single command —
+ * critical-path for organizing command-center dojo layouts.
+ */
+function cmdDojoMove(args: string[]) {
+  const oldRoot = realpathSync(findDojoRoot())
+  const targetArg = args.find((a) => !a.startsWith('--'))
+  if (!targetArg) {
+    console.error('Usage: jean dojo move <new-path>')
+    process.exit(1)
+  }
+  // Resolve the destination through the parent's realpath so symlink-equivalent
+  // paths compare correctly (macOS /var ↔ /private/var is the classic trap).
+  const newRootArg = resolve(targetArg)
+  const newParent = dirname(newRootArg)
+  mkdirSync(newParent, { recursive: true })
+  const newRoot = resolve(realpathSync(newParent), basename(newRootArg))
+
+  if (newRoot === oldRoot) {
+    console.error('Destination is the same as the current dojo root.')
+    process.exit(1)
+  }
+  if (existsSync(newRoot)) {
+    console.error(`Destination already exists: ${newRoot}`)
+    process.exit(1)
+  }
+  // Moving into self would orphan everything — refuse.
+  if (newRoot.startsWith(`${oldRoot}${sep}`)) {
+    console.error(`Cannot move a dojo into itself: ${newRoot} is inside ${oldRoot}`)
+    process.exit(1)
+  }
+
+  // Infra must be stopped — PID files and open sockets don't survive the move.
+  const dataDir = resolve(oldRoot, '.jean')
+  const { pid } = readRuntimeFiles(dataDir)
+  if (pid !== null && isProcessAlive(pid)) {
+    console.error(`Infra is running (pid ${pid}). Run 'jean infra stop' first.`)
+    process.exit(1)
+  }
+
+  renameSync(oldRoot, newRoot)
+  // Our own cwd may have been inside the old root — now a ghost inode, which
+  // makes any posix_spawn fail with ENOENT. Rebase onto the new root before
+  // touching worktrees or agent configs.
+  if (process.cwd().startsWith(oldRoot)) process.chdir(newRoot)
+
+  // Discover agent worktrees by scanning for .jean/.jean-agent.json — we can't
+  // use discoverAgents() yet because it calls `git worktree list`, which reads
+  // stale gitdir pointers and drops all worktrees until repair runs.
+  const agentPaths: string[] = []
+  try {
+    for (const entry of readdirSync(newRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+      const p = resolve(newRoot, entry.name)
+      if (existsSync(resolve(p, '.jean', '.jean-agent.json'))) agentPaths.push(p)
+    }
+  } catch {}
+
+  // Git worktrees store absolute gitdir pointers on both ends (bare→worktree
+  // and worktree→bare). `worktree repair` with explicit paths rewrites both.
+  const bareDir = resolve(newRoot, '.jean', '.bare')
+  if (existsSync(bareDir) && agentPaths.length > 0) {
+    const repair = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'repair', ...agentPaths], {
+      cwd: newRoot,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    if (repair.exitCode !== 0) {
+      console.error('git worktree repair failed:')
+      console.error(repair.stderr.toString().trim())
+      process.exit(1)
+    }
+  }
+
+  // Rewrite JEAN_DOJO in every agent's .jean/.mcp.json — the only absolute path
+  // Jean bakes into agent config. Everything else (hook paths in
+  // settings.local.json, --add-dir args) is relative and survives the move.
+  const agents = discoverAgents(newRoot)
+  let rewrote = 0
+  for (const agent of agents) {
+    const mcpPath = resolve(agent.path, '.jean', '.mcp.json')
+    try {
+      const cfg = JSON.parse(readFileSync(mcpPath, 'utf8'))
+      const env = cfg?.mcpServers?.jean?.env
+      if (env && 'JEAN_DOJO' in env) {
+        env.JEAN_DOJO = newRoot
+        writeFileSync(mcpPath, `${JSON.stringify(cfg, null, 2)}\n`)
+        rewrote++
+      }
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') continue
+      console.error(`Warning: failed to rewrite ${mcpPath}: ${(e as Error).message}`)
+    }
+  }
+
+  console.log(`${GREEN}Dojo moved${RESET}`)
+  console.log(`  From: ${oldRoot}`)
+  console.log(`  To:   ${newRoot}`)
+  console.log(`  Rewrote JEAN_DOJO in ${rewrote} agent config(s)`)
+  if (process.cwd().startsWith(oldRoot)) {
+    console.log()
+    console.log(`${DIM}Your shell is still on the old path — cd to the new location.${RESET}`)
+  }
+  console.log()
+  console.log(`${DIM}Note: Claude Code session history is keyed by absolute cwd.${RESET}`)
+  console.log(`${DIM}Past sessions from the old path won't be found by 'claude -c' here.${RESET}`)
+}
+
 // ── Satori: guided dojo setup ────────────────────────────────────
 
 function cmdSatori() {
@@ -779,6 +905,9 @@ function cmdSatori() {
   console.log(`${DIM}Answer a few questions to bootstrap this dojo. Exit with Ctrl+D when done.${RESET}`)
   console.log()
 
+  // Pass an initial positional prompt so Claude Code produces the first turn
+  // instead of waiting on stdin. Without this the human sees a silent prompt
+  // and has to type something to kick Satori off — which defeats "speak first".
   const result = Bun.spawnSync(
     [
       'claude',
@@ -786,6 +915,7 @@ function cmdSatori() {
       '.jean',
       '--append-system-prompt',
       'Load the satori skill immediately and follow its instructions. Start by checking the dojo state.',
+      'Begin the Satori intake now. Follow the satori skill — speak first, introduce yourself, and start the intake questions in the same message.',
     ],
     { cwd: dojoRoot, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' },
   )
@@ -1492,6 +1622,7 @@ Commands:
     --port <N>        Unique TCP port for this dojo's infra (required)
     --git             Create a bare git repo at .jean/.bare/
     --<key> <value>   Any config key (e.g. --slack.channel "#dev")
+  jean dojo move <new-path>                   Move this dojo to a new location
   jean satori                                 Guided dojo setup (interactive)
   jean config set <key> <value>               Set a config value
   jean config get <key>                       Get a config value
