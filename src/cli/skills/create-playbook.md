@@ -23,6 +23,12 @@ description: >
 # <Title>
 
 <Body: phases, rules, output expectations, done criteria>
+
+## Checklist
+
+- <verifiable per-task action>
+- <verifiable per-task action>
+- ...
 ```
 
 ## Writing guidelines
@@ -34,6 +40,7 @@ description: >
 - **Human interaction points**: when should the agent pause and ask?
 - **Keep it short**: agents scan playbooks quickly, not read essays.
 - **No agent-specific instructions**: playbooks define the workflow, not which agent runs it.
+- **Optional `## Checklist` section**: bullet items every task using this playbook must address. Items should be *verifiable per-task actions* (loaded the X skill, saved artifacts to a local branch, did not push, etc.) — not advice. Items become a structured contract: sensei pastes them verbatim into every dispatch, the worker addresses each with `[x]` (done + brief evidence) or `[ ]` (skipped + reason), and sensei refuses to close until each item is addressed. Author the checklist with the human in the loop — propose a draft, let them edit, then commit. Skip the section entirely if the playbook is short enough that prose phases are checklist-equivalent.
 
 ## Verifying
 
