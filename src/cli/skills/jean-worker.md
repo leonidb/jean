@@ -41,6 +41,8 @@ Returns: task fields + curated `comments` (high signal — read first) + full `m
 
 **"Load the skill" means invoke the `Skill` tool — not read the SKILL.md file, not quote the description, not pattern-match from the name.** A skill is only active in your context after `Skill(name="<name>")` is called. Reading the file by hand gives you a static snapshot but doesn't activate the skill's behavior. If the playbook says "follow the X skill," your first tool call is `Skill(name="X")`.
 
+**If the playbook has a `## Checklist` section, your final reply must address each item.** Use `[x]` (done, with one-line evidence) or `[ ]` (skipped, with reason) per item — verbatim wording from the checklist. The sensei will check this before closing the task; missing items get the task sent back, not marked done. If you can't honestly tick an item, say so and explain — partial completion with a clear reason is better than silently skipping.
+
 If the playbook is missing, unclear, or you're unsure which one applies: ask the sensei via `reply` before starting. Don't guess.
 
 ## reply vs comment

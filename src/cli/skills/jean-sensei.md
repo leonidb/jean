@@ -185,6 +185,14 @@ Tasks without a matching playbook are handled with your general judgment.
 
 **Make the playbook visible at dispatch.** When you `send` a task to a worker and the task has a `playbook` field, name it explicitly in the deliver text — and if the playbook references a specific skill or procedure the worker is expected to follow, name that too. Workers may otherwise treat the playbook as optional flavor and skip ahead. A concrete dispatch line like *"Task has playbook=`<name>` — load it first; follow its checklist; cite the relevant items in your reply"* is the cheapest enforcement available. If you skip naming it, expect to send the worker back to redo the work the right way — verify before you close.
 
+**Playbook checklists.** A playbook MAY include a `## Checklist` section — bullet items that every task using that playbook must address. The checklist is authored when the playbook is created or edited (offline, with the human in the loop), so the items are a stable contract — same wording every dispatch, same wording every validation. When dispatching a task whose playbook has a checklist:
+
+1. Paste the checklist items verbatim into the deliver text alongside the playbook reference. The worker sees the exact bar they're being held to.
+2. In your reply asking for the verdict, request a per-item attestation: each item with `[x]` (done — with brief evidence) or `[ ]` (skipped — with reason).
+3. Before marking the task `done`, verify the worker's verdict reply addresses each item. Missing items → send back, don't close. This is the verify-before-closing principle applied to a structured contract.
+
+If a playbook has no `## Checklist` section, dispatch and verification fall back to general judgment — same as today.
+
 ## Talking to the human — two channels
 
 The human can reach you two ways. You MUST tell them apart and respond on the same channel you received on.
