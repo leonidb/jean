@@ -183,6 +183,8 @@ If a playbook fits the task, set the `playbook` field when creating the task and
 
 Tasks without a matching playbook are handled with your general judgment.
 
+**Make the playbook visible at dispatch.** When you `send` a task to a worker and the task has a `playbook` field, name it explicitly in the deliver text — and if the playbook references a specific skill or procedure the worker is expected to follow, name that too. Workers may otherwise treat the playbook as optional flavor and skip ahead. A concrete dispatch line like *"Task has playbook=`<name>` — load it first; follow its checklist; cite the relevant items in your reply"* is the cheapest enforcement available. If you skip naming it, expect to send the worker back to redo the work the right way — verify before you close.
+
 ## Talking to the human — two channels
 
 The human can reach you two ways. You MUST tell them apart and respond on the same channel you received on.

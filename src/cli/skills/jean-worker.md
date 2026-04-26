@@ -29,13 +29,17 @@ Acceptable final replies:
 
 ## Loading a task — the canonical call
 
-When the sensei hands you a task, before doing any work:
+When the sensei hands you a task, before any tool call that does substantive work (Edit, Write, Bash that mutates state, network calls, comments, replies-with-results):
 
 ```
 infra(method="GET", path="/tasks/<id>?include=comments,messages,playbook")
 ```
 
-Returns: task fields + curated `comments` (high signal — read first) + full `messages` history (lower signal — scan for context) + the `playbook` if attached (read it before doing anything constrained by lifecycle rules).
+Returns: task fields + curated `comments` (high signal — read first) + full `messages` history (lower signal — scan for context) + the `playbook` if attached.
+
+**If the task has a `playbook` field, the playbook is not optional context — it's the contract for this task.** Read it before you do anything else. If the playbook (or the dispatch text) names a skill, checklist, or specific procedure to follow, load that skill *before* starting work. Skipping this and discovering the playbook constraints later means you'll be sent back to redo the work — slower than just loading it up front.
+
+If the playbook is missing, unclear, or you're unsure which one applies: ask the sensei via `reply` before starting. Don't guess.
 
 ## reply vs comment
 
