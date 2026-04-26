@@ -39,6 +39,8 @@ Returns: task fields + curated `comments` (high signal — read first) + full `m
 
 **If the task has a `playbook` field, the playbook is not optional context — it's the contract for this task.** Read it before you do anything else. If the playbook (or the dispatch text) names a skill, checklist, or specific procedure to follow, load that skill *before* starting work. Skipping this and discovering the playbook constraints later means you'll be sent back to redo the work — slower than just loading it up front.
 
+**"Load the skill" means invoke the `Skill` tool — not read the SKILL.md file, not quote the description, not pattern-match from the name.** A skill is only active in your context after `Skill(name="<name>")` is called. Reading the file by hand gives you a static snapshot but doesn't activate the skill's behavior. If the playbook says "follow the X skill," your first tool call is `Skill(name="X")`.
+
 If the playbook is missing, unclear, or you're unsure which one applies: ask the sensei via `reply` before starting. Don't guess.
 
 ## reply vs comment
