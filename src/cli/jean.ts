@@ -848,11 +848,11 @@ async function cmdDojo(args: string[]) {
     case 'move':
       cmdDojoMove(args.slice(1))
       break
-    case 'open':
-      cmdDojoOpen(args.slice(1))
+    case 'start':
+      cmdDojoStart(args.slice(1))
       break
     default:
-      console.error('Usage: jean dojo <init|move|open> ...')
+      console.error('Usage: jean dojo <init|move|start> ...')
       process.exit(1)
   }
 }
@@ -1107,7 +1107,7 @@ function cmdDojoMove(args: string[]) {
   console.log(`${DIM}Past sessions from the old path won't be found by 'claude -c' here.${RESET}`)
 }
 
-// ── Dojo open: split current terminal tab into infra + agent panes ──
+// ── Dojo start: split current terminal tab into infra + agent panes ──
 
 /**
  * Split the current terminal tab into infra + sensei + workers panes.
@@ -1120,7 +1120,7 @@ function cmdDojoMove(args: string[]) {
  * inside `jean infra start` will fail loudly in the infra pane, while the
  * agent panes connect to the running infra normally.
  */
-function cmdDojoOpen(args: string[]) {
+function cmdDojoStart(args: string[]) {
   const opener = pickTerminalOpener()
   if (!opener) {
     console.error(`No terminal layout implementation for platform=${process.platform}.`)
@@ -1923,7 +1923,7 @@ Commands:
     --git             Create a bare git repo at .jean/.bare/
     --<key> <value>   Any config key (e.g. --slack.channel "#dev")
   jean dojo move <new-path>                   Move this dojo to a new location
-  jean dojo open [agents...] [--only a,b,c]   Lay out current iTerm tab: infra | sensei | workers
+  jean dojo start [agents...] [--only a,b,c]  Lay out current iTerm tab: infra | sensei | workers
                                               (macOS + iTerm2; current shell becomes the infra pane)
   jean satori                                 Guided dojo setup (interactive)
   jean config set <key> <value>               Set a config value
