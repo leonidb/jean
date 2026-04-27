@@ -307,11 +307,26 @@ function scheduleReconnect() {
 await mcp.connect(new StdioServerTransport())
 connectToInfra()
 
-// Detect parent death: when Claude exits, stdin closes. SDK doesn't handle this (PR #1613).
+// Detect parent death: when Claude exits, stdin closes. SDK doesn't handle
+// this (PR #1613). The 'end' event is unreliable in Bun when the MCP
+// transport already owns stdin — orphans observed in the wild surviving
+// 18h+ past their parent claude. Belt-and-suspenders: also poll the parent
+// PID. If the parent dies, the plugin exits regardless of stream events.
 process.stdin.on('end', () => {
   process.stderr.write(`[jean] stdin closed (parent died), shutting down\n`)
   ws?.close()
   process.exit(0)
 })
+
+// Initial parent PID — if it ever changes (parent died, this process gets
+// reparented to launchd / init), exit. Cheap (every 5s) and decisive.
+const initialPpid = process.ppid
+setInterval(() => {
+  if (process.ppid !== initialPpid) {
+    process.stderr.write(`[jean] parent died (ppid ${initialPpid} → ${process.ppid}), shutting down\n`)
+    ws?.close()
+    process.exit(0)
+  }
+}, 5_000).unref()
 
 process.stderr.write(`[jean] channel plugin started for agent "${AGENT_NAME}"\n`)
