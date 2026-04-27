@@ -36,3 +36,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # IDE
 .cursor
 .idea
+
+# Playwright MCP debug artifacts (per-session screenshots / logs)
+.playwright-mcp/
+
+# Local event log (only belongs inside dojos via .jean/, never at repo root)
+/history.jsonl

@@ -48,7 +48,14 @@ import {
   writeConfig,
 } from '../infra/config.ts'
 import { identityFromConfig, loadPeers, type Peer, savePeers } from '../infra/peers.ts'
-import { findDojoFrom, INFRA_IDENTITY, isProcessAlive, probeInfra, readRuntimeFiles } from '../probe.ts'
+import {
+  findDojoFrom,
+  INFRA_IDENTITY,
+  isLocalInfraAlive,
+  isProcessAlive,
+  probeInfra,
+  readRuntimeFiles,
+} from '../probe.ts'
 import { type LayoutSpec, pickTerminalOpener } from './terminal-layout.ts'
 
 const args = process.argv.slice(2)
@@ -79,16 +86,8 @@ function discoverInfraUrl(): string {
   return `http://127.0.0.1:${port}`
 }
 
-// Computed lazily on first infraFetch — eager evaluation here would refuse
-// to load the module for `jean infra start` when infra isn't (yet) running.
-let _infraUrl: string | null = null
-function infraUrl(): string {
-  if (_infraUrl === null) _infraUrl = discoverInfraUrl()
-  return _infraUrl
-}
-
 async function infraFetch(path: string, init?: RequestInit): Promise<Response> {
-  const url = infraUrl()
+  const url = discoverInfraUrl()
   try {
     return await fetch(`${url}${path}`, init)
   } catch {
@@ -420,7 +419,7 @@ async function cmdStatus() {
 
   const agentNames = info.agents.map((a) => a.name)
   console.log(`\n${BOLD}Jean Infrastructure${RESET}`)
-  console.log(`  URL: ${infraUrl()}`)
+  console.log(`  URL: ${discoverInfraUrl()}`)
   console.log(`  Connected agents: ${agentNames.length ? agentNames.join(', ') : '(none)'}`)
 
   if (eventsData.events.length) {
@@ -1890,12 +1889,10 @@ function cmdAgentStart(name?: string) {
   }
 
   // Refuse to spawn an agent into a dojo with no running infra. The channel
-  // plugin would silently retry-loop in the background while the agent's
-  // tools fail one by one — confusing and easy to miss. The plugin's retry
-  // loop is meant for transient drops (jean infra stop && start) during a
-  // session, not for missing infra at session start.
-  const { pid, port } = readRuntimeFiles(resolve(dojoRoot, '.jean'))
-  if (pid === null || port === null || !isProcessAlive(pid)) {
+  // plugin would silently retry-loop while the agent's tools fail one by one
+  // — confusing and easy to miss. The plugin's retry loop is for transient
+  // drops mid-session, not for missing infra at session start.
+  if (!isLocalInfraAlive(resolve(dojoRoot, '.jean'))) {
     console.error(`Infra is not running for this dojo (${basename(dojoRoot)}).`)
     console.error('Start it first with: jean infra start')
     process.exit(1)

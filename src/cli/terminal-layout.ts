@@ -88,17 +88,21 @@ export function buildITermLayoutScript(spec: LayoutSpec): string {
   lines.push('  set s_infra to current session of current tab of current window')
   lines.push(`  tell s_infra to write text ${aplString(cmd(spec.infra.command))}`)
 
+  // AppleScript: `tell X to set V to <method-call>` — the method call is
+  // evaluated in X's context and the result lands in V. Wrapping a tell
+  // statement in parens (`set V to (tell X to ...)`) doesn't work because
+  // tell-to is a statement, not an expression.
   let workersAnchor: string | null = null
   if (spec.sensei) {
-    lines.push('  set s_sensei to (tell s_infra to split vertically with default profile)')
+    lines.push('  tell s_infra to set s_sensei to split vertically with default profile')
     lines.push(`  tell s_sensei to write text ${aplString(cmd(spec.sensei.command))}`)
     if (spec.workers.length > 0) {
-      lines.push('  set w0 to (tell s_sensei to split vertically with default profile)')
+      lines.push('  tell s_sensei to set w0 to split vertically with default profile')
       lines.push(`  tell w0 to write text ${aplString(cmd(spec.workers[0]!.command))}`)
       workersAnchor = 'w0'
     }
   } else if (spec.workers.length > 0) {
-    lines.push('  set w0 to (tell s_infra to split vertically with default profile)')
+    lines.push('  tell s_infra to set w0 to split vertically with default profile')
     lines.push(`  tell w0 to write text ${aplString(cmd(spec.workers[0]!.command))}`)
     workersAnchor = 'w0'
   }
@@ -106,7 +110,7 @@ export function buildITermLayoutScript(spec: LayoutSpec): string {
   if (workersAnchor) {
     let prev = workersAnchor
     for (let i = 1; i < spec.workers.length; i++) {
-      lines.push(`  set w${i} to (tell ${prev} to split horizontally with default profile)`)
+      lines.push(`  tell ${prev} to set w${i} to split horizontally with default profile`)
       lines.push(`  tell w${i} to write text ${aplString(cmd(spec.workers[i]!.command))}`)
       prev = `w${i}`
     }

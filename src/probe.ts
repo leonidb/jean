@@ -45,6 +45,12 @@ export function readRuntimeFiles(dataDir: string): { pid: number | null; port: n
   return { pid, port }
 }
 
+/** Cheap (sync, no network) check: pid+port files present and the pid is alive. */
+export function isLocalInfraAlive(dataDir: string): boolean {
+  const { pid, port } = readRuntimeFiles(dataDir)
+  return pid !== null && port !== null && isProcessAlive(pid)
+}
+
 /** Walk up from a starting directory looking for a dojo (a `.jean/` directory). */
 export function findDojoFrom(startDir: string): string | null {
   let dir = startDir
