@@ -1889,6 +1889,18 @@ function cmdAgentStart(name?: string) {
     return
   }
 
+  // Refuse to spawn an agent into a dojo with no running infra. The channel
+  // plugin would silently retry-loop in the background while the agent's
+  // tools fail one by one — confusing and easy to miss. The plugin's retry
+  // loop is meant for transient drops (jean infra stop && start) during a
+  // session, not for missing infra at session start.
+  const { pid, port } = readRuntimeFiles(resolve(dojoRoot, '.jean'))
+  if (pid === null || port === null || !isProcessAlive(pid)) {
+    console.error(`Infra is not running for this dojo (${basename(dojoRoot)}).`)
+    console.error('Start it first with: jean infra start')
+    process.exit(1)
+  }
+
   console.log(`Starting agent "${name}" in ${agent.path}...`)
   const flags = agentLaunchFlags(agent.path).split(' ')
   const result = Bun.spawnSync(['claude', ...flags, '--dangerously-load-development-channels', 'server:jean'], {
