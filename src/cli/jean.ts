@@ -54,24 +54,46 @@ import { type LayoutSpec, pickTerminalOpener } from './terminal-layout.ts'
 const args = process.argv.slice(2)
 const command = args[0]
 
+/**
+ * Resolve the infra URL for the current command. No fallbacks — the dojo and
+ * its port must both be unambiguous. Two specific failure modes that used to
+ * succeed silently with wrong data:
+ *   - cwd outside any dojo  → no idea which infra is meant
+ *   - cwd in a dojo, infra stopped  → falling back to a default port silently
+ *     dispatched commands to whatever dojo happened to be running there
+ *     (observed: `jean board` run inside one dojo returned another dojo's board).
+ * Both now fail loudly.
+ */
 function discoverInfraUrl(): string {
-  if (process.env.JEAN_INFRA_URL) return process.env.JEAN_INFRA_URL
   const root = findDojoFrom(process.cwd())
-  if (root) {
-    const { port } = readRuntimeFiles(resolve(root, '.jean'))
-    if (port !== null) return `http://127.0.0.1:${port}`
+  if (!root) {
+    console.error('Not inside a Jean dojo. cd into one first.')
+    process.exit(1)
   }
-  return 'http://127.0.0.1:8700'
+  const { port } = readRuntimeFiles(resolve(root, '.jean'))
+  if (port === null) {
+    console.error(`Infra is not running for this dojo (${basename(root)}).`)
+    console.error('Start it with: jean infra start')
+    process.exit(1)
+  }
+  return `http://127.0.0.1:${port}`
 }
 
-const INFRA_URL = discoverInfraUrl()
+// Computed lazily on first infraFetch — eager evaluation here would refuse
+// to load the module for `jean infra start` when infra isn't (yet) running.
+let _infraUrl: string | null = null
+function infraUrl(): string {
+  if (_infraUrl === null) _infraUrl = discoverInfraUrl()
+  return _infraUrl
+}
 
 async function infraFetch(path: string, init?: RequestInit): Promise<Response> {
+  const url = infraUrl()
   try {
-    return await fetch(`${INFRA_URL}${path}`, init)
+    return await fetch(`${url}${path}`, init)
   } catch {
     console.error('Could not connect to Jean infrastructure. Is it running?')
-    console.error(`  Expected at: ${INFRA_URL}`)
+    console.error(`  Expected at: ${url}`)
     console.error(`  Start with:  jean infra start`)
     process.exit(1)
   }
@@ -398,7 +420,7 @@ async function cmdStatus() {
 
   const agentNames = info.agents.map((a) => a.name)
   console.log(`\n${BOLD}Jean Infrastructure${RESET}`)
-  console.log(`  URL: ${INFRA_URL}`)
+  console.log(`  URL: ${infraUrl()}`)
   console.log(`  Connected agents: ${agentNames.length ? agentNames.join(', ') : '(none)'}`)
 
   if (eventsData.events.length) {
@@ -1939,12 +1961,7 @@ Commands:
                                               Register another dojo as a peer
   jean peer list                              List registered peers
   jean peer remove <id>                       Unregister a peer
-  jean peer link <other-dojo-path>            Register mutually with another dojo
-
-Environment:
-  JEAN_INFRA_URL          Infrastructure URL (overrides port discovery)
-  JEAN_PORT               Fixed port for infra server (default: auto-select from 8700)
-  JEAN_DATA_DIR           Data directory (default: .jean/ in dojo root)`)
+  jean peer link <other-dojo-path>            Register mutually with another dojo`)
 }
 
 function statusColor(status: string): string {
