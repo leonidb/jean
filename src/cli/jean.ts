@@ -49,6 +49,7 @@ import {
 } from '../infra/config.ts'
 import { identityFromConfig, loadPeers, type Peer, savePeers } from '../infra/peers.ts'
 import { findDojoFrom, INFRA_IDENTITY, isProcessAlive, probeInfra, readRuntimeFiles } from '../probe.ts'
+import { type LayoutSpec, pickTerminalOpener } from './terminal-layout.ts'
 
 const args = process.argv.slice(2)
 const command = args[0]
@@ -825,8 +826,11 @@ async function cmdDojo(args: string[]) {
     case 'move':
       cmdDojoMove(args.slice(1))
       break
+    case 'open':
+      cmdDojoOpen(args.slice(1))
+      break
     default:
-      console.error('Usage: jean dojo <init|move> ...')
+      console.error('Usage: jean dojo <init|move|open> ...')
       process.exit(1)
   }
 }
@@ -1079,6 +1083,78 @@ function cmdDojoMove(args: string[]) {
   console.log()
   console.log(`${DIM}Note: Claude Code session history is keyed by absolute cwd.${RESET}`)
   console.log(`${DIM}Past sessions from the old path won't be found by 'claude -c' here.${RESET}`)
+}
+
+// ── Dojo open: split current terminal tab into infra + agent panes ──
+
+/**
+ * Split the current terminal tab into infra + sensei + workers panes.
+ * Layout decisions and platform-specific scripting live in
+ * `terminal-layout.ts`; this command just discovers the dojo's agents,
+ * builds a platform-agnostic LayoutSpec, and hands it to whichever
+ * terminal opener matches the current platform.
+ *
+ * No custom guard for "infra already running" — the existing duplicate-detect
+ * inside `jean infra start` will fail loudly in the infra pane, while the
+ * agent panes connect to the running infra normally.
+ */
+function cmdDojoOpen(args: string[]) {
+  const opener = pickTerminalOpener()
+  if (!opener) {
+    console.error(`No terminal layout implementation for platform=${process.platform}.`)
+    console.error('Currently supported: macOS + iTerm2. Add more in src/cli/terminal-layout.ts.')
+    process.exit(1)
+  }
+
+  const dojoRoot = findDojoRoot()
+  const all = discoverAgents(dojoRoot)
+
+  // Filter: positional names take precedence; --only <a,b,c> as alt syntax.
+  const positional = args.filter((a) => !a.startsWith('--'))
+  const onlyIdx = args.indexOf('--only')
+  const flagList = onlyIdx >= 0 && args[onlyIdx + 1] ? args[onlyIdx + 1]!.split(',') : []
+  const wanted = new Set([...positional, ...flagList].map((s) => s.trim()).filter(Boolean))
+  const filtered = wanted.size > 0 ? all.filter((a) => wanted.has(a.name)) : all
+
+  if (wanted.size > 0) {
+    const missing = [...wanted].filter((w) => !all.some((a) => a.name === w))
+    if (missing.length > 0) {
+      console.error(`Unknown agents: ${missing.join(', ')}`)
+      process.exit(1)
+    }
+  }
+
+  // Senseis go in middle column. Peers have no local process; skip them.
+  const senseis = filtered.filter((a) => a.role === 'sensei').map((a) => a.name)
+  const workers = filtered.filter((a) => a.role === 'worker').map((a) => a.name)
+  const sensei = senseis.at(-1)
+
+  if (!sensei && workers.length === 0) {
+    console.error('No sensei or worker agents to open. Add some with: jean agent add <name>')
+    process.exit(1)
+  }
+
+  const spec: LayoutSpec = {
+    dojoRoot,
+    infra: { command: 'jean infra start' },
+    sensei: sensei ? { name: sensei, command: `jean agent start ${sensei}` } : undefined,
+    workers: workers.map((w) => ({ name: w, command: `jean agent start ${w}` })),
+  }
+
+  const { exitCode, stderr } = opener.open(spec)
+  if (exitCode !== 0) {
+    console.error(`${opener.name} failed:`)
+    console.error(stderr.trim())
+    process.exit(1)
+  }
+
+  console.log(`${GREEN}Tab laid out via ${opener.name}:${RESET}`)
+  console.log(`  ${DIM}left:${RESET}   infra`)
+  if (sensei) console.log(`  ${DIM}middle:${RESET} ${sensei} ${DIM}(sensei)${RESET}`)
+  if (workers.length > 0) {
+    const where = sensei ? 'right' : 'middle/right'
+    console.log(`  ${DIM}${where}:${RESET}  ${workers.join(', ')} ${DIM}(workers, stacked)${RESET}`)
+  }
 }
 
 // ── Satori: guided dojo setup ────────────────────────────────────
@@ -1813,6 +1889,8 @@ Commands:
     --git             Create a bare git repo at .jean/.bare/
     --<key> <value>   Any config key (e.g. --slack.channel "#dev")
   jean dojo move <new-path>                   Move this dojo to a new location
+  jean dojo open [agents...] [--only a,b,c]   Lay out current iTerm tab: infra | sensei | workers
+                                              (macOS + iTerm2; current shell becomes the infra pane)
   jean satori                                 Guided dojo setup (interactive)
   jean config set <key> <value>               Set a config value
   jean config get <key>                       Get a config value
