@@ -39,24 +39,28 @@ function discoverDojoRoot(): string | null {
 
 const DOJO_ROOT = discoverDojoRoot()
 
-function discoverPort(): string {
-  if (!DOJO_ROOT) return '8700'
+/**
+ * Resolve the infra port for THIS agent's dojo. No fallbacks — same strictness
+ * as the CLI (see src/cli/jean.ts discoverInfraUrl). If the dojo can't be
+ * located or its infra isn't running, return null. Connecting blindly to a
+ * default 8700 caused phantom cross-dojo registrations: an agent for a stopped
+ * dojo would connect to whichever dojo happened to own 8700 and register as
+ * a sensei/worker there, leaving a ghost in that dojo's agents map.
+ */
+function discoverPort(): number | null {
+  if (!DOJO_ROOT) return null
   const { port } = readRuntimeFiles(resolve(DOJO_ROOT, '.jean'))
-  return String(port ?? 8700)
+  return port
 }
 
-/** Discover infra WebSocket URL: env var > port file > fallback */
-function discoverInfraWsUrl(): string {
-  if (process.env.JEAN_INFRA_URL) return process.env.JEAN_INFRA_URL
-  return `ws://127.0.0.1:${discoverPort()}/ws`
+function discoverInfraWsUrl(): string | null {
+  const port = discoverPort()
+  return port === null ? null : `ws://127.0.0.1:${port}/ws`
 }
 
-/** Discover infra HTTP base URL for the `infra` tool. */
-function discoverInfraHttpBase(): string {
-  if (process.env.JEAN_INFRA_URL) {
-    return process.env.JEAN_INFRA_URL.replace(/^ws/, 'http').replace(/\/ws$/, '')
-  }
-  return `http://127.0.0.1:${discoverPort()}`
+function discoverInfraHttpBase(): string | null {
+  const port = discoverPort()
+  return port === null ? null : `http://127.0.0.1:${port}`
 }
 const SESSION_ID = crypto.randomUUID()
 /** Session file lives under the dojo so two dojos with same-named agents don't collide */
@@ -179,7 +183,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         isError: true,
       }
     }
-    const url = `${discoverInfraHttpBase()}${path}`
+    const base = discoverInfraHttpBase()
+    if (base === null) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `infra: not running for this dojo (${DOJO_ROOT ?? '<unknown>'}). Start it with 'jean infra start'.`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    const url = `${base}${path}`
     try {
       const init: RequestInit = { method }
       if (args.body !== undefined && method !== 'GET') {
@@ -242,6 +258,16 @@ function sendToInfra(msg: object) {
 function connectToInfra() {
   try {
     const url = discoverInfraWsUrl()
+    if (url === null) {
+      // No infra running for this dojo (or no dojo found). Don't fall back to
+      // a default port — that's how phantom cross-dojo registrations happen.
+      // Stay alive but not connected; retry when infra comes up.
+      process.stderr.write(
+        `[jean] no infra port for dojo ${DOJO_ROOT ?? '<unknown>'} — not connecting. Will retry; start infra with 'jean infra start'.\n`,
+      )
+      scheduleReconnect()
+      return
+    }
     ws = new WebSocket(url)
 
     ws.addEventListener('open', () => {
