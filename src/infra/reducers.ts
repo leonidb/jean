@@ -96,6 +96,16 @@ export type StartData = {
   port: number
 }
 
+/**
+ * `kind` distinguishes routing:
+ *   'agent'    — deliver the prompt to a registered agent (sensei, worker, …).
+ *                `agent` is the agent name. Default for backwards compatibility.
+ *   'headless' — spawn a one-shot Claude process under the given role's
+ *                permissions/skills. `agent` is the role name (e.g. 'librarian').
+ *                Used by the consolidate-wiki trigger; see docs/llm-wiki-design.md.
+ */
+export type TriggerKind = 'agent' | 'headless'
+
 export type TriggerCreatedData = {
   id: string
   cron?: string
@@ -103,6 +113,8 @@ export type TriggerCreatedData = {
   agent: string
   prompt: string
   actor: string
+  /** Default 'agent' when omitted — preserves existing event log semantics. */
+  kind?: TriggerKind
   metadata?: Record<string, unknown>
 }
 
@@ -122,6 +134,23 @@ export type TriggerFiredData = {
   triggerId: string
   agent: string
   prompt: string
+  kind?: TriggerKind
+}
+
+/**
+ * Recorded after a headless trigger run completes (success, failure, or
+ * timeout). Distinct from any domain events the spawned process itself
+ * emitted (e.g. wiki-consolidated). Always recorded so the run is auditable
+ * even if the spawn never wrote any of its own events.
+ */
+export type HeadlessCompletedData = {
+  triggerId: string
+  role: AgentRole
+  exitCode: number
+  durationMs: number
+  timedOut: boolean
+  /** Truncated tail of stderr when exitCode !== 0 (for debugging). */
+  stderrTail?: string
 }
 
 // ── Memory event data ───────────────────────────────────────────
@@ -328,6 +357,8 @@ type TriggerBase = {
   id: string
   agent: string
   prompt: string
+  /** 'agent' = route to registered agent; 'headless' = spawn one-shot Claude under role. */
+  kind: TriggerKind
   status: 'active' | 'fired' | 'disabled'
   actor: string
   createdAt: string
@@ -362,6 +393,8 @@ export const triggerReducer: Reducer<TriggerState> = (state, event) => {
         ...schedule,
         agent: d.agent,
         prompt: d.prompt,
+        // Default 'agent' for legacy events that pre-date the kind field.
+        kind: d.kind ?? 'agent',
         status: 'active',
         // TODO: remove createdBy fallback once legacy events are cleaned from all dojos
         actor: d.actor ?? ((d as Record<string, unknown>).createdBy as string | undefined) ?? 'unknown',

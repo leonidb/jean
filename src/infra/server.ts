@@ -28,6 +28,7 @@ import {
 import { INFRA_IDENTITY, type InfraInfo, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Board, canTransition, type TaskStatus } from './board.ts'
 import { resolveConfig } from './config.ts'
+import { spawnHeadless } from './librarian.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
 import type {
   AgentRole,
@@ -45,6 +46,7 @@ import {
   agentFromEvent,
   agentStream,
   boardReducer,
+  type HeadlessCompletedData,
   MEMORY_STREAM,
   type MemoryData,
   type MemoryScope,
@@ -73,6 +75,7 @@ import {
   type Trigger,
   type TriggerCreatedData,
   type TriggerFiredData,
+  type TriggerKind,
   type TriggerRemovedData,
   type TriggerState,
   type TriggerUpdatedData,
@@ -429,8 +432,51 @@ async function fireTrigger(trigger: Trigger) {
     triggerId: trigger.id,
     agent: trigger.agent,
     prompt: trigger.prompt,
+    kind: trigger.kind,
   } satisfies TriggerFiredData)
 
+  if (trigger.kind === 'headless') {
+    // Spawn a one-shot Claude under the role's permissions/skills.
+    // `agent` field carries the role name for headless triggers.
+    const role = trigger.agent as AgentRole
+    process.stderr.write(`[jean] trigger ${trigger.id} fired → headless ${role}\n`)
+    try {
+      const result = await spawnHeadless({
+        dojoRoot: resolve(DATA_DIR, '..'),
+        role,
+        prompt: trigger.prompt,
+      })
+      // Tail of stderr surfaced on failure for debuggability without
+      // dumping the full stream into the event log.
+      const stderrTail = result.exitCode !== 0 ? result.stderr.slice(-2000) : undefined
+      void record('headless-completed', TRIGGERS_STREAM, {
+        triggerId: trigger.id,
+        role,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        timedOut: result.timedOut,
+        ...(stderrTail && { stderrTail }),
+      } satisfies HeadlessCompletedData)
+      process.stderr.write(
+        `[jean] trigger ${trigger.id} headless ${role} done: exit=${result.exitCode} duration=${result.durationMs}ms${result.timedOut ? ' TIMED-OUT' : ''}\n`,
+      )
+    } catch (err) {
+      // Spawn itself failed (e.g. role dir missing). Record so the failure
+      // is auditable; cursor doesn't advance, retried next trigger.
+      void record('headless-completed', TRIGGERS_STREAM, {
+        triggerId: trigger.id,
+        role,
+        exitCode: -1,
+        durationMs: 0,
+        timedOut: false,
+        stderrTail: String(err).slice(-2000),
+      } satisfies HeadlessCompletedData)
+      process.stderr.write(`[jean] trigger ${trigger.id} headless ${role} spawn failed: ${err}\n`)
+    }
+    return
+  }
+
+  // kind === 'agent' — existing routing path
   const delivered = deliverToAgent(trigger.agent, {
     type: 'deliver',
     from: 'trigger',
@@ -1013,6 +1059,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           at?: string
           agent: string
           prompt: string
+          kind?: TriggerKind
           actor?: string
           metadata?: Record<string, unknown>
         }
@@ -1038,6 +1085,24 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             return Response.json({ error: 'invalid datetime for at' }, { status: 400 })
           }
         }
+        const kind: TriggerKind = body.kind ?? 'agent'
+        if (kind !== 'agent' && kind !== 'headless') {
+          return Response.json({ error: `invalid kind "${body.kind}", must be 'agent' or 'headless'` }, { status: 400 })
+        }
+        if (kind === 'headless') {
+          // For headless triggers the `agent` field is the role name. Validate
+          // it matches a known role so misspellings fail early at create time
+          // rather than on first fire.
+          const validRoles: AgentRole[] = ['sensei', 'worker', 'user', 'peer', 'librarian']
+          if (!validRoles.includes(body.agent as AgentRole)) {
+            return Response.json(
+              {
+                error: `headless trigger requires 'agent' to be a valid role; got "${body.agent}". Valid: ${validRoles.join(', ')}`,
+              },
+              { status: 400 },
+            )
+          }
+        }
 
         const id = body.id ?? crypto.randomUUID().slice(0, 8)
         if (triggerProjection.state.triggers.some((t) => t.id === id)) {
@@ -1050,6 +1115,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           at: body.at,
           agent: body.agent,
           prompt: body.prompt,
+          kind,
           actor: body.actor ?? 'api',
           metadata: body.metadata,
         } satisfies TriggerCreatedData)

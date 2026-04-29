@@ -262,4 +262,103 @@ describe('trigger CRUD', () => {
     const info = (await res.json()) as { activeTriggers: number }
     expect(info.activeTriggers).toBeGreaterThanOrEqual(1)
   })
+
+  test('default kind is "agent" when omitted (backwards-compatible)', async () => {
+    const res = await fetch(`${BASE}/triggers`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({
+        id: 'kind-default',
+        cron: '0 0 * * *',
+        agent: 'sensei',
+        prompt: 'x',
+      }),
+    })
+    expect(res.status).toBe(201)
+    const trigger = (await res.json()) as { kind: string }
+    expect(trigger.kind).toBe('agent')
+  })
+
+  test('headless trigger requires agent to be a valid role name', async () => {
+    const res = await fetch(`${BASE}/triggers`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({
+        id: 'headless-bad-role',
+        cron: '0 3 * * *',
+        agent: 'not-a-role',
+        prompt: 'x',
+        kind: 'headless',
+      }),
+    })
+    expect(res.status).toBe(400)
+    const err = (await res.json()) as { error: string }
+    expect(err.error).toContain('valid role')
+  })
+
+  test('headless trigger with valid role is accepted', async () => {
+    const res = await fetch(`${BASE}/triggers`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({
+        id: 'headless-librarian',
+        cron: '0 3 * * *',
+        agent: 'librarian',
+        prompt: 'consolidate the wiki',
+        kind: 'headless',
+      }),
+    })
+    expect(res.status).toBe(201)
+    const trigger = (await res.json()) as { id: string; kind: string; agent: string }
+    expect(trigger.kind).toBe('headless')
+    expect(trigger.agent).toBe('librarian')
+  })
+
+  test('invalid kind returns 400', async () => {
+    const res = await fetch(`${BASE}/triggers`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({
+        id: 'kind-bogus',
+        cron: '0 0 * * *',
+        agent: 'sensei',
+        prompt: 'x',
+        kind: 'bogus',
+      }),
+    })
+    expect(res.status).toBe(400)
+  })
+
+  test('headless trigger fire records headless-completed event when role dir missing', async () => {
+    // Create a headless trigger that fires once (in the very near future).
+    // Role dir doesn't exist in our test DATA_DIR — we expect spawn to fail
+    // gracefully and emit a headless-completed event with exitCode -1.
+    const at = new Date(Date.now() + 500).toISOString()
+    const createRes = await fetch(`${BASE}/triggers`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({
+        id: 'headless-spawn-fail',
+        at,
+        agent: 'librarian',
+        prompt: 'unused',
+        kind: 'headless',
+      }),
+    })
+    expect(createRes.status).toBe(201)
+
+    // Wait for the trigger to fire and the spawn-fail event to be recorded.
+    let completed: { type: string; data: { triggerId: string; exitCode: number } } | undefined
+    for (let i = 0; i < 30; i++) {
+      await Bun.sleep(150)
+      const histRes = await fetch(`${BASE}/history?stream=triggers`)
+      const hist = (await histRes.json()) as { events: Array<typeof completed> }
+      completed = hist.events.find(
+        (e) => e?.type === 'headless-completed' && e?.data.triggerId === 'headless-spawn-fail',
+      )
+      if (completed) break
+    }
+    expect(completed).toBeDefined()
+    expect(completed?.data.exitCode).toBe(-1) // spawn-failed sentinel
+  })
 })
