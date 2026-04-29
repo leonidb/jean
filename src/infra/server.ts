@@ -439,12 +439,18 @@ async function fireTrigger(trigger: Trigger) {
     // Spawn a one-shot Claude under the role's permissions/skills.
     // `agent` field carries the role name for headless triggers.
     const role = trigger.agent as AgentRole
-    process.stderr.write(`[jean] trigger ${trigger.id} fired → headless ${role}\n`)
+    // Wiki consolidation/distillation is structured-editing work that
+    // doesn't need Opus-level reasoning; default the librarian to Sonnet
+    // to cut cost ~5x. Other roles fall back to Claude Code's default.
+    // Per-trigger override always wins.
+    const model = trigger.model ?? (role === 'librarian' ? 'sonnet' : undefined)
+    process.stderr.write(`[jean] trigger ${trigger.id} fired → headless ${role}${model ? ` (${model})` : ''}\n`)
     try {
       const result = await spawnHeadless({
         dojoRoot: resolve(DATA_DIR, '..'),
         role,
         prompt: trigger.prompt,
+        ...(model && { model }),
       })
       // Tail of stderr surfaced on failure for debuggability without
       // dumping the full stream into the event log.
@@ -1060,6 +1066,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           agent: string
           prompt: string
           kind?: TriggerKind
+          model?: string
           actor?: string
           metadata?: Record<string, unknown>
         }
@@ -1102,6 +1109,15 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
               { status: 400 },
             )
           }
+        } else if (body.model) {
+          // model only takes effect for headless invocations — agent triggers
+          // route into a running Claude Code session with a fixed model.
+          // Reject loudly so users don't think they configured something
+          // that's silently doing nothing.
+          return Response.json(
+            { error: "model is only valid for headless triggers; set kind: 'headless' or remove model" },
+            { status: 400 },
+          )
         }
 
         const id = body.id ?? crypto.randomUUID().slice(0, 8)
@@ -1116,6 +1132,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           agent: body.agent,
           prompt: body.prompt,
           kind,
+          ...(body.model && { model: body.model }),
           actor: body.actor ?? 'api',
           metadata: body.metadata,
         } satisfies TriggerCreatedData)

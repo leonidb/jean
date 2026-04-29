@@ -28,6 +28,13 @@ export type SpawnHeadlessOpts = {
   /** The user-prompt fed to Claude. Becomes argv after `-p`. */
   prompt: string
   /**
+   * Model to invoke. Accepts Claude Code shorthand (`sonnet`, `opus`,
+   * `haiku`) or a full model ID. Cheaper models can run wiki consolidation
+   * or other structured-editing work at a fraction of Opus cost.
+   * When unset, Claude Code's default model is used.
+   */
+  model?: string
+  /**
    * Override binary. Default `'claude'`. Tests use this to point at a stub
    * (e.g. `/bin/echo`) so they don't need a real Claude installation.
    */
@@ -78,6 +85,7 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
     relJean,
     '--mcp-config',
     `${relJean}/.mcp.json`,
+    ...(opts.model ? ['--model', opts.model] : []),
     ...(opts.extraArgs ?? []),
   ]
 }

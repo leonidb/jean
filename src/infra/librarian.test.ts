@@ -51,6 +51,27 @@ describe('buildHeadlessCommand', () => {
     expect(argv).toContain('--verbose')
     expect(argv).toContain('--foo=bar')
   })
+
+  test('model option emits --model <model>', () => {
+    const argv = buildHeadlessCommand({
+      dojoRoot: '/dojo',
+      role: 'librarian',
+      prompt: 'x',
+      model: 'sonnet',
+    })
+    const idx = argv.indexOf('--model')
+    expect(idx).toBeGreaterThan(0)
+    expect(argv[idx + 1]).toBe('sonnet')
+  })
+
+  test('no --model when option omitted', () => {
+    const argv = buildHeadlessCommand({
+      dojoRoot: '/dojo',
+      role: 'librarian',
+      prompt: 'x',
+    })
+    expect(argv).not.toContain('--model')
+  })
 })
 
 describe('spawnHeadless', () => {

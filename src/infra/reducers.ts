@@ -115,6 +115,12 @@ export type TriggerCreatedData = {
   actor: string
   /** Default 'agent' when omitted — preserves existing event log semantics. */
   kind?: TriggerKind
+  /**
+   * Model for headless triggers. Accepts 'sonnet'/'opus'/'haiku' or a full
+   * model ID. Only valid when kind='headless'; agent triggers ignore this
+   * because the agent is already a running session with a fixed model.
+   */
+  model?: string
   metadata?: Record<string, unknown>
 }
 
@@ -359,6 +365,8 @@ type TriggerBase = {
   prompt: string
   /** 'agent' = route to registered agent; 'headless' = spawn one-shot Claude under role. */
   kind: TriggerKind
+  /** Only meaningful when kind='headless'. Undefined = use Claude Code default. */
+  model?: string
   status: 'active' | 'fired' | 'disabled'
   actor: string
   createdAt: string
@@ -395,6 +403,7 @@ export const triggerReducer: Reducer<TriggerState> = (state, event) => {
         prompt: d.prompt,
         // Default 'agent' for legacy events that pre-date the kind field.
         kind: d.kind ?? 'agent',
+        ...(d.model && { model: d.model }),
         status: 'active',
         // TODO: remove createdBy fallback once legacy events are cleaned from all dojos
         actor: d.actor ?? ((d as Record<string, unknown>).createdBy as string | undefined) ?? 'unknown',

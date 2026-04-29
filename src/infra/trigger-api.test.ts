@@ -296,6 +296,43 @@ describe('trigger CRUD', () => {
     expect(err.error).toContain('valid role')
   })
 
+  test('model on agent-kind trigger is rejected (only valid for headless)', async () => {
+    const res = await fetch(`${BASE}/triggers`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({
+        id: 'agent-with-model',
+        cron: '0 0 * * *',
+        agent: 'sensei',
+        prompt: 'x',
+        model: 'sonnet',
+        // kind defaults to 'agent'
+      }),
+    })
+    expect(res.status).toBe(400)
+    const err = (await res.json()) as { error: string }
+    expect(err.error).toContain('headless')
+  })
+
+  test('headless trigger accepts and persists model field', async () => {
+    const res = await fetch(`${BASE}/triggers`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({
+        id: 'headless-with-model',
+        cron: '0 4 * * *',
+        agent: 'librarian',
+        prompt: 'x',
+        kind: 'headless',
+        model: 'haiku',
+      }),
+    })
+    expect(res.status).toBe(201)
+    const trigger = (await res.json()) as { kind: string; model?: string }
+    expect(trigger.kind).toBe('headless')
+    expect(trigger.model).toBe('haiku')
+  })
+
   test('headless trigger with valid role is accepted', async () => {
     const res = await fetch(`${BASE}/triggers`, {
       method: 'POST',
