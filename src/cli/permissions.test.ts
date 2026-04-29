@@ -68,10 +68,16 @@ describe('defaultPermissions', () => {
     }
   })
 
-  test('librarian: no send/reply MCP tools (it does not chat)', () => {
+  test('librarian: no MCP tools at all (runs without channel plugin)', () => {
     const { allow } = defaultPermissions('librarian', '/tmp/test-dojo')
-    expect(allow).not.toContain('mcp__jean__send')
-    expect(allow).not.toContain('mcp__jean__reply')
+    for (const rule of allow) {
+      expect(rule.startsWith('mcp__')).toBe(false)
+    }
+  })
+
+  test('librarian: includes Bash(curl) for infra HTTP calls', () => {
+    const { allow } = defaultPermissions('librarian', '/tmp/test-dojo')
+    expect(allow).toContain('Bash(curl:*)')
   })
 
   test('with dojoRoot: deny paths are absolute (not relative)', () => {

@@ -202,35 +202,11 @@ function cmdLibrarianSetup() {
     console.log(`  ${DIM}skip${RESET}  ${relative(dojoRoot, settingsPath)} (already exists)`)
   }
 
-  // 3. .mcp.json — librarian uses the same Jean MCP plugin as other agents
-  //    so the consolidate-wiki skill can call infra(GET /history?...). Each
-  //    spawn gets a fresh Claude Code session UUID; they don't conflict.
-  const mcpPath = resolve(roleDir, '.mcp.json')
-  if (!existsSync(mcpPath)) {
-    writeFileSync(
-      mcpPath,
-      `${JSON.stringify(
-        {
-          mcpServers: {
-            jean: {
-              command: 'bun',
-              args: ['run', '--cwd', channelDir(), '--shell=bun', '--silent', 'start'],
-              env: {
-                JEAN_AGENT: 'librarian',
-                JEAN_ROLE: 'librarian',
-                JEAN_DOJO: dojoRoot,
-              },
-            },
-          },
-        },
-        null,
-        2,
-      )}\n`,
-    )
-    console.log(`  ${GREEN}wrote${RESET} ${relative(dojoRoot, mcpPath)}`)
-  } else {
-    console.log(`  ${DIM}skip${RESET}  ${relative(dojoRoot, mcpPath)} (already exists)`)
-  }
+  // No .mcp.json. The headless librarian uses native Read/Edit/Write for
+  // files and Bash(curl) for the few HTTP calls it needs (recording the
+  // wiki-consolidated event). Skipping MCP saves a per-run channel-plugin
+  // spawn and a WS registration round-trip; for once-a-night runs the
+  // simplification is real and observable in startup latency.
 
   console.log(`\n${GREEN}Librarian setup complete in ${dojoRoot}/.jean/roles/librarian/${RESET}`)
   console.log()

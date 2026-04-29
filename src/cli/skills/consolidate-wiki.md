@@ -49,20 +49,33 @@ Branch on what exists:
 
 ### 2. Read inputs
 
-Fetch events from infra. The librarian role's MCP plugin gives you full HTTP access:
+You don't have MCP. Use native `Read` for `history.jsonl` directly, and `Bash(curl)` against the local infra for projection queries (tasks with comments, etc.).
 
-```
-infra(method="GET", path="/history?stream=memory&afterId=<lastEventId>")
-infra(method="GET", path="/history?afterId=<lastEventId>")
+The infra port is in `.jean/infra.port`:
+
+```bash
+PORT=$(cat ../../infra.port)
 ```
 
-The first gets new `memory` events. The second gets all events since cursor — filter by `type === 'task-update'` with `data.to === 'done'` to find completed tasks worth distilling.
+Read new memory events directly from the event log (one JSONL line per event):
 
-For each completed task, you may want its full content:
+```bash
+cat ../../history.jsonl | jq -c 'select(.type == "memory" and .id > <lastEventId>)'
+```
 
+Or via the HTTP API (returns the same data, but pre-filtered):
+
+```bash
+curl -s "http://127.0.0.1:$PORT/history?stream=memory&afterId=<lastEventId>"
 ```
-infra(method="GET", path="/tasks/<id>?include=comments,messages,playbook")
+
+For completed-task distillation, fetch tasks with their comments via the API (the projection isn't trivial to rebuild):
+
+```bash
+curl -s "http://127.0.0.1:$PORT/tasks/<id>?include=comments,messages,playbook"
 ```
+
+Filter `task-update` events with `data.to === "done"` from the event log to find candidates.
 
 ### 3. Decide what to distill
 
@@ -138,21 +151,24 @@ Write the new cursor:
 }
 ```
 
-Then record the run via infra:
+Then record the run via the infra HTTP API:
 
-```
-infra(method="POST", path="/events", body={
-  type: "wiki-consolidated",
-  stream: "system",
-  data: {
-    pagesUpdated: <N>,
-    pagesCreated: <K>,
-    corrections: <M>,
-    tasksDistilled: <T>,
-    eventsProcessed: <E>,
-    anomalies: ["..."]   // optional
-  }
-})
+```bash
+PORT=$(cat ../../infra.port)
+curl -s -X POST "http://127.0.0.1:$PORT/events" \
+  -H 'content-type: application/json' \
+  -d '{
+    "type": "wiki-consolidated",
+    "stream": "system",
+    "data": {
+      "pagesUpdated": <N>,
+      "pagesCreated": <K>,
+      "corrections": <M>,
+      "tasksDistilled": <T>,
+      "eventsProcessed": <E>,
+      "anomalies": []
+    }
+  }'
 ```
 
 Sensei will see this event in its normal nudge cycle and may surface anomalies to the human.
@@ -169,7 +185,7 @@ The deterministic pre-spawn recovery routine handles most of these before you st
 ## What you do NOT do
 
 - **Don't read or write outside `.jean/`** — your work is the wiki, nothing else.
-- **Don't reply to anyone** — you have no `reply` or `send` tools. Your output is the wiki itself + the `wiki-consolidated` event.
+- **Don't reply to anyone** — you don't have MCP loaded; no `reply` or `send` tools exist. Your output is the wiki itself + the `wiki-consolidated` event.
 - **Don't ask the human anything.** You run unattended on a schedule. If you can't make a decision, leave the input for the next run and note it in `log.md`.
 - **Don't memorize.** Memory is for agents observing the world; you're the consumer of memories. Recording a `wiki-consolidated` event is enough.
 - **Don't promote content to the repo.** That's the human's call. You only manage `.jean/context/`.

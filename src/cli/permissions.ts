@@ -21,12 +21,29 @@ export type Permissions = {
 
 export function defaultPermissions(role: AgentRole, dojoRoot?: string): Permissions {
   if (role === 'librarian') {
-    // Librarian is the wiki's only writer. Broad Edit/Write is required to
-    // build the next wiki version under .jean/.consolidator/wiki-{a,b}/ and
-    // flip the .jean/context symlink. No deny on .jean/context/**: that
-    // would block the very thing this role exists to do.
+    // Librarian is the wiki's only writer and runs headless without MCP.
+    // Reads history.jsonl + wiki pages directly via Read/Glob/Grep, builds
+    // the staging dir via Edit/Write, swaps via Bash(mv/rm), and emits the
+    // wiki-consolidated event via Bash(curl) against the local infra.
+    // No deny on .jean/context/** — that would block the very thing this
+    // role exists to do.
     return {
-      allow: ['mcp__jean__infra', 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git:*)', 'Bash(ln:*)', 'Bash(mv:*)'],
+      allow: [
+        'Read',
+        'Glob',
+        'Grep',
+        'Edit',
+        'Write',
+        'Bash(git:*)',
+        'Bash(ln:*)',
+        'Bash(mv:*)',
+        'Bash(rm:*)',
+        'Bash(cp:*)',
+        'Bash(cat:*)',
+        'Bash(jq:*)',
+        'Bash(curl:*)',
+        'Bash(date:*)',
+      ],
       deny: [],
     }
   }

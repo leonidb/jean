@@ -29,13 +29,12 @@ describe('buildHeadlessCommand', () => {
     expect(argv[1]).toBe('-p')
     expect(argv[2]).toBe('consolidate the wiki')
     expect(argv).toContain('--add-dir')
-    expect(argv).toContain('--mcp-config')
     // From /dojo/.jean/roles/librarian/, relative .jean is "../.."
     const addDirIdx = argv.indexOf('--add-dir')
     expect(argv[addDirIdx + 1]).toBe('../..')
-    // .mcp.json is in the role dir (cwd), not the dojo .jean dir.
-    const mcpIdx = argv.indexOf('--mcp-config')
-    expect(argv[mcpIdx + 1]).toBe('.mcp.json')
+    // Headless runs intentionally do NOT load MCP; the librarian uses
+    // native Read/Edit/Write/Bash. No --mcp-config in argv.
+    expect(argv).not.toContain('--mcp-config')
   })
 
   test('binary override is respected', () => {

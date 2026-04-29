@@ -179,15 +179,16 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
   const roleDir = resolve(jeanDir, 'roles', opts.role)
   const relJean = relative(roleDir, jeanDir) || '.'
   const outputFormat = opts.outputFormat ?? 'json'
+  // Headless runs do NOT load MCP. The librarian uses native Read/Edit/Write
+  // for files and Bash(curl) for the few HTTP calls it needs (recording
+  // wiki-consolidated events). One fewer moving part vs spawning the channel
+  // plugin per run; no WS registration noise; simpler skill prose.
   return [
     opts.binary ?? 'claude',
     '-p',
     opts.prompt,
     '--add-dir',
     relJean,
-    // .mcp.json lives in the role dir (cwd), written by `jean librarian setup`.
-    '--mcp-config',
-    '.mcp.json',
     ...(opts.model ? ['--model', opts.model] : []),
     ...(outputFormat === 'json' ? ['--output-format', 'json'] : []),
     ...(opts.extraArgs ?? []),
