@@ -35,6 +35,14 @@ export type SpawnHeadlessOpts = {
    */
   model?: string
   /**
+   * Output format. Default `'json'` — Claude Code returns a single JSON
+   * object with `session_id`, the final response, and usage stats. We parse
+   * this and surface session_id + cost/tokens in SpawnHeadlessResult.parsed.
+   * `'text'` keeps stdout as raw response text — useful when JSON parsing
+   * would get in the way (rare).
+   */
+  outputFormat?: 'json' | 'text'
+  /**
    * Override binary. Default `'claude'`. Tests use this to point at a stub
    * (e.g. `/bin/echo`) so they don't need a real Claude installation.
    */
@@ -45,6 +53,23 @@ export type SpawnHeadlessOpts = {
   timeoutMs?: number
 }
 
+/** Subset of the `claude -p --output-format json` payload we surface. */
+export type HeadlessParsed = {
+  /**
+   * Session ID — used to locate the conversation JSONL at
+   * `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`.
+   */
+  sessionId?: string
+  /** Final assistant text (the bare answer, no tool-call details). */
+  response?: string
+  /** USD cost as reported by Claude Code, when available. */
+  costUsd?: number
+  /** Total tokens (input + output + cached) when available. */
+  totalTokens?: number
+  /** Model that actually answered (may differ from requested e.g. on fallback). */
+  model?: string
+}
+
 export type SpawnHeadlessResult = {
   exitCode: number
   stdout: string
@@ -52,6 +77,12 @@ export type SpawnHeadlessResult = {
   durationMs: number
   /** True if the process was killed because it exceeded `timeoutMs`. */
   timedOut: boolean
+  /**
+   * Structured fields parsed from stdout when `outputFormat: 'json'` and the
+   * process exited successfully. `undefined` when output was text format,
+   * the run failed before producing JSON, or stdout wasn't valid JSON.
+   */
+  parsed?: HeadlessParsed
 }
 
 export class LibrarianRoleNotInitializedError extends Error {
@@ -77,6 +108,7 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
   const jeanDir = resolve(opts.dojoRoot, '.jean')
   const roleDir = resolve(jeanDir, 'roles', opts.role)
   const relJean = relative(roleDir, jeanDir) || '.'
+  const outputFormat = opts.outputFormat ?? 'json'
   return [
     opts.binary ?? 'claude',
     '-p',
@@ -86,8 +118,36 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
     '--mcp-config',
     `${relJean}/.mcp.json`,
     ...(opts.model ? ['--model', opts.model] : []),
+    ...(outputFormat === 'json' ? ['--output-format', 'json'] : []),
     ...(opts.extraArgs ?? []),
   ]
+}
+
+/**
+ * Best-effort extraction of the fields we care about from Claude Code's
+ * `--output-format json` payload. The exact key names have shifted between
+ * versions (`session_id` vs `sessionId`, `total_cost_usd` vs `cost_usd`),
+ * so we accept either shape and tolerate missing fields.
+ */
+export function parseHeadlessJson(stdout: string): HeadlessParsed | undefined {
+  try {
+    const obj = JSON.parse(stdout) as Record<string, unknown>
+    const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined)
+    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+    const usage = (obj.usage ?? {}) as Record<string, unknown>
+    return {
+      sessionId: str(obj.session_id) ?? str(obj.sessionId),
+      response: str(obj.result) ?? str(obj.response),
+      costUsd: num(obj.total_cost_usd) ?? num(obj.cost_usd) ?? num(obj.costUsd),
+      totalTokens:
+        num(usage.total_tokens) ??
+        num(usage.totalTokens) ??
+        ((num(usage.input_tokens) ?? 0) + (num(usage.output_tokens) ?? 0) || undefined),
+      model: str(obj.model),
+    }
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -127,11 +187,15 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnHeadl
   ])
   clearTimeout(timer)
 
+  const outputFormat = opts.outputFormat ?? 'json'
+  const parsed = exitCode === 0 && outputFormat === 'json' ? parseHeadlessJson(stdout) : undefined
+
   return {
     exitCode,
     stdout,
     stderr,
     durationMs: Date.now() - start,
     timedOut,
+    ...(parsed && { parsed }),
   }
 }

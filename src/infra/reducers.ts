@@ -157,6 +157,17 @@ export type HeadlessCompletedData = {
   timedOut: boolean
   /** Truncated tail of stderr when exitCode !== 0 (for debugging). */
   stderrTail?: string
+  /**
+   * Claude Code session UUID — locate the conversation JSONL at
+   * `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`.
+   */
+  sessionId?: string
+  /** USD cost reported by Claude Code, when available. */
+  costUsd?: number
+  /** Total tokens (input + output + cached) when available. */
+  totalTokens?: number
+  /** Model that actually answered (post-fallback if any). */
+  model?: string
 }
 
 // ── Memory event data ───────────────────────────────────────────

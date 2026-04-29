@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { buildHeadlessCommand, LibrarianRoleNotInitializedError, spawnHeadless } from './librarian.ts'
+import {
+  buildHeadlessCommand,
+  LibrarianRoleNotInitializedError,
+  parseHeadlessJson,
+  spawnHeadless,
+} from './librarian.ts'
 
 const TMP = '/tmp/jean-test-librarian'
 
@@ -71,6 +76,69 @@ describe('buildHeadlessCommand', () => {
       prompt: 'x',
     })
     expect(argv).not.toContain('--model')
+  })
+
+  test('default outputFormat is json — argv contains --output-format json', () => {
+    const argv = buildHeadlessCommand({
+      dojoRoot: '/dojo',
+      role: 'librarian',
+      prompt: 'x',
+    })
+    const idx = argv.indexOf('--output-format')
+    expect(idx).toBeGreaterThan(0)
+    expect(argv[idx + 1]).toBe('json')
+  })
+
+  test('outputFormat: text omits --output-format', () => {
+    const argv = buildHeadlessCommand({
+      dojoRoot: '/dojo',
+      role: 'librarian',
+      prompt: 'x',
+      outputFormat: 'text',
+    })
+    expect(argv).not.toContain('--output-format')
+  })
+})
+
+describe('parseHeadlessJson', () => {
+  test('extracts session_id, cost, tokens, model from typical payload', () => {
+    const payload = JSON.stringify({
+      session_id: '11111111-2222-3333-4444-555555555555',
+      result: 'final answer text',
+      total_cost_usd: 0.0123,
+      usage: { total_tokens: 4567 },
+      model: 'claude-sonnet-4-6',
+    })
+    const parsed = parseHeadlessJson(payload)
+    expect(parsed?.sessionId).toBe('11111111-2222-3333-4444-555555555555')
+    expect(parsed?.response).toBe('final answer text')
+    expect(parsed?.costUsd).toBe(0.0123)
+    expect(parsed?.totalTokens).toBe(4567)
+    expect(parsed?.model).toBe('claude-sonnet-4-6')
+  })
+
+  test('falls back to camelCase keys', () => {
+    const parsed = parseHeadlessJson(JSON.stringify({ sessionId: 'abc', costUsd: 0.5, usage: { totalTokens: 100 } }))
+    expect(parsed?.sessionId).toBe('abc')
+    expect(parsed?.costUsd).toBe(0.5)
+    expect(parsed?.totalTokens).toBe(100)
+  })
+
+  test('synthesizes totalTokens from input + output when total absent', () => {
+    const parsed = parseHeadlessJson(JSON.stringify({ usage: { input_tokens: 1000, output_tokens: 500 } }))
+    expect(parsed?.totalTokens).toBe(1500)
+  })
+
+  test('returns undefined for non-JSON stdout', () => {
+    expect(parseHeadlessJson('not json')).toBeUndefined()
+    expect(parseHeadlessJson('')).toBeUndefined()
+  })
+
+  test('returns object with undefined fields for JSON without expected keys', () => {
+    const parsed = parseHeadlessJson('{"unrelated": true}')
+    expect(parsed).toBeDefined()
+    expect(parsed?.sessionId).toBeUndefined()
+    expect(parsed?.totalTokens).toBeUndefined()
   })
 })
 
@@ -152,5 +220,50 @@ describe('spawnHeadless', () => {
     expect(result.stdout).toContain('out-line')
     expect(result.stderr).toContain('err-line')
     expect(result.stdout).not.toContain('err-line')
+  })
+
+  test('parses JSON output and surfaces parsed.sessionId', async () => {
+    const stub = writeScript(
+      resolve(TMP, 'json-out.sh'),
+      `cat <<'EOF'
+{"session_id": "deadbeef-1234-5678-9abc-def012345678", "result": "ok", "total_cost_usd": 0.005, "usage": {"input_tokens": 100, "output_tokens": 50}, "model": "claude-sonnet-4-6"}
+EOF`,
+    )
+    const result = await spawnHeadless({
+      dojoRoot: TMP,
+      role: 'librarian',
+      prompt: 'unused',
+      binary: stub,
+    })
+    expect(result.exitCode).toBe(0)
+    expect(result.parsed?.sessionId).toBe('deadbeef-1234-5678-9abc-def012345678')
+    expect(result.parsed?.costUsd).toBe(0.005)
+    expect(result.parsed?.totalTokens).toBe(150)
+    expect(result.parsed?.model).toBe('claude-sonnet-4-6')
+  })
+
+  test('outputFormat: text skips JSON parsing — parsed is undefined', async () => {
+    const stub = writeScript(resolve(TMP, 'plain.sh'), 'echo "plain text response"')
+    const result = await spawnHeadless({
+      dojoRoot: TMP,
+      role: 'librarian',
+      prompt: 'unused',
+      binary: stub,
+      outputFormat: 'text',
+    })
+    expect(result.parsed).toBeUndefined()
+    expect(result.stdout).toContain('plain text response')
+  })
+
+  test('parsed is undefined when stdout is not JSON despite outputFormat=json', async () => {
+    const stub = writeScript(resolve(TMP, 'malformed.sh'), 'echo "this is not json"')
+    const result = await spawnHeadless({
+      dojoRoot: TMP,
+      role: 'librarian',
+      prompt: 'unused',
+      binary: stub,
+    })
+    expect(result.exitCode).toBe(0)
+    expect(result.parsed).toBeUndefined()
   })
 })

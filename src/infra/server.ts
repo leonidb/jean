@@ -462,9 +462,13 @@ async function fireTrigger(trigger: Trigger) {
         durationMs: result.durationMs,
         timedOut: result.timedOut,
         ...(stderrTail && { stderrTail }),
+        ...(result.parsed?.sessionId && { sessionId: result.parsed.sessionId }),
+        ...(result.parsed?.costUsd !== undefined && { costUsd: result.parsed.costUsd }),
+        ...(result.parsed?.totalTokens !== undefined && { totalTokens: result.parsed.totalTokens }),
+        ...(result.parsed?.model && { model: result.parsed.model }),
       } satisfies HeadlessCompletedData)
       process.stderr.write(
-        `[jean] trigger ${trigger.id} headless ${role} done: exit=${result.exitCode} duration=${result.durationMs}ms${result.timedOut ? ' TIMED-OUT' : ''}\n`,
+        `[jean] trigger ${trigger.id} headless ${role} done: exit=${result.exitCode} duration=${result.durationMs}ms${result.timedOut ? ' TIMED-OUT' : ''}${result.parsed?.sessionId ? ` session=${result.parsed.sessionId}` : ''}\n`,
       )
     } catch (err) {
       // Spawn itself failed (e.g. role dir missing). Record so the failure
