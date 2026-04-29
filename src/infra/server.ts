@@ -84,6 +84,7 @@ import {
   toApiEvent,
   triggerReducer,
 } from './reducers.ts'
+import { shouldCatchUp } from './trigger-catchup.ts'
 
 const DATA_DIR = resolve(process.env.JEAN_DATA_DIR ?? '.')
 const config = resolveConfig(DATA_DIR)
@@ -1571,6 +1572,19 @@ await initSlack()
 
 // Start scheduled trigger jobs from projection state
 syncTriggerJobs()
+
+// Catch up: if a cron trigger has lastFiredAt older than the most recent
+// scheduled time, fire it once on startup. Handles "machine was off when
+// the nightly run was due." See src/infra/trigger-catchup.ts.
+{
+  const now = new Date()
+  for (const trigger of triggerProjection.state.triggers) {
+    if (trigger.status !== 'active') continue
+    if (!shouldCatchUp(trigger, now)) continue
+    process.stderr.write(`[jean] trigger ${trigger.id} catch-up fire on startup (last fired ${trigger.lastFiredAt})\n`)
+    void fireTrigger(trigger)
+  }
+}
 
 // Reconcile playbooks with files on disk, then watch for changes
 await reconcilePlaybooks()
