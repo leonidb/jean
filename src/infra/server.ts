@@ -28,7 +28,7 @@ import {
 import { INFRA_IDENTITY, type InfraInfo, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Board, canTransition, type TaskStatus } from './board.ts'
 import { resolveConfig } from './config.ts'
-import { spawnHeadless } from './librarian.ts'
+import { recoverWikiLayout, spawnHeadless } from './librarian.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
 import type {
   AgentRole,
@@ -445,10 +445,35 @@ async function fireTrigger(trigger: Trigger) {
     // to cut cost ~5x. Other roles fall back to Claude Code's default.
     // Per-trigger override always wins.
     const model = trigger.model ?? (role === 'librarian' ? 'sonnet' : undefined)
+    const dojoRoot = resolve(DATA_DIR, '..')
+
+    // Pre-spawn: deterministically recover the wiki layout from any
+    // mid-swap crash of a previous run. After this, `.jean/context/` is
+    // a real directory, no LLM judgment required. See librarian.ts.
+    if (role === 'librarian') {
+      try {
+        const rec = recoverWikiLayout(dojoRoot)
+        if (rec.recovered !== 'none') {
+          process.stderr.write(`[jean] librarian wiki layout recovered (${rec.recovered})\n`)
+        }
+      } catch (err) {
+        void record('headless-completed', TRIGGERS_STREAM, {
+          triggerId: trigger.id,
+          role,
+          exitCode: -1,
+          durationMs: 0,
+          timedOut: false,
+          stderrTail: `wiki layout recovery failed: ${err}`,
+        } satisfies HeadlessCompletedData)
+        process.stderr.write(`[jean] librarian aborted: ${err}\n`)
+        return
+      }
+    }
+
     process.stderr.write(`[jean] trigger ${trigger.id} fired → headless ${role}${model ? ` (${model})` : ''}\n`)
     try {
       const result = await spawnHeadless({
-        dojoRoot: resolve(DATA_DIR, '..'),
+        dojoRoot,
         role,
         prompt: trigger.prompt,
         ...(model && { model }),

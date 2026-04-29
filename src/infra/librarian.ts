@@ -16,7 +16,7 @@
  * See docs/llm-wiki-design.md (Adaptation 7).
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { relative, resolve } from 'node:path'
 import type { AgentRole } from './protocol.ts'
 
@@ -90,6 +90,76 @@ export class LibrarianRoleNotInitializedError extends Error {
     super(`Role directory does not exist: ${path}. Bootstrap the role first.`)
     this.name = 'LibrarianRoleNotInitializedError'
   }
+}
+
+/**
+ * Recover the wiki layout from a possible mid-swap crash before letting the
+ * librarian LLM run. Deterministic, no LLM involvement.
+ *
+ * Three crash states this fixes:
+ *   - context/ missing, staging/ present       → mv staging → context (new version wins)
+ *   - context/ missing, old-<ts>/ present      → mv old-<ts> → context (rollback)
+ *   - context/ present AND old-<ts>/ present   → rm -rf old-<ts>/ (swap completed; cleanup raced)
+ *
+ * After this returns, `.jean/context/` is guaranteed to exist as a real
+ * directory (or the dojo is in a state we can't auto-recover from, in
+ * which case we throw and the librarian doesn't run).
+ *
+ * Steady state where context/ exists and no old-* exists is a no-op.
+ */
+export function recoverWikiLayout(dojoRoot: string): { recovered: 'staging' | 'old' | 'cleanup' | 'none' } {
+  const jeanDir = resolve(dojoRoot, '.jean')
+  const consolidator = resolve(jeanDir, '.consolidator')
+  const context = resolve(jeanDir, 'context')
+  const staging = resolve(consolidator, 'staging')
+
+  const oldDirs = existsSync(consolidator)
+    ? readdirSync(consolidator)
+        .filter((n) => n.startsWith('old-'))
+        .map((n) => resolve(consolidator, n))
+    : []
+
+  const contextExists = existsSync(context)
+
+  if (!contextExists) {
+    // Mid-swap crash. Prefer staging/ (we'd built the new version); else
+    // fall back to the most recent old-<ts>/ (rollback).
+    if (existsSync(staging)) {
+      renameSync(staging, context)
+      // staging won; any old-<ts> dirs are stale leftovers.
+      for (const o of oldDirs) rmSync(o, { recursive: true, force: true })
+      return { recovered: 'staging' }
+    }
+    if (oldDirs.length > 0) {
+      const newest = oldDirs.sort().at(-1) as string
+      renameSync(newest, context)
+      for (const o of oldDirs) {
+        if (o !== newest && existsSync(o)) rmSync(o, { recursive: true, force: true })
+      }
+      return { recovered: 'old' }
+    }
+    // No way to recover — neither staging nor old-* exists. Caller should
+    // bootstrap the layout (e.g. via cmdLibrarianSetup) before retrying.
+    throw new Error(
+      `wiki-recovery: .jean/context/ missing and no staging/ or old-*/ to restore. ` +
+        `Bootstrap the wiki at ${context} before running the librarian.`,
+    )
+  }
+
+  // Steady state: context/ exists. If old-<ts>/ also exists, the swap
+  // completed but the rm-rf hadn't run — finish that.
+  if (oldDirs.length > 0) {
+    for (const o of oldDirs) rmSync(o, { recursive: true, force: true })
+    return { recovered: 'cleanup' }
+  }
+
+  // Stale staging/ from a crash before the swap began — wipe it.
+  if (existsSync(staging) && lstatSync(staging).isDirectory()) {
+    rmSync(staging, { recursive: true, force: true })
+    return { recovered: 'cleanup' }
+  }
+
+  return { recovered: 'none' }
 }
 
 /**

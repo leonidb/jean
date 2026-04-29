@@ -14,35 +14,38 @@ You are the **only writer** of `.jean/context/`. Every other agent emits memoriz
 
 ## Layout you operate on
 
+Steady state — one real directory at `.jean/context/`:
+
 ```
 .jean/
-  history.jsonl                      — event log (read-only for you)
+  history.jsonl              — event log (read-only for you)
   .consolidator/
-    cursor.json                      — { lastEventId, lastConsolidatedAt }
-    wiki-a/                          — real dir, version A
-    wiki-b/                          — real dir, version B
-  context  →  .consolidator/wiki-a   — symlink readers follow
+    cursor.json              — { lastEventId, lastConsolidatedAt }
+  context/                   — real dir, the current wiki
+    index.md
+    log.md
+    <pages>.md
 ```
 
-Each `wiki-X/` contains the standard layout: `index.md`, `log.md`, plus entity / concept / source pages.
+During your run you build the next version under `.jean/.consolidator/staging/`, then swap it in via two renames at the end. After your run, `.jean/context/` is once again a real directory — no symlinks, no A/B confusion.
 
-Versions ping-pong: if `context` currently points at `wiki-a`, you build the next version in `wiki-b`. Next run, `context` points at `wiki-b`, you build in `wiki-a`.
+A **pre-spawn recovery routine** (deterministic, runs before you do) guarantees `.jean/context/` exists as a real dir on entry. You don't have to defend against crashed previous runs.
 
 ## Procedure
 
 ### 1. Determine state
 
 ```bash
-ls .consolidator/cursor.json 2>/dev/null
-ls .consolidator/wiki-a/ 2>/dev/null
-readlink .consolidator/../context 2>/dev/null  # current symlink target
+ls -d .jean/context/ 2>/dev/null
+ls .jean/.consolidator/cursor.json 2>/dev/null
+ls -d .jean/context/index.md 2>/dev/null
 ```
 
 Branch on what exists:
 
-- **Empty (fresh dojo)**: no `.consolidator/`, no `context` symlink. Bootstrap: create `.consolidator/wiki-a/` with starter `index.md` and `log.md`, point `.jean/context` symlink at `.consolidator/wiki-a`, write initial `cursor.json` with `lastEventId: 0`.
-- **Existing populated `.jean/context/`** (e.g. work-dojo's pre-existing pages): preserve all current content, treat the existing `context/` as wiki-a, build a one-time `index.md` from existing pages, set `cursor.json` to current max event ID. From now on you operate in steady state.
-- **Steady state**: cursor exists, both wiki dirs exist, symlink points at one of them. Determine which (`active`) and which is scratch (`inactive`).
+- **Empty (fresh dojo)**: no `.jean/context/` content yet (the dir might exist but `index.md` doesn't). Bootstrap: create `.jean/context/index.md` and `log.md` as empty starter files, write `.jean/.consolidator/cursor.json` with `lastEventId: 0`.
+- **Pre-existing populated `.jean/context/`** (e.g. work-dojo's existing pages): preserve all current content; build a one-time `index.md` from existing pages if missing; set `cursor.json` to current max event ID so you don't try to distill events that pre-date the wiki's existence.
+- **Steady state**: `cursor.json` exists, `.jean/context/` has `index.md` and pages. Read the cursor and proceed.
 
 ### 2. Read inputs
 
@@ -73,19 +76,19 @@ When in doubt, lean conservative: under-distilling is reversible (memory events 
 
 ### 4. Build the next version
 
-Copy the active dir to the inactive dir as your working copy:
+Copy the current wiki to a staging directory as your working copy:
 
 ```bash
-rm -rf .consolidator/<inactive>
-cp -r .consolidator/<active> .consolidator/<inactive>
+rm -rf .jean/.consolidator/staging
+cp -r .jean/context/. .jean/.consolidator/staging/
 ```
 
-Now edit pages in `.consolidator/<inactive>/` only. Never touch `<active>/` — readers are using it.
+Now edit pages in `.jean/.consolidator/staging/` only. Never touch `.jean/context/` directly — readers are using it.
 
 For each input you decided to distill:
-- **New entity / concept**: create `<inactive>/<slug>.md`. Add a one-line entry in `index.md`.
-- **Update to existing page**: edit the page; preserve unattributed content (it may be a manual user edit — see "Conservative lint" below).
-- **Correction**: edit the offending page, then append a `## [<date>] correction | <page-slug> | <what>` entry to `log.md`.
+- **New entity / concept**: create `.jean/.consolidator/staging/<slug>.md`. Add a one-line entry in `staging/index.md`.
+- **Update to existing page**: edit the page in staging; preserve unattributed content (it may be a manual user edit — see "Conservative lint" below).
+- **Correction**: edit the offending page in staging, then append a `## [<date>] correction | <page-slug> | <what>` entry to `staging/log.md`.
 
 Use wiki-links `[[Page Name]]` for cross-references. Rebuild `index.md` so it reflects all current pages.
 
@@ -100,7 +103,7 @@ Append a summary entry to `log.md`:
 
 ### 5. Conservative lint (last pass before swap)
 
-Before swapping, scan `<inactive>/` for issues:
+Before swapping, scan `.jean/.consolidator/staging/` for issues:
 
 - **Contradictions** between pages — flag in `log.md`, optionally fix.
 - **Stale claims** that newer memory events have superseded — update.
@@ -108,16 +111,20 @@ Before swapping, scan `<inactive>/` for issues:
 - **Important concepts referenced but lacking their own page** — note in `log.md` for next run.
 - **Manual user edits** (content not traceable to a memory event you've seen) — **leave them alone.** Treat as authoritative. Only "fix" content you can trace to a memory event or that clearly contradicts new evidence.
 
-### 6. Atomic swap
+### 6. Swap (two renames + cleanup)
 
-Use a `rename(2)`-equivalent to flip the symlink in one operation:
+Replace `.jean/context/` with `staging/` via two renames:
 
 ```bash
-ln -sf .consolidator/<inactive> .jean/context.tmp
-mv .jean/context.tmp .jean/context
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+mv .jean/context .jean/.consolidator/old-$TS
+mv .jean/.consolidator/staging .jean/context
+rm -rf .jean/.consolidator/old-$TS
 ```
 
-This atomically replaces the existing symlink. Readers either see the previous version throughout or the new one; no missing-file window. Cross-platform via POSIX `rename(2)`.
+Brief microsecond gap between the two `mv` calls where `.jean/context/` doesn't exist; concurrent readers (rare; this runs once a night) get `ENOENT` and naturally retry. The final `rm -rf` cleans up the previous version.
+
+If you crash between the two renames, the next librarian invocation's pre-spawn recovery routine restores the layout deterministically — you don't have to defend against your own crash.
 
 ### 7. Advance cursor & emit completion
 
@@ -152,10 +159,12 @@ Sensei will see this event in its normal nudge cycle and may surface anomalies t
 
 ## Failure modes (be aware)
 
-- **Mid-run crash**: cursor doesn't advance, scratch dir may have garbage. Symlink unchanged → readers still see previous version. Next run: detect garbage in scratch dir (it's not the active one), wipe it, retry from cursor.
-- **Two librarian processes running simultaneously**: exit cleanly. Both can't be right; let the first finish, second is no-op or retries empty.
-- **Corrupted symlink** (points nowhere): repair by pointing at whichever wiki dir is most recent.
-- **`.jean/context` is a real directory, not a symlink** (someone broke the invariant): rename it to `.consolidator/wiki-a/` if `.consolidator/` is empty, then create the symlink. Otherwise abort and emit anomaly — don't risk losing content.
+The deterministic pre-spawn recovery routine handles most of these before you start; documented here for context.
+
+- **Mid-run crash before swap**: `staging/` may be partial. Cursor unchanged. `.jean/context/` untouched. Next run: pre-spawn cleanup wipes `staging/`; you start fresh from the same cursor.
+- **Mid-swap crash (between the two renames)**: `.jean/context/` is gone; either `staging/` or `old-<ts>/` exists. Pre-spawn recovery restores: prefer `staging/` if present (new version was ready), else `old-<ts>/` (rollback to previous good).
+- **Two librarian processes running simultaneously**: shouldn't happen (single-writer is enforced by the trigger system not double-firing). If it ever does, the second process exits cleanly when it sees `staging/` already exists from the first.
+- **Pre-existing real `.jean/context/` dir on first run**: that's the steady-state layout — proceed. No migration needed.
 
 ## What you do NOT do
 
@@ -168,10 +177,11 @@ Sensei will see this event in its normal nudge cycle and may surface anomalies t
 ## Sharpness checklist before exiting
 
 - [ ] Cursor advanced to highest event ID processed
-- [ ] Symlink points at the version you just built
-- [ ] `index.md` lists every page in your version
+- [ ] `.jean/context/` is a real directory containing the new version
+- [ ] `.jean/.consolidator/staging/` does NOT exist (it became `.jean/context/`)
+- [ ] `.jean/.consolidator/old-*/` does NOT exist (cleaned up after swap)
+- [ ] `index.md` lists every page in `.jean/context/`
 - [ ] `log.md` has a new entry for this run
 - [ ] `wiki-consolidated` event recorded
-- [ ] Inactive `wiki-X/` left clean (or deleted to be repopulated next run)
 
 When the checklist passes, exit cleanly with code 0.

@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   buildHeadlessCommand,
   LibrarianRoleNotInitializedError,
   parseHeadlessJson,
+  recoverWikiLayout,
   spawnHeadless,
 } from './librarian.ts'
 
@@ -97,6 +98,108 @@ describe('buildHeadlessCommand', () => {
       outputFormat: 'text',
     })
     expect(argv).not.toContain('--output-format')
+  })
+})
+
+describe('recoverWikiLayout', () => {
+  const ROOT = '/tmp/jean-test-recovery'
+  const ctx = resolve(ROOT, '.jean', 'context')
+  const consolidator = resolve(ROOT, '.jean', '.consolidator')
+  const staging = resolve(consolidator, 'staging')
+
+  beforeEach(() => {
+    try {
+      rmSync(ROOT, { recursive: true })
+    } catch {}
+    mkdirSync(resolve(ROOT, '.jean'), { recursive: true })
+    mkdirSync(consolidator, { recursive: true })
+  })
+
+  afterEach(() => {
+    try {
+      rmSync(ROOT, { recursive: true })
+    } catch {}
+  })
+
+  test('steady state (context/ exists, no staging or old) → no-op', () => {
+    mkdirSync(ctx, { recursive: true })
+    writeFileSync(resolve(ctx, 'index.md'), 'hello')
+    const r = recoverWikiLayout(ROOT)
+    expect(r.recovered).toBe('none')
+    expect(readFileSync(resolve(ctx, 'index.md'), 'utf8')).toBe('hello')
+  })
+
+  test('crash before swap (context/ + staging/ both exist) → wipes staging/', () => {
+    mkdirSync(ctx, { recursive: true })
+    writeFileSync(resolve(ctx, 'index.md'), 'real')
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(resolve(staging, 'index.md'), 'partial')
+    const r = recoverWikiLayout(ROOT)
+    expect(r.recovered).toBe('cleanup')
+    expect(existsSync(staging)).toBe(false)
+    expect(readFileSync(resolve(ctx, 'index.md'), 'utf8')).toBe('real')
+  })
+
+  test('crash mid-swap with staging/ ready (no context/) → staging wins, becomes context/', () => {
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(resolve(staging, 'index.md'), 'new version')
+    const r = recoverWikiLayout(ROOT)
+    expect(r.recovered).toBe('staging')
+    expect(existsSync(ctx)).toBe(true)
+    expect(existsSync(staging)).toBe(false)
+    expect(readFileSync(resolve(ctx, 'index.md'), 'utf8')).toBe('new version')
+  })
+
+  test('crash mid-swap with only old-<ts>/ (no staging, no context) → rolls back', () => {
+    const oldDir = resolve(consolidator, 'old-20260429T000000Z')
+    mkdirSync(oldDir, { recursive: true })
+    writeFileSync(resolve(oldDir, 'index.md'), 'previous')
+    const r = recoverWikiLayout(ROOT)
+    expect(r.recovered).toBe('old')
+    expect(existsSync(ctx)).toBe(true)
+    expect(existsSync(oldDir)).toBe(false)
+    expect(readFileSync(resolve(ctx, 'index.md'), 'utf8')).toBe('previous')
+  })
+
+  test('staging present beats old when both exist (new version wins)', () => {
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(resolve(staging, 'index.md'), 'new')
+    const oldDir = resolve(consolidator, 'old-20260429T000000Z')
+    mkdirSync(oldDir, { recursive: true })
+    writeFileSync(resolve(oldDir, 'index.md'), 'previous')
+    const r = recoverWikiLayout(ROOT)
+    expect(r.recovered).toBe('staging')
+    expect(readFileSync(resolve(ctx, 'index.md'), 'utf8')).toBe('new')
+    expect(existsSync(oldDir)).toBe(false)
+  })
+
+  test('multiple old-* dirs → newest wins, others wiped', () => {
+    const a = resolve(consolidator, 'old-20260427T000000Z')
+    const b = resolve(consolidator, 'old-20260429T000000Z')
+    mkdirSync(a, { recursive: true })
+    mkdirSync(b, { recursive: true })
+    writeFileSync(resolve(a, 'index.md'), 'older')
+    writeFileSync(resolve(b, 'index.md'), 'newer')
+    const r = recoverWikiLayout(ROOT)
+    expect(r.recovered).toBe('old')
+    expect(readFileSync(resolve(ctx, 'index.md'), 'utf8')).toBe('newer')
+    expect(existsSync(a)).toBe(false)
+    expect(existsSync(b)).toBe(false)
+  })
+
+  test('context/ + old-<ts>/ (swap completed but cleanup raced) → wipes old', () => {
+    mkdirSync(ctx, { recursive: true })
+    writeFileSync(resolve(ctx, 'index.md'), 'current')
+    const oldDir = resolve(consolidator, 'old-20260429T000000Z')
+    mkdirSync(oldDir, { recursive: true })
+    const r = recoverWikiLayout(ROOT)
+    expect(r.recovered).toBe('cleanup')
+    expect(existsSync(oldDir)).toBe(false)
+    expect(readFileSync(resolve(ctx, 'index.md'), 'utf8')).toBe('current')
+  })
+
+  test('no context/, no staging/, no old-* → throws (caller must bootstrap)', () => {
+    expect(() => recoverWikiLayout(ROOT)).toThrow(/missing/)
   })
 })
 

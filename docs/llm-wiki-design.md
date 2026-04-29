@@ -154,31 +154,48 @@ Same shape as ingest: a Jean trigger fires `lint-wiki` (e.g. weekly). Librarian 
 4. On success: atomic symlink swap (below); writes new cursor; emits a `wiki-consolidated` event via infra HTTP with a summary (`{ pagesUpdated: N, corrections: M, tasksDistilled: K, anomalies: [...] }`). Sensei picks it up in its normal event-processing nudge cycle. No special librarian→sensei channel.
 5. Exits with code 0. Infra captures stdout/stderr for logging.
 
-**Atomic symlink swap.** The two real dirs are hidden in `.consolidator/`; the only path users see is `.jean/context/` (the symlink):
+**Staging + two-rename swap.** Steady state is dirt-simple: one real `.jean/context/` directory. The librarian builds the next version under `.jean/.consolidator/staging/` and swaps it in via two renames at the end of a run:
 
 ```
+Steady state:
 .jean/
+  context/                  # real dir — what users edit, what readers see
   .consolidator/
-    wiki-a/                              # real dir, version A — implementation detail
-    wiki-b/                              # real dir, version B — implementation detail
-  context  →  .consolidator/wiki-a       # symlink — the human-facing path
+    cursor.json             # bookkeeping (last processed event id)
+
+During a librarian run:
+.jean/
+  context/                  # unchanged until the swap; readers see the old version
+  .consolidator/
+    cursor.json
+    staging/                # librarian's working copy + edits
+
+Swap (end of run):
+  mv .jean/context           .jean/.consolidator/old-<ts>
+  mv .jean/.consolidator/staging  .jean/context
+  rm -rf .jean/.consolidator/old-<ts>
 ```
 
-Swap:
-```typescript
-import { symlinkSync, renameSync } from 'node:fs'
-symlinkSync('.consolidator/wiki-b', `${dataDir}/context.tmp`)
-renameSync(`${dataDir}/context.tmp`, `${dataDir}/context`)
-```
+This is **not strictly atomic** — there's a microsecond gap between the two renames where `.jean/context/` doesn't exist. A concurrent reader would get `ENOENT` and need to retry. In practice this is invisible (reads are rare; nightly runs only) and the steady-state simplicity is worth the trade. We picked this over a persistent symlink + A/B dir layout because:
+- Users see exactly one normal directory at `.jean/context/`. No symlinks, no `ls .jean/` clutter.
+- `vim .jean/context/foo.md` just works; no editor weirdness on save.
+- `git diff` is clean; no symlink quirks.
+- Cross-platform without Windows symlink-permission caveats.
 
-`rename(2)` atomically replaces the existing symlink. Readers either see version A throughout or version B throughout — never a missing-directory state. No locking required; no "queried while linted" race.
+The crash-mid-swap window is the one real concern. Mitigation: a deterministic **recovery routine** runs before every librarian invocation. It checks for orphan `staging/` or `old-*/` directories and either restores or cleans them up before the librarian's LLM ever runs. See "Recovery" below.
 
-The leading-dot `.consolidator/` is hidden by most file browsers / `ls` defaults, so users browsing `.jean/` see a clean structure: `history.jsonl`, `context/` (the symlink, looks like a normal dir). Versions ping-pong between wiki-a and wiki-b. Disk cost: 2× the wiki size, free at our scale.
+**Recovery from mid-swap crash.** If the librarian crashes between the two renames, the dojo is in one of these states:
+
+- `context/` missing, `staging/` present → librarian had built the new version but hadn't swapped yet. Recovery: `mv staging → context`. New version wins.
+- `context/` missing, `old-<ts>/` present → first rename succeeded, second hadn't. Recovery: `mv old-<ts> → context`. Restore the previous good version.
+- Both `context/` and `old-<ts>/` present → swap was already complete; the rm-rf hadn't run. Recovery: `rm -rf old-<ts>/`.
+
+The recovery routine runs **before** every librarian spawn (in `src/infra/librarian.ts`, deterministically, no LLM involvement). After recovery, `.jean/context/` is guaranteed to exist as a real directory with intact content.
 
 **Manual user edits — valid and encouraged.** The wiki is human-readable knowledge; humans can fix typos, add pages, delete obsolete content directly. Rules:
-- User edits are *authoritative*. Librarian preserves them on the next run — when copying the active dir to the inactive scratch, user edits come along.
+- User edits are *authoritative*. Librarian preserves them on the next run — when copying `.jean/context/` to `staging/`, user edits come along.
 - Lint pass is *conservative*: librarian only "fixes" content it can trace back to a memorize event or a clear contradiction with new evidence. Unattributed content is treated as human-authored and left alone unless obviously broken.
-- Soft convention: don't edit while librarian is mid-run (a few minutes, once a night). If you do, your edit might be in the active dir while librarian builds the inactive dir from an earlier snapshot — your edit gets carried forward in the *next-next* run rather than this one. Practically harmless.
+- Soft convention: don't edit while librarian is mid-run (a few minutes, once a night). If you do, your edit might be in `.jean/context/` while librarian builds `staging/` from an earlier snapshot — your edit gets carried forward in the *next-next* run rather than this one. Practically harmless.
 
 **Failure handling.** If librarian crashes mid-run: the symlink still points at the previous good version (production unchanged); the scratch directory may have garbage that gets cleaned on next run's start. Cursor doesn't advance, so retried. No corruption window.
 
@@ -247,16 +264,21 @@ User-layer memory (facts about *you* that should span all dojos) is a separate, 
 ```
 .jean/
   history.jsonl                          # event log — memory events live here, mixed with operational
-  .consolidator/                         # implementation detail, hidden from human browsing
+  .consolidator/                         # implementation detail (hidden from default file listings)
     cursor.json                          # last processed memory event id (bookkeeping, NOT knowledge)
-    wiki-a/                              # real dir, version A
-    wiki-b/                              # real dir, version B
-  context  →  .consolidator/wiki-a       # SYMLINK, what users + agents read. Flipped atomically.
+    staging/                             # exists only during a librarian run; copy of context + edits
+    old-<ts>/                            # exists only briefly mid-swap; cleaned up at end of run
+  context/                               # real dir, the wiki — what users and agents read
+    index.md                             # master TOC (Karpathy)
+    log.md                               # operation timeline (Karpathy)
+    <pages>.md                           # entity / concept / source pages (Karpathy)
 ```
 
-User-facing path is just `.jean/context/` — looks like a normal directory containing `index.md`, `log.md`, and pages (the standard Karpathy layout). The `.consolidator/` directory holds the librarian's implementation (cursor + the two real wiki versions); leading-dot hides it from default file listings.
+User-facing path is just `.jean/context/` — a normal directory containing `index.md`, `log.md`, and pages (the standard Karpathy layout). No symlinks visible; `cd .jean/context && pwd -P` returns the expected path.
 
-Bookkeeping lives outside the wiki so the deny rule on `.jean/context/**` stays clean: bookkeeping is not knowledge. All read access goes through the symlink — agents and `peek` both transparently follow it.
+The `.consolidator/` directory holds bookkeeping (cursor) and transient working state (`staging/`, `old-<ts>/`). It's empty between runs except for `cursor.json`. Leading-dot hides it from default file listings.
+
+Bookkeeping lives outside the wiki so the deny rule on `.jean/context/**` stays clean: bookkeeping is not knowledge.
 
 **No `raw/` folder in MVP.** The event log is the single source of truth for inputs to consolidation. We diverge from Karpathy here because the dominant Jean use case is "agents capture in-flight observations" (event-log-shaped) rather than "human imports articles/PDFs" (file-shaped).
 
@@ -279,7 +301,7 @@ Karpathy uses `raw/` because most of his ingest flow is "clip an article, drop i
 7. **Recall reads only the consolidated wiki**, never the raw event log directly.
 8. **Read-write asymmetry**: workers + sensei get `Read` on `.jean/context/`, deny on `Edit/Write`. Librarian is the only writer. Permissions enforced at Claude Code's permission layer, not skill discipline.
 9. **Stale-data protocol**: if any agent reads the wiki and sees something wrong, emit a `memorize` event flagging the discrepancy. Librarian reconciles on next consolidation. No special "correction" primitive.
-10. **Atomic swap**: two real dirs (`wiki-a/`, `wiki-b/`) hidden inside `.jean/.consolidator/` + a `.jean/context` symlink. Librarian builds in the inactive dir, then `rename(2)` swaps the symlink. Single POSIX-atomic operation; no missing-state window. Users see only `.jean/context/`; A/B implementation detail is hidden.
+10. **Swap pattern**: `.jean/context/` is a real directory in steady state. Librarian builds the next version under `.jean/.consolidator/staging/`, then swaps via two renames (`mv context old-<ts>; mv staging context; rm -rf old-<ts>`). Brief microsecond gap between renames is acceptable for once-a-night use. A pre-spawn recovery routine handles mid-swap crashes deterministically before any librarian LLM runs.
 11. **Manual user edits**: valid and encouraged. Librarian preserves them across consolidations, treats unattributed content as human-authored, runs a conservative lint that only "fixes" things traceable to memorize events or clear contradictions.
 
 ### Still open
@@ -320,7 +342,7 @@ Karpathy uses `raw/` because most of his ingest flow is "clip an article, drop i
 | Cross-dojo composition | — | ✓ (via peek) |
 | Single writer = sensei | — | ✓ but sensei is *contributor*, librarian is the writer |
 | Librarian as headless Claude (not persistent agent) | — | ✓ |
-| Atomic swap on consolidation | — | ✓ (symlink + single rename, hidden in `.consolidator/`) |
+| Swap on consolidation | — | ✓ (staging + two-rename; pre-spawn recovery for mid-swap crash) |
 | Read-deny on wiki for non-librarian | — | ✓ (Claude Code permission layer) |
 | Manual user edits to the wiki | ✓ (always allowed) | ✓ (preserved across consolidations) |
 
