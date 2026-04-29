@@ -1706,9 +1706,7 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
       settingsPath,
       `${JSON.stringify(
         {
-          permissions: {
-            allow: defaultPermissions(role),
-          },
+          permissions: defaultPermissions(role, dojoRoot),
           hooks: {
             Stop: [
               {
