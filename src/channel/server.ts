@@ -24,7 +24,7 @@ import { buildInstructions, buildTools, formatInfraResponse, optionalString, res
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE: AgentRole = ((): AgentRole => {
   const raw = process.env.JEAN_ROLE ?? 'worker'
-  if (raw === 'sensei' || raw === 'worker' || raw === 'user') return raw
+  if (raw === 'sensei' || raw === 'worker' || raw === 'user' || raw === 'librarian') return raw
   process.stderr.write(`[jean] JEAN_ROLE="${raw}" is not a known role — falling back to worker\n`)
   return 'worker'
 })()

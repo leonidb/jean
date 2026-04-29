@@ -51,6 +51,29 @@ describe('defaultPermissions', () => {
     }
   })
 
+  test('librarian: gets Edit/Write allow, no deny on context (it IS the writer)', () => {
+    const dojoRoot = '/tmp/test-dojo'
+    const { allow, deny } = defaultPermissions('librarian', dojoRoot)
+
+    // The librarian is the only role that may write the wiki, so its allow
+    // includes Edit + Write and its deny does NOT block .jean/context/**.
+    expect(allow).toContain('Edit')
+    expect(allow).toContain('Write')
+    expect(allow).toContain('Read')
+
+    // No deny anywhere on .jean/context — the very thing this role exists to do.
+    for (const rule of deny) {
+      expect(rule).not.toContain('.jean/context')
+      expect(rule).not.toContain('.jean/.consolidator')
+    }
+  })
+
+  test('librarian: no send/reply MCP tools (it does not chat)', () => {
+    const { allow } = defaultPermissions('librarian', '/tmp/test-dojo')
+    expect(allow).not.toContain('mcp__jean__send')
+    expect(allow).not.toContain('mcp__jean__reply')
+  })
+
   test('with dojoRoot: deny paths are absolute (not relative)', () => {
     // Relative paths in deny rules would resolve against the agent's
     // working directory, not the dojo root — making the deny brittle if

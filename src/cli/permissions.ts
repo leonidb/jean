@@ -20,6 +20,17 @@ export type Permissions = {
 }
 
 export function defaultPermissions(role: AgentRole, dojoRoot?: string): Permissions {
+  if (role === 'librarian') {
+    // Librarian is the wiki's only writer. Broad Edit/Write is required to
+    // build the next wiki version under .jean/.consolidator/wiki-{a,b}/ and
+    // flip the .jean/context symlink. No deny on .jean/context/**: that
+    // would block the very thing this role exists to do.
+    return {
+      allow: ['mcp__jean__infra', 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git:*)', 'Bash(ln:*)', 'Bash(mv:*)'],
+      deny: [],
+    }
+  }
+
   const allow =
     role === 'sensei'
       ? ['mcp__jean__send', 'mcp__jean__infra', 'Read', 'Glob', 'Grep', 'Bash(git:*)']

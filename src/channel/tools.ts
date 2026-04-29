@@ -71,6 +71,11 @@ const METHODS_BY_ROLE: Record<AgentRole, string[]> = {
   worker: ['GET'],
   user: ['GET'],
   peer: ['GET'],
+  // Librarian is a trusted infra role; if it ever loads the channel plugin
+  // it gets full write access for emitting wiki-consolidated and similar
+  // events. In practice it usually runs without the plugin (headless +
+  // direct file I/O), so this is defensive only.
+  librarian: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
 }
 
 /**
