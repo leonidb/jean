@@ -151,9 +151,95 @@ async function main() {
     case 'satori':
       cmdSatori()
       break
+    case 'librarian':
+      cmdLibrarian(args.slice(1))
+      break
     default:
       printUsage()
   }
+}
+
+// ── Librarian ─────────────────────────────────────────────────────
+//
+// The librarian is the headless Claude that consolidates the wiki. It runs
+// on a `consolidate-wiki` trigger; not a persistent agent, not user-addable
+// via `jean agent add`. Setup is one-time per dojo: ships the consolidate-
+// wiki skill, writes a settings.local.json with librarian permissions, and
+// the .mcp.json so the librarian can read `infra` HTTP endpoints via MCP.
+
+function cmdLibrarian(args: string[]) {
+  const sub = args[0]
+  switch (sub) {
+    case 'setup':
+      cmdLibrarianSetup()
+      break
+    default:
+      console.error('Usage: jean librarian setup')
+      process.exit(1)
+  }
+}
+
+function cmdLibrarianSetup() {
+  const dojoRoot = findDojoRoot()
+  const jeanDir = resolve(dojoRoot, '.jean')
+  const roleDir = resolve(jeanDir, 'roles', 'librarian')
+
+  // 1. Skill (idempotent — overwrites if framework skill changed)
+  shipSkill(roleDir, 'consolidate-wiki')
+
+  // 2. Settings — librarian-role permissions, no Stop/PermissionRequest hooks
+  //    (it's a one-shot process, no need to phone home on idle)
+  const settingsDir = resolve(roleDir, '.claude')
+  const settingsPath = resolve(settingsDir, 'settings.local.json')
+  if (!existsSync(settingsPath)) {
+    mkdirSync(settingsDir, { recursive: true })
+    writeFileSync(
+      settingsPath,
+      `${JSON.stringify({ permissions: defaultPermissions('librarian', dojoRoot) }, null, 2)}\n`,
+    )
+    console.log(`  ${GREEN}wrote${RESET} ${relative(dojoRoot, settingsPath)}`)
+  } else {
+    console.log(`  ${DIM}skip${RESET}  ${relative(dojoRoot, settingsPath)} (already exists)`)
+  }
+
+  // 3. .mcp.json — librarian uses the same Jean MCP plugin as other agents
+  //    so the consolidate-wiki skill can call infra(GET /history?...). Each
+  //    spawn gets a fresh Claude Code session UUID; they don't conflict.
+  const mcpPath = resolve(roleDir, '.mcp.json')
+  if (!existsSync(mcpPath)) {
+    writeFileSync(
+      mcpPath,
+      `${JSON.stringify(
+        {
+          mcpServers: {
+            jean: {
+              command: 'bun',
+              args: ['run', '--cwd', channelDir(), '--shell=bun', '--silent', 'start'],
+              env: {
+                JEAN_AGENT: 'librarian',
+                JEAN_ROLE: 'librarian',
+                JEAN_DOJO: dojoRoot,
+              },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    )
+    console.log(`  ${GREEN}wrote${RESET} ${relative(dojoRoot, mcpPath)}`)
+  } else {
+    console.log(`  ${DIM}skip${RESET}  ${relative(dojoRoot, mcpPath)} (already exists)`)
+  }
+
+  console.log(`\n${GREEN}Librarian setup complete in ${dojoRoot}/.jean/roles/librarian/${RESET}`)
+  console.log()
+  console.log(`Next: create the consolidate-wiki trigger`)
+  console.log(`  jean trigger add --kind headless --agent librarian \\`)
+  console.log(`    --cron "0 3 * * *" --id consolidate-wiki \\`)
+  console.log(
+    `    --prompt "Consolidate the wiki. Read .consolidator/cursor.json, fetch new memory events, distill into .jean/context/, atomically swap, advance cursor."`,
+  )
 }
 
 // ── Commands ───────────────────────────────────────────────────────
@@ -512,13 +598,21 @@ async function cmdTriggerAdd(args: string[]) {
   const agent = flagValue(args, '--agent')
   const prompt = flagValue(args, '--prompt')
   const id = flagValue(args, '--id')
+  const kind = flagValue(args, '--kind')
+  const model = flagValue(args, '--model')
 
   if (!agent || !prompt) {
-    console.error('Usage: jean trigger add --agent <name> --prompt "..." [--cron "..."|--at "..."] [--id <id>]')
+    console.error(
+      'Usage: jean trigger add --agent <name> --prompt "..." [--cron "..."|--at "..."] [--id <id>] [--kind agent|headless] [--model <model>]',
+    )
     process.exit(1)
   }
   if (!cron && !at) {
     console.error('Must specify --cron or --at')
+    process.exit(1)
+  }
+  if (kind !== undefined && kind !== 'agent' && kind !== 'headless') {
+    console.error(`Invalid --kind "${kind}". Must be 'agent' or 'headless'.`)
     process.exit(1)
   }
 
@@ -531,6 +625,8 @@ async function cmdTriggerAdd(args: string[]) {
       ...(at && { at }),
       agent,
       prompt,
+      ...(kind && { kind }),
+      ...(model && { model }),
       actor: 'cli',
     }),
   })
@@ -539,11 +635,12 @@ async function cmdTriggerAdd(args: string[]) {
     console.error(`Error: ${err.error}`)
     process.exit(1)
   }
-  const trigger = (await res.json()) as { id: string; cron?: string; at?: string }
+  const trigger = (await res.json()) as { id: string; cron?: string; at?: string; kind?: string; model?: string }
   console.log(`${GREEN}Trigger "${trigger.id}" created.${RESET}`)
   if (trigger.cron) console.log(`  Schedule: ${trigger.cron}`)
   if (trigger.at) console.log(`  Fires at: ${trigger.at}`)
-  console.log(`  Agent:    ${agent}`)
+  console.log(`  Agent:    ${agent}${trigger.kind === 'headless' ? ' (headless)' : ''}`)
+  if (trigger.model) console.log(`  Model:    ${trigger.model}`)
 }
 
 async function cmdTriggerList() {
