@@ -185,8 +185,9 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
     opts.prompt,
     '--add-dir',
     relJean,
+    // .mcp.json lives in the role dir (cwd), written by `jean librarian setup`.
     '--mcp-config',
-    `${relJean}/.mcp.json`,
+    '.mcp.json',
     ...(opts.model ? ['--model', opts.model] : []),
     ...(outputFormat === 'json' ? ['--output-format', 'json'] : []),
     ...(opts.extraArgs ?? []),

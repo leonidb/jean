@@ -33,8 +33,9 @@ describe('buildHeadlessCommand', () => {
     // From /dojo/.jean/roles/librarian/, relative .jean is "../.."
     const addDirIdx = argv.indexOf('--add-dir')
     expect(argv[addDirIdx + 1]).toBe('../..')
+    // .mcp.json is in the role dir (cwd), not the dojo .jean dir.
     const mcpIdx = argv.indexOf('--mcp-config')
-    expect(argv[mcpIdx + 1]).toBe('../../.mcp.json')
+    expect(argv[mcpIdx + 1]).toBe('.mcp.json')
   })
 
   test('binary override is respected', () => {
