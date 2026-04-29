@@ -124,6 +124,31 @@ export type TriggerFiredData = {
   prompt: string
 }
 
+// ── Memory event data ───────────────────────────────────────────
+//
+// Emitted via POST /memorize. The librarian (a headless Claude spawned by
+// the consolidate-wiki trigger) reads these in batches via the cursor and
+// distills them into the wiki under .jean/context/. Memory events live in
+// the dedicated MEMORY_STREAM so the librarian can read them with a single
+// stream filter rather than scanning every event by type.
+//
+// `scope`:
+//   'dojo' (default) — knowledge that's specific to this dojo
+//   'user'           — facts about the user that should span dojos
+//                      (consolidator may forward to ~/.jean/identity later)
+
+export type MemoryScope = 'dojo' | 'user'
+
+export type MemoryData = {
+  agent: string
+  role: AgentRole
+  text: string
+  scope: MemoryScope
+  /** Task this memory was discovered in, if any. Helps the librarian trace
+   *  attribution when distilling pages. */
+  taskId?: string
+}
+
 // ── Playbook event data ─────────────────────────────────────────
 
 export type PlaybookCreatedData = {
@@ -155,6 +180,7 @@ export function agentStream(agent: string): string {
 export const SYSTEM_STREAM = 'system'
 export const TRIGGERS_STREAM = 'triggers'
 export const PLAYBOOKS_STREAM = 'playbooks'
+export const MEMORY_STREAM = 'memory'
 
 export function taskIdFromStream(stream: string): string | undefined {
   return stream.startsWith('task-') ? stream.slice(5) : undefined

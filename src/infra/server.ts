@@ -45,6 +45,9 @@ import {
   agentFromEvent,
   agentStream,
   boardReducer,
+  MEMORY_STREAM,
+  type MemoryData,
+  type MemoryScope,
   migrateBoard,
   type NudgeData,
   type PendingState,
@@ -857,6 +860,31 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         } satisfies TaskUpdatedData)
         const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
         return Response.json(updated)
+      })()
+    }
+
+    // ── Memorize ────────────────────────────────────────────────
+    //
+    // Records a `memory` event in MEMORY_STREAM. The librarian — a headless
+    // Claude spawned by the consolidate-wiki trigger — reads new memory
+    // events via cursor and distills them into the wiki under
+    // .jean/context/. See docs/llm-wiki-design.md.
+
+    if (path === '/memorize' && req.method === 'POST') {
+      return (async () => {
+        const body = (await req.json()) as Partial<MemoryData>
+        if (!body.agent || !body.role || !body.text?.trim()) {
+          return Response.json({ error: 'memorize requires agent, role, and non-empty text' }, { status: 400 })
+        }
+        const scope: MemoryScope = body.scope === 'user' ? 'user' : 'dojo'
+        const event = await record('memory', MEMORY_STREAM, {
+          agent: body.agent,
+          role: body.role,
+          text: body.text.trim(),
+          scope,
+          ...(body.taskId && { taskId: body.taskId }),
+        } satisfies MemoryData)
+        return Response.json({ id: event.id })
       })()
     }
 

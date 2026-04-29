@@ -108,6 +108,93 @@ describe('infrastructure server', () => {
     ws.close()
   })
 
+  test('/memorize records a memory event with id', async () => {
+    const res = await fetch(`${BASE}/memorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agent: 'sensei',
+        role: 'sensei',
+        text: 'Gym membership cancelled, ~$45/mo saved',
+        scope: 'dojo',
+      }),
+    })
+    expect(res.status).toBe(200)
+    const data = (await res.json()) as { id: number }
+    expect(typeof data.id).toBe('number')
+
+    // Verify event landed in history with the right shape
+    const histRes = await fetch(`${BASE}/history?stream=memory`)
+    const hist = (await histRes.json()) as {
+      events: Array<{ type: string; data: { agent: string; role: string; text: string; scope: string } }>
+    }
+    const ev = hist.events.find((e) => e.type === 'memory')
+    expect(ev).toBeDefined()
+    expect(ev?.data.agent).toBe('sensei')
+    expect(ev?.data.role).toBe('sensei')
+    expect(ev?.data.text).toBe('Gym membership cancelled, ~$45/mo saved')
+    expect(ev?.data.scope).toBe('dojo')
+  })
+
+  test('/memorize trims whitespace and defaults scope to dojo', async () => {
+    const res = await fetch(`${BASE}/memorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agent: 'worker-a',
+        role: 'worker',
+        text: '   leading and trailing whitespace   ',
+        // scope omitted → defaults to 'dojo'
+      }),
+    })
+    expect(res.status).toBe(200)
+    const histRes = await fetch(`${BASE}/history?stream=memory`)
+    const hist = (await histRes.json()) as {
+      events: Array<{ type: string; data: { text: string; scope: string } }>
+    }
+    const ev = hist.events.findLast((e) => e.type === 'memory')
+    expect(ev?.data.text).toBe('leading and trailing whitespace')
+    expect(ev?.data.scope).toBe('dojo')
+  })
+
+  test('/memorize records taskId when provided', async () => {
+    const res = await fetch(`${BASE}/memorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agent: 'worker-a',
+        role: 'worker',
+        text: 'finding from task',
+        taskId: '042',
+      }),
+    })
+    expect(res.status).toBe(200)
+    const histRes = await fetch(`${BASE}/history?stream=memory`)
+    const hist = (await histRes.json()) as {
+      events: Array<{ type: string; data: { taskId?: string; text: string } }>
+    }
+    const ev = hist.events.findLast((e) => e.type === 'memory' && e.data.text === 'finding from task')
+    expect(ev?.data.taskId).toBe('042')
+  })
+
+  test('/memorize 400s on missing agent / role / empty text', async () => {
+    const cases = [
+      { role: 'sensei', text: 'no agent' },
+      { agent: 'a', text: 'no role' },
+      { agent: 'a', role: 'sensei' }, // no text
+      { agent: 'a', role: 'sensei', text: '' }, // empty text
+      { agent: 'a', role: 'sensei', text: '   ' }, // whitespace-only
+    ]
+    for (const body of cases) {
+      const res = await fetch(`${BASE}/memorize`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      expect(res.status).toBe(400)
+    }
+  })
+
   test('message routing: send to connected agent', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${TEST_PORT}/ws`)
 
