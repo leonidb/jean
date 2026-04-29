@@ -867,8 +867,12 @@ function readSkillTemplate(name: string): string {
 }
 
 const FRAMEWORK_SKILLS: Partial<Record<AgentRole, string[]>> = {
-  sensei: ['create-playbook', 'jean-sensei'],
-  worker: ['jean-worker'],
+  sensei: ['create-playbook', 'jean-sensei', 'context'],
+  worker: ['jean-worker', 'context'],
+  // Librarian is spawned headless; its skill ships into the role dir but
+  // the role isn't user-addable via `jean agent add` (intentional — it's
+  // infra-owned).
+  librarian: ['consolidate-wiki'],
 }
 
 /** Copy a framework skill template into `<parentDir>/.claude/skills/<name>/SKILL.md`. */
