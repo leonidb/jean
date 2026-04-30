@@ -44,6 +44,8 @@ On session start (or when you need durable context), read in this order:
 
 **Don't read every file.** The wiki may have hundreds of pages. Read `index.md` first, identify the 1–3 pages that bear on your current question, read those.
 
+**Follow wiki-links when relevant.** Pages contain `[[Page Name]]` references to related concepts. Treat them as first-class navigation: after the 1–3 pages from the index, follow links when the destination is plausibly relevant to your question. Stop when you have enough — don't traverse transitively forever. The pattern is index → page → link-hop, not index → page only.
+
 If the index is missing or empty (fresh dojo), the wiki hasn't been populated yet — proceed without it; consolidation will build it as memories accumulate.
 
 ## Recording durable knowledge — `memorize`

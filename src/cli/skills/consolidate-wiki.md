@@ -33,6 +33,21 @@ During your run you build the next version under `.jean/.consolidator/staging/`,
 
 A **pre-spawn recovery routine** (deterministic, runs before you do) guarantees `.jean/context/` exists as a real dir on entry. You don't have to defend against crashed previous runs.
 
+## Page principles
+
+Wiki pages are for LLM consumption — terse, bullet-pointed, structured. Not human-prose. A future agent reading a page should skim it in seconds and pull what they need.
+
+Apply these when building or updating pages:
+
+- **One concept per page.** A page is about one thing — one subscription, one project, one decision, one person. When a page accumulates content about multiple distinct entities, split it.
+- **Split trigger.** When a page exceeds ~50 lines, or covers >1 distinct entity, split it into separate pages and update `index.md` + inbound cross-links. Splitting is a normal operation, not exceptional.
+- **Compact older content.** Detail that is no longer load-bearing (intermediate decisions superseded by later ones, exploratory notes that resolved into a final answer) should be summarized to a one-liner. Move historical detail to `log.md` if it has narrative value, otherwise drop it. Pages don't grow forever.
+- **Wiki-links are first-class navigation.** Every reference to another concept on the wiki uses `[[Page Name]]` syntax. Readers traverse the wiki by following these — index-first, then link-hop. When you split or rename a page, update inbound links.
+- **Schema consistency for entity-class pages.** Pages of the same kind share a structure. All subscription pages have the same fields (cost, status, last-charged). All project pages have the same fields (status, owner, last-touched). Don't reinvent shape per page.
+- **Optional frontmatter.** When a page benefits from structured metadata (`status:`, `last-updated:`, `tags:`), use YAML frontmatter. Apply where it earns its keep — not strict.
+
+`index.md` is the entry point: organized by category, one line per page describing what's on it. A reader should find the right 1–3 pages from the index without opening anything else.
+
 ## Procedure
 
 ### 0. Open a progress log
@@ -106,6 +121,19 @@ Not every input becomes a wiki page. Apply judgment:
 
 When in doubt, lean conservative: under-distilling is reversible (memory events stay in the log; you'll see them next run). Over-distilling pollutes the wiki.
 
+**Scaling: parallel triage with Haiku.** When there are many inputs (>~20 memory events, or a large stack of completed tasks), don't read+classify them all yourself. Use the `Task` tool to spawn Haiku subagents in parallel — each takes a slice of events and returns a structured triage (which page each belongs on, whether it's a correction, whether it should be dropped). You then take the triage and do the careful integration work yourself on Sonnet. Cheap for the bulk read; sharp for the writes.
+
+```
+Task(
+  subagent_type="general-purpose",
+  model="haiku",
+  description="Triage memory events 100–149",
+  prompt="<give the agent: the events JSONL slice, the current index.md, and ask for a JSON list of {eventId, targetPage, op: 'append'|'correct'|'new-page'|'drop', reason}>"
+)
+```
+
+Skip this for small runs (<20 events) — Haiku spawn overhead isn't worth it.
+
 ### 4. Build the next version
 
 Copy the current wiki to a staging directory as your working copy:
@@ -122,7 +150,9 @@ For each input you decided to distill:
 - **Update to existing page**: edit the page in staging; preserve unattributed content (it may be a manual user edit — see "Conservative lint" below).
 - **Correction**: edit the offending page in staging, then append a `## [<date>] correction | <page-slug> | <what>` entry to `staging/log.md`.
 
-Use wiki-links `[[Page Name]]` for cross-references. Rebuild `index.md` so it reflects all current pages.
+Apply the **Page principles** above as you write: one concept per page, split when it grows past ~50 lines or multi-entity, compact older detail, wiki-link every concept reference, keep entity-class pages schema-consistent. Splitting and compaction are normal operations during this step — do them when warranted, not just for new content.
+
+Rebuild `index.md` so it reflects all current pages, organized by category, one line per page.
 
 Append a summary entry to `log.md`:
 
@@ -141,6 +171,10 @@ Before swapping, scan `.jean/.consolidator/staging/` for issues:
 
 - **Contradictions** between pages — fix per the most recent evidence; note in `log.md`.
 - **Stale claims** that newer memory events have superseded — update.
+- **Oversize pages** (>~50 lines or covering >1 distinct entity) — split per the Page principles. Update `index.md` and inbound `[[links]]`.
+- **Stale detail that should be compacted** — sections that aren't load-bearing anymore (superseded decisions, resolved explorations) get summarized down to a one-liner; archive narrative detail in `log.md` if it matters.
+- **Concept references without `[[wiki-links]]`** — when a page mentions another concept that has its own page, link it. Wiki-links are how readers navigate.
+- **Schema drift** in entity-class pages (e.g. one subscription page is missing the `cost` field everyone else has) — normalize.
 - **Orphan pages** with no inbound links — flag in `log.md`, do not delete.
 - **Important concepts referenced but lacking their own page** — note in `log.md` for next run.
 - **User-edited content** — treat as a strong prior, not as immutable. If new memory events contradict it, update the page; preserve the user's framing where the new evidence is silent. If no event-evidence touches the user's content, leave it alone.
