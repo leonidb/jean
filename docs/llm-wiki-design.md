@@ -221,7 +221,58 @@ This means the schema is *generic* across dojos — different dojos have differe
 
 Per-dojo schema specialization (if needed) goes in the dojo's own playbook or a thin wrapper skill that loads the framework one. Default: no per-dojo specialization required.
 
-### Adaptation 9 — Cross-dojo composition (free via peek)
+### Adaptation 9 — `raw/` folder for human-curated source material
+
+**Karpathy's original** had a `raw/` folder for "articles, papers, images, data files" — immutable sources the LLM reads but never modifies. We deferred this in MVP because Jean's primary input is the event log (memorize + completed tasks). But there's a real gap: source material that doesn't fit an event payload (PDFs, CSVs, screenshots, exported data, long pre-existing docs) has nowhere to live without being reinvented as `<dojo>/sources/`-style ad-hoc folders.
+
+**Layout** (`raw/` as a sibling to `context/`, NOT nested):
+
+```
+.jean/
+  raw/                              # human-curated, librarian reads, never writes
+    payments-export.csv
+    sources/                        # subdirs ok — Karpathy-style
+      bills-archive.pdf
+      ...
+  context/                          # librarian-managed wiki
+```
+
+**Lifecycle (matches Karpathy)**: files in `raw/` are **permanent and immutable** from the librarian's perspective. Humans curate (add, edit, occasionally remove). The librarian reads but never moves, deletes, or modifies them.
+
+**Tracking what's been processed — mtime cursor:** symmetric to the existing event cursor.
+
+```jsonc
+// .jean/.consolidator/cursor.json
+{
+  "lastEventId": 710,
+  "lastConsolidatedAt": "2026-04-30T03:00:00Z",
+  "lastRawConsolidatedAt": "2026-04-30T03:00:00Z"  // NEW
+}
+```
+
+On each librarian run:
+```bash
+find .jean/raw -type f -newermt "$LAST_RAW_CONSOLIDATED_AT"
+```
+Only files modified since the last run get reprocessed. After a successful run, advance `lastRawConsolidatedAt` to the run's start time. This handles re-edits naturally (a user updating a CSV with a new month triggers reprocessing).
+
+**Permissions:**
+- All roles: `Read(.jean/raw/**)` allow (humans + agents read freely).
+- Sensei + workers: no special deny on `raw/` (they're free to drop files there as part of normal work).
+- Librarian: `Read(.jean/raw/**)` only — never writes there. The deny on `Edit/Write(.jean/raw/**)` is enforced explicitly to prevent the librarian from modifying source material.
+
+**Binary file handling — deferred.** Markdown / plain-text files in `raw/` are processed natively (librarian uses `Read`). Binaries (PDFs, XLSX, PNGs, CSVs) need conversion tooling (`pdftotext`, `xlsx2csv`, OCR). For MVP:
+- Librarian *lists* binary files in the wiki (`raw/sources/bills-archive.pdf — referenced source`)
+- Librarian doesn't try to extract content from them
+- If the user wants binary content distilled, they convert to markdown manually before dropping into raw/, or wait for a future "raw-extract" capability
+
+**Detection of deletions/renames:** mtime cursor doesn't catch them. If a user deletes a file referenced in the wiki, the librarian flags it as an orphan reference on next lint pass, but doesn't auto-act. Acceptable trade for MVP.
+
+**Skill changes** — `consolidate-wiki.md` step 2 (Read inputs) gains a sub-step: "find new/modified raw/ files since cursor; for each, decide whether to update wiki." Step 7 (cursor advance) updates `lastRawConsolidatedAt` along with `lastEventId`.
+
+**Migration story for goals/:** `<dojo>/sources/*.{pdf,csv,png,xlsx}` → `.jean/raw/sources/`. Then librarian on next run will see them as new (mtime > cursor) and reference them in the wiki. The two prose docs `digital/audit-notes.md` + `digital/cleanup-notes.md` are different — they're authored knowledge, belong directly in `.jean/context/` as user-edited pages.
+
+### Adaptation 10 — Cross-dojo composition (free via peek)
 
 `memory` events are events; `jean peek <other-dojo>` already reads them. Consolidated wiki pages are markdown; also peek-friendly. So an overseer dojo can read another dojo's wiki and event log without further work.
 
@@ -317,7 +368,7 @@ Karpathy uses `raw/` because most of his ingest flow is "clip an article, drop i
    - Behavior is idempotent — every run checks state and fills gaps.
 3. **Schema clarification**: Karpathy's "schema" = the conventions of this particular wiki (file structure, wiki-link format, frontmatter fields, citation style, page categories, workflows). In Jean it's the framework `context` skill itself — the skill prose IS the schema. Per-dojo customization for MVP: edit the dojo's copy of the skill. Wrapper-skill mechanism only if multiple dojos genuinely diverge.
 4. **Recall as MCP tool vs direct read**: deferred. Direct-read for now; upgrade trigger spelled out in Adaptation 5.
-5. **Cross-dojo user-memory layer**: separate design, sketch noted in Adaptation 9.
+5. **Cross-dojo user-memory layer**: separate design, sketch noted in Adaptation 10.
 6. **Librarian failure recovery**: if librarian crashes mid-run, the inactive `context-X/` dir may have garbage; the symlink still points at the previous good version (production untouched). Cleanup-on-next-run is sufficient for MVP.
 
 ---
