@@ -33,6 +33,18 @@ A **pre-spawn recovery routine** (deterministic, runs before you do) guarantees 
 
 ## Procedure
 
+### 0. Open a progress log
+
+The headless run can be killed by timeout or crash with no stdout/stderr surfaced. Write progress to `.jean/.consolidator/runs/<ts>.log` so a partial trace survives even when the run dies mid-flight.
+
+```bash
+mkdir -p .jean/.consolidator/runs
+RUN_LOG=.jean/.consolidator/runs/$(date -u +%Y%m%dT%H%M%SZ).log
+echo "[$(date -u +%H:%M:%SZ)] librarian started" > "$RUN_LOG"
+```
+
+Append one line per phase as you work: `[time] reading events`, `[time] built staging with N pages`, `[time] swapping`, `[time] done`. Don't try to be exhaustive — phase markers are enough to recover what was happening on a timeout-kill.
+
 ### 1. Determine state
 
 ```bash
@@ -92,7 +104,7 @@ When in doubt, lean conservative: under-distilling is reversible (memory events 
 Copy the current wiki to a staging directory as your working copy:
 
 ```bash
-rm -rf .jean/.consolidator/staging
+rm -r .jean/.consolidator/staging
 cp -r .jean/context/. .jean/.consolidator/staging/
 ```
 
@@ -126,16 +138,16 @@ Before swapping, scan `.jean/.consolidator/staging/` for issues:
 
 ### 6. Swap (two renames + cleanup)
 
-Replace `.jean/context/` with `staging/` via two renames:
+Replace `.jean/context/` with `staging/` via two renames. **All in one Bash invocation** — bash variables don't persist across separate tool calls, so don't split this into multiple steps:
 
 ```bash
-TS=$(date -u +%Y%m%dT%H%M%SZ)
-mv .jean/context .jean/.consolidator/old-$TS
-mv .jean/.consolidator/staging .jean/context
-rm -rf .jean/.consolidator/old-$TS
+TS=$(date -u +%Y%m%dT%H%M%SZ) && \
+  mv .jean/context .jean/.consolidator/old-$TS && \
+  mv .jean/.consolidator/staging .jean/context && \
+  rm -r .jean/.consolidator/old-$TS
 ```
 
-Brief microsecond gap between the two `mv` calls where `.jean/context/` doesn't exist; concurrent readers (rare; this runs once a night) get `ENOENT` and naturally retry. The final `rm -rf` cleans up the previous version.
+Brief microsecond gap between the two `mv` calls where `.jean/context/` doesn't exist; concurrent readers (rare; this runs once a night) get `ENOENT` and naturally retry. The final `rm -r` cleans up the previous version.
 
 If you crash between the two renames, the next librarian invocation's pre-spawn recovery routine restores the layout deterministically — you don't have to defend against your own crash.
 
