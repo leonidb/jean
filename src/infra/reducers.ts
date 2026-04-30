@@ -172,11 +172,12 @@ export type HeadlessCompletedData = {
 
 // ── Memory event data ───────────────────────────────────────────
 //
-// Emitted via POST /memorize. The librarian (a headless Claude spawned by
-// the consolidate-wiki trigger) reads these in batches via the cursor and
-// distills them into the wiki under .jean/context/. Memory events live in
-// the dedicated MEMORY_STREAM so the librarian can read them with a single
-// stream filter rather than scanning every event by type.
+// Emitted via POST /context/memorize. The librarian (a headless Claude
+// spawned by the consolidate-wiki trigger) reads these in batches via
+// the cursor and distills them into the wiki under .jean/context/.
+// Memory events live in the dedicated MEMORY_STREAM so the librarian
+// can read them with a single stream filter rather than scanning every
+// event by type.
 //
 // `scope`:
 //   'dojo' (default) — knowledge that's specific to this dojo
@@ -193,6 +194,26 @@ export type MemoryData = {
   /** Task this memory was discovered in, if any. Helps the librarian trace
    *  attribution when distilling pages. */
   taskId?: string
+}
+
+// ── Wiki-consolidated event data ────────────────────────────────
+//
+// Emitted via POST /context/consolidated by the librarian at the end
+// of a successful consolidation run. Captures what changed (page
+// counts, tasks distilled, corrections applied) plus any anomalies
+// the librarian wants surfaced to sensei. Sensei sees this in the
+// pendingProjection and can surface non-empty anomalies to the human.
+
+export type WikiConsolidatedData = {
+  pagesCreated?: number
+  pagesUpdated?: number
+  corrections?: number
+  tasksDistilled?: number
+  eventsProcessed?: number
+  rawFilesProcessed?: number
+  /** Free-form messages the librarian wants sensei to look at: stale
+   *  references, unclear contradictions, files it couldn't extract, etc. */
+  anomalies?: string[]
 }
 
 // ── Playbook event data ─────────────────────────────────────────

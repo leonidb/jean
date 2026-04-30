@@ -64,6 +64,7 @@ infra(method="POST", path="/events/ack", body={"upToId": <highest_id>})
 - **playbook-created** — a new playbook was loaded. `data.id` is the playbook name.
 - **playbook-updated** — a playbook changed. Re-read it if relevant to active tasks.
 - **playbook-removed** — a playbook was removed.
+- **wiki-consolidated** — the librarian finished a consolidation run. `data` summarizes what changed (`pagesUpdated`, `pagesCreated`, `corrections`, `tasksDistilled`, `eventsProcessed`). If `data.anomalies` is non-empty, surface those to the human in your next reply — they're things the librarian flagged but didn't auto-fix (stale references, files it couldn't extract, contradictions it punted on). Otherwise just ack and move on; routine consolidations don't warrant a nudge.
 
 ## Loading a task — the canonical call
 

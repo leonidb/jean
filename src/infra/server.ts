@@ -84,6 +84,7 @@ import {
   taskStream,
   toApiEvent,
   triggerReducer,
+  type WikiConsolidatedData,
 } from './reducers.ts'
 import { shouldCatchUp } from './trigger-catchup.ts'
 
@@ -129,6 +130,7 @@ const pendingProjection = createProjection<PendingState>({
       'playbook-updated',
       'playbook-removed',
       'ack',
+      'wiki-consolidated',
     ],
   },
 })
@@ -957,14 +959,18 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       })()
     }
 
-    // ── Memorize ────────────────────────────────────────────────
+    // ── Context endpoints ───────────────────────────────────────
     //
-    // Records a `memory` event in MEMORY_STREAM. The librarian — a headless
-    // Claude spawned by the consolidate-wiki trigger — reads new memory
-    // events via cursor and distills them into the wiki under
-    // .jean/context/. See docs/llm-wiki-design.md.
+    // POST /context/memorize  — agent records a memory event (cross-task
+    //   knowledge worth surfacing in the wiki).
+    // POST /context/consolidated — librarian records a wiki-consolidated
+    //   event at the end of a run, with anomalies for sensei to surface.
+    //
+    // The wiki itself lives at .jean/context/; these endpoints write the
+    // events that feed it (memorize) and signal its lifecycle (consolidated).
+    // See docs/llm-wiki-design.md.
 
-    if (path === '/memorize' && req.method === 'POST') {
+    if (path === '/context/memorize' && req.method === 'POST') {
       return (async () => {
         const body = (await req.json()) as Partial<MemoryData>
         if (!body.agent || !body.role || !body.text?.trim()) {
@@ -978,6 +984,23 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           scope,
           ...(body.taskId && { taskId: body.taskId }),
         } satisfies MemoryData)
+        return Response.json({ id: event.id })
+      })()
+    }
+
+    if (path === '/context/consolidated' && req.method === 'POST') {
+      return (async () => {
+        const body = (await req.json()) as Partial<WikiConsolidatedData>
+        const data: WikiConsolidatedData = {
+          ...(body.pagesCreated !== undefined && { pagesCreated: body.pagesCreated }),
+          ...(body.pagesUpdated !== undefined && { pagesUpdated: body.pagesUpdated }),
+          ...(body.corrections !== undefined && { corrections: body.corrections }),
+          ...(body.tasksDistilled !== undefined && { tasksDistilled: body.tasksDistilled }),
+          ...(body.eventsProcessed !== undefined && { eventsProcessed: body.eventsProcessed }),
+          ...(body.rawFilesProcessed !== undefined && { rawFilesProcessed: body.rawFilesProcessed }),
+          ...(Array.isArray(body.anomalies) && body.anomalies.length > 0 && { anomalies: body.anomalies }),
+        }
+        const event = await record('wiki-consolidated', SYSTEM_STREAM, data)
         return Response.json({ id: event.id })
       })()
     }

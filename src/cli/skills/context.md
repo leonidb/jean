@@ -51,7 +51,7 @@ If the index is missing or empty (fresh dojo), the wiki hasn't been populated ye
 When you observe something that should outlive this task — a pattern, a decision, a finding worth surfacing in future tasks — emit a `memory` event:
 
 ```
-infra(method="POST", path="/memorize", body={
+infra(method="POST", path="/context/memorize", body={
   agent: "<your name>",
   role: "<your role>",
   text: "<observation, finding, decision — full sentence>",

@@ -181,23 +181,20 @@ Then record the run via the infra HTTP API:
 
 ```bash
 PORT=$(cat ../../infra.port)
-curl -s -X POST "http://127.0.0.1:$PORT/events" \
+curl -s -X POST "http://127.0.0.1:$PORT/context/consolidated" \
   -H 'content-type: application/json' \
   -d '{
-    "type": "wiki-consolidated",
-    "stream": "system",
-    "data": {
-      "pagesUpdated": <N>,
-      "pagesCreated": <K>,
-      "corrections": <M>,
-      "tasksDistilled": <T>,
-      "eventsProcessed": <E>,
-      "anomalies": []
-    }
+    "pagesUpdated": <N>,
+    "pagesCreated": <K>,
+    "corrections": <M>,
+    "tasksDistilled": <T>,
+    "eventsProcessed": <E>,
+    "rawFilesProcessed": <R>,
+    "anomalies": []
   }'
 ```
 
-Sensei will see this event in its normal nudge cycle and may surface anomalies to the human.
+Sensei will see this `wiki-consolidated` event in its normal nudge cycle and surface non-empty `anomalies` to the human. Use `anomalies` for things sensei should know about: stale references, files you couldn't extract, contradictions you flagged but didn't auto-fix.
 
 ## Failure modes (be aware)
 

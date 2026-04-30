@@ -108,8 +108,8 @@ describe('infrastructure server', () => {
     ws.close()
   })
 
-  test('/memorize records a memory event with id', async () => {
-    const res = await fetch(`${BASE}/memorize`, {
+  test('/context/memorize records a memory event with id', async () => {
+    const res = await fetch(`${BASE}/context/memorize`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -136,8 +136,8 @@ describe('infrastructure server', () => {
     expect(ev?.data.scope).toBe('dojo')
   })
 
-  test('/memorize trims whitespace and defaults scope to dojo', async () => {
-    const res = await fetch(`${BASE}/memorize`, {
+  test('/context/memorize trims whitespace and defaults scope to dojo', async () => {
+    const res = await fetch(`${BASE}/context/memorize`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -157,8 +157,8 @@ describe('infrastructure server', () => {
     expect(ev?.data.scope).toBe('dojo')
   })
 
-  test('/memorize records taskId when provided', async () => {
-    const res = await fetch(`${BASE}/memorize`, {
+  test('/context/memorize records taskId when provided', async () => {
+    const res = await fetch(`${BASE}/context/memorize`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -177,7 +177,48 @@ describe('infrastructure server', () => {
     expect(ev?.data.taskId).toBe('042')
   })
 
-  test('/memorize 400s on missing agent / role / empty text', async () => {
+  test('/context/consolidated records a wiki-consolidated event with summary fields', async () => {
+    const res = await fetch(`${BASE}/context/consolidated`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        pagesUpdated: 3,
+        pagesCreated: 1,
+        corrections: 0,
+        tasksDistilled: 2,
+        eventsProcessed: 5,
+        anomalies: ['raw_context/foo.pdf was referenced but unreadable'],
+      }),
+    })
+    expect(res.status).toBe(200)
+    const data = (await res.json()) as { id: number }
+    expect(typeof data.id).toBe('number')
+
+    const histRes = await fetch(`${BASE}/history?stream=system`)
+    const hist = (await histRes.json()) as {
+      events: Array<{ type: string; data: { pagesUpdated?: number; anomalies?: string[] } }>
+    }
+    const ev = hist.events.findLast((e) => e.type === 'wiki-consolidated')
+    expect(ev?.data.pagesUpdated).toBe(3)
+    expect(ev?.data.anomalies).toEqual(['raw_context/foo.pdf was referenced but unreadable'])
+  })
+
+  test('/context/consolidated omits empty fields and empty anomalies array', async () => {
+    const res = await fetch(`${BASE}/context/consolidated`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pagesUpdated: 2, anomalies: [] }),
+    })
+    expect(res.status).toBe(200)
+    const histRes = await fetch(`${BASE}/history?stream=system`)
+    const hist = (await histRes.json()) as { events: Array<{ type: string; data: Record<string, unknown> }> }
+    const ev = hist.events.findLast((e) => e.type === 'wiki-consolidated' && e.data.pagesUpdated === 2)
+    expect(ev?.data.pagesUpdated).toBe(2)
+    // Empty anomalies array should be omitted (undefined)
+    expect(ev?.data.anomalies).toBeUndefined()
+  })
+
+  test('/context/memorize 400s on missing agent / role / empty text', async () => {
     const cases = [
       { role: 'sensei', text: 'no agent' },
       { agent: 'a', text: 'no role' },
@@ -186,7 +227,7 @@ describe('infrastructure server', () => {
       { agent: 'a', role: 'sensei', text: '   ' }, // whitespace-only
     ]
     for (const body of cases) {
-      const res = await fetch(`${BASE}/memorize`, {
+      const res = await fetch(`${BASE}/context/memorize`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
