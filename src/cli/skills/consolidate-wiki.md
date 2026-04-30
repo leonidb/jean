@@ -170,6 +170,24 @@ Every page you create or meaningfully change must carry a `description:` in fron
 
 Rebuild `index.md` by lifting each page's `description:` — `- [[Page]] — <description>` per line, grouped by category. The index is generated, not hand-written.
 
+**Read only the header.** When you only need descriptions (index rebuild, lint scan for missing/stale `description:`), don't load page bodies — that wastes tokens at wiki scale. Extract the frontmatter directly with `awk`:
+
+```bash
+# Lift description from a single page — no body read
+awk '/^---$/{c++; next} c==1 && /^description:/{sub(/^description:[ ]*/,""); print; exit}' page.md
+
+# Build the entire index from frontmatter alone — no body read for any page
+cd .jean/.consolidator/staging && \
+  for f in *.md; do
+    base=$(basename "$f" .md)
+    [[ "$base" == "index" || "$base" == "log" ]] && continue
+    desc=$(awk '/^---$/{c++; next} c==1 && /^description:/{sub(/^description:[ ]*/,""); print; exit}' "$f")
+    echo "- [[$base]] — $desc"
+  done
+```
+
+Use `Read(path, limit=20)` if you'd rather use the Read tool — same idea: stop reading after the closing `---`. Only load the full body when you actually need to *change* the page (Edit requires a prior Read of the slice you're editing).
+
 Append a summary entry to `log.md`:
 
 ```markdown
@@ -189,8 +207,8 @@ Before swapping, scan `.jean/.consolidator/staging/` for issues:
 - **Stale claims** that newer memory events have superseded — update.
 - **Oversize pages** (>~50 lines or covering >1 distinct entity) — split per the Page principles. Update `index.md` and inbound `[[links]]`.
 - **Stale detail that should be compacted** — sections that aren't load-bearing anymore (superseded decisions, resolved explorations) get summarized down to a one-liner; archive narrative detail in `log.md` if it matters.
-- **Missing or stale `description:` frontmatter** — every page needs one; when the body has drifted from the description, rewrite the description to match. The index is only as useful as the descriptions it lifts.
-- **`index.md` out of sync with page descriptions** — regenerate so each entry matches its page's current `description:`.
+- **Missing or stale `description:` frontmatter** — every page needs one; when the body has drifted from the description, rewrite the description to match. The index is only as useful as the descriptions it lifts. Use the header-only `awk` scan from step 4 to find pages missing `description:` without reading any page body.
+- **`index.md` out of sync with page descriptions** — regenerate it from the same header-only scan; never hand-edit the index.
 - **Concept references without `[[wiki-links]]`** — when a page mentions another concept that has its own page, link it. Wiki-links are how readers navigate.
 - **Schema drift** in entity-class pages (e.g. one subscription page is missing the `cost` field everyone else has) — normalize.
 - **Orphan pages** with no inbound links — flag in `log.md`, do not delete.
