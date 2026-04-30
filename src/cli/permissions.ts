@@ -39,10 +39,12 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
         'Bash(mv:*)',
         'Bash(rm:*)',
         'Bash(cp:*)',
+        'Bash(mkdir:*)',
         'Bash(cat:*)',
         'Bash(jq:*)',
         'Bash(curl:*)',
         'Bash(date:*)',
+        'Bash(ls:*)',
       ],
       deny: [],
     }
