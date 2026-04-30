@@ -35,6 +35,8 @@ describe('buildHeadlessCommand', () => {
     // Headless runs intentionally do NOT load MCP; the librarian uses
     // native Read/Edit/Write/Bash. No --mcp-config in argv.
     expect(argv).not.toContain('--mcp-config')
+    // Permission UI bypassed — headless can't answer prompts, would stall.
+    expect(argv).toContain('--dangerously-skip-permissions')
   })
 
   test('binary override is respected', () => {

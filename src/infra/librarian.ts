@@ -49,7 +49,7 @@ export type SpawnHeadlessOpts = {
   binary?: string
   /** Extra argv pushed after the prompt — escape hatch for special flags. */
   extraArgs?: string[]
-  /** Hard timeout. Default 10 minutes. */
+  /** Hard timeout. Default 20 minutes. */
   timeoutMs?: number
 }
 
@@ -174,6 +174,11 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
     opts.prompt,
     '--add-dir',
     relJean,
+    // Skip the interactive permission UI — headless can't answer prompts
+    // and they would silently stall until our timeout. The role's
+    // settings.local.json deny rules are still enforced; this flag only
+    // bypasses the "ask the user" step, not the OS-level access controls.
+    '--dangerously-skip-permissions',
     ...(opts.model ? ['--model', opts.model] : []),
     ...(outputFormat === 'json' ? ['--output-format', 'json'] : []),
     ...(opts.extraArgs ?? []),
@@ -223,7 +228,7 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnHeadl
 
   const argv = buildHeadlessCommand(opts)
   const start = Date.now()
-  const timeoutMs = opts.timeoutMs ?? 600_000
+  const timeoutMs = opts.timeoutMs ?? 1_200_000
 
   let timedOut = false
   const proc = Bun.spawn(argv, {
