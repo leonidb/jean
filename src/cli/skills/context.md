@@ -87,6 +87,18 @@ The librarian picks up corrections on the next consolidation, updates the page, 
 
 This rule applies regardless of how you noticed the staleness — running into it during work, comparing two pages, or the user telling you in conversation. Always: memorize, move on.
 
+**Optional: trigger an immediate consolidation.** When the user asks for the wiki to reflect a change *now* (rather than waiting for the nightly run), after memorizing the correction you can fire the consolidate-wiki trigger:
+
+```
+infra(method="POST", path="/triggers/consolidate-wiki/fire")
+```
+
+The fire endpoint returns immediately (the spawn is detached). The librarian runs Sonnet, integrates the new memorize event, swaps the wiki. ~2–5 minutes wall-clock for a small update. The `wiki-consolidated` event lands in your event stream when done. Use this when:
+- The user wants to immediately see the wiki reflect a state change they just made
+- A correction is load-bearing (e.g. bills/savings updates with money implications)
+
+Don't fire the librarian for every memorize — let the nightly run handle routine updates.
+
 ## What the librarian does (FYI)
 
 - Reads new `memory` events since its cursor

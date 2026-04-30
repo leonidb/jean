@@ -126,15 +126,19 @@ Append a summary entry to `log.md`:
 - Distilled from task #042
 ```
 
-### 5. Conservative lint (last pass before swap)
+### 5. Lint (last pass before swap)
+
+The wiki is a projection of events. Your job is to keep that projection current. Manual user edits are NOT immortal — they get reconciled with event evidence like anything else.
 
 Before swapping, scan `.jean/.consolidator/staging/` for issues:
 
-- **Contradictions** between pages — flag in `log.md`, optionally fix.
+- **Contradictions** between pages — fix per the most recent evidence; note in `log.md`.
 - **Stale claims** that newer memory events have superseded — update.
-- **Orphan pages** with no inbound links — flag, do not delete.
+- **Orphan pages** with no inbound links — flag in `log.md`, do not delete.
 - **Important concepts referenced but lacking their own page** — note in `log.md` for next run.
-- **Manual user edits** (content not traceable to a memory event you've seen) — **leave them alone.** Treat as authoritative. Only "fix" content you can trace to a memory event or that clearly contradicts new evidence.
+- **User-edited content** — treat as a strong prior, not as immutable. If new memory events contradict it, update the page; preserve the user's framing where the new evidence is silent. If no event-evidence touches the user's content, leave it alone.
+
+The principle: **don't delete or rewrite without reason. Do update when evidence shows current content is wrong or stale, regardless of who wrote it.**
 
 ### 6. Swap (two renames + cleanup)
 

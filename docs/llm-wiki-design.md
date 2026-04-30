@@ -192,9 +192,11 @@ The crash-mid-swap window is the one real concern. Mitigation: a deterministic *
 
 The recovery routine runs **before** every librarian spawn (in `src/infra/librarian.ts`, deterministically, no LLM involvement). After recovery, `.jean/context/` is guaranteed to exist as a real directory with intact content.
 
-**Manual user edits — valid and encouraged.** The wiki is human-readable knowledge; humans can fix typos, add pages, delete obsolete content directly. Rules:
-- User edits are *authoritative*. Librarian preserves them on the next run — when copying `.jean/context/` to `staging/`, user edits come along.
-- Lint pass is *conservative*: librarian only "fixes" content it can trace back to a memorize event or a clear contradiction with new evidence. Unattributed content is treated as human-authored and left alone unless obviously broken.
+**Manual user edits — valid and welcome, but NOT immortal.** The wiki is a projection of events; user edits are a *strong prior*, not an unkillable veto. Rules:
+- User edits get carried forward on the next run when the librarian copies `.jean/context/` to `staging/`.
+- **The librarian may update them** if new memory events or completed-task evidence contradicts the user's content. Wiki content goes stale; the librarian's job is to keep the projection current.
+- Where new evidence is silent, the user's framing is preserved (don't rewrite unprompted).
+- The preferred way to update wiki state isn't direct file editing — it's telling sensei. Sensei memorizes the change and (optionally) fires the consolidate-wiki trigger immediately. That keeps the event log as the canonical record of what changed and why.
 - Soft convention: don't edit while librarian is mid-run (a few minutes, once a night). If you do, your edit might be in `.jean/context/` while librarian builds `staging/` from an earlier snapshot — your edit gets carried forward in the *next-next* run rather than this one. Practically harmless.
 
 **Failure handling.** If librarian crashes mid-run: the symlink still points at the previous good version (production unchanged); the scratch directory may have garbage that gets cleaned on next run's start. Cursor doesn't advance, so retried. No corruption window.
