@@ -19,7 +19,7 @@ export type Permissions = {
   deny: string[]
 }
 
-export function defaultPermissions(role: AgentRole, dojoRoot?: string): Permissions {
+export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissions {
   if (role === 'librarian') {
     // Librarian is the wiki's only writer and runs headless without MCP.
     // Reads history.jsonl + wiki pages directly via Read/Glob/Grep, builds
@@ -48,19 +48,16 @@ export function defaultPermissions(role: AgentRole, dojoRoot?: string): Permissi
     }
   }
 
-  const allow =
-    role === 'sensei'
-      ? ['mcp__jean__send', 'mcp__jean__infra', 'Read', 'Glob', 'Grep', 'Bash(git:*)']
-      : ['mcp__jean__reply', 'mcp__jean__infra', 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git:*)']
-
-  const deny: string[] = []
-  if (dojoRoot) {
-    // Wiki is library-managed: agents read freely, but only the librarian
-    // (a headless Claude on the consolidate-wiki trigger) may write. Direct
-    // edits would create state that can't be reproduced from the event log.
-    // See docs/llm-wiki-design.md (Adaptation 5: read-write asymmetry).
-    const ctx = resolve(dojoRoot, '.jean', 'context')
-    deny.push(`Edit(${ctx}/**)`, `Write(${ctx}/**)`)
+  // Wiki is library-managed: agents read freely, but only the librarian
+  // (headless Claude on the consolidate-wiki trigger) may write. Direct
+  // edits would create state that can't be reproduced from the event log.
+  // See docs/llm-wiki-design.md (Adaptation 5: read-write asymmetry).
+  const ctx = resolve(dojoRoot, '.jean', 'context')
+  return {
+    allow:
+      role === 'sensei'
+        ? ['mcp__jean__send', 'mcp__jean__infra', 'Read', 'Glob', 'Grep', 'Bash(git:*)']
+        : ['mcp__jean__reply', 'mcp__jean__infra', 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git:*)'],
+    deny: [`Edit(${ctx}/**)`, `Write(${ctx}/**)`],
   }
-  return { allow, deny }
 }

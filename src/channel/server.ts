@@ -17,14 +17,14 @@ import { dirname, resolve } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import type { AgentRole, DeliverMsg, ErrorMsg, RegisteredMsg } from '../infra/protocol.ts'
+import { type AgentRole, type DeliverMsg, type ErrorMsg, isAgentRole, type RegisteredMsg } from '../infra/protocol.ts'
 import { findDojoFrom, readRuntimeFiles } from '../probe.ts'
 import { buildInstructions, buildTools, formatInfraResponse, optionalString, resolveReplyTaskId } from './tools.ts'
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
 const AGENT_ROLE: AgentRole = ((): AgentRole => {
   const raw = process.env.JEAN_ROLE ?? 'worker'
-  if (raw === 'sensei' || raw === 'worker' || raw === 'user' || raw === 'librarian') return raw
+  if (isAgentRole(raw)) return raw
   process.stderr.write(`[jean] JEAN_ROLE="${raw}" is not a known role — falling back to worker\n`)
   return 'worker'
 })()

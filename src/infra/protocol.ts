@@ -8,7 +8,15 @@
 
 /** Plugin identifies itself on connect. `peer` = another dojo's sensei,
  *  registered locally via `jean peer add`; it never holds a local WS. */
-export type AgentRole = 'worker' | 'sensei' | 'user' | 'peer' | 'librarian'
+/** Single source of truth for valid agent roles. Iterating this is the only
+ *  way to enumerate roles — don't hand-write the list elsewhere. */
+export const AGENT_ROLES = ['worker', 'sensei', 'user', 'peer', 'librarian'] as const
+
+export type AgentRole = (typeof AGENT_ROLES)[number]
+
+export function isAgentRole(s: string): s is AgentRole {
+  return (AGENT_ROLES as readonly string[]).includes(s)
+}
 
 export type RegisterMsg = {
   type: 'register'

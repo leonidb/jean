@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import { resolve } from 'node:path'
 import { defaultPermissions } from './permissions.ts'
 
+const DOJO = '/tmp/test-dojo'
+
 describe('defaultPermissions', () => {
   test('sensei gets send + read-only infra, no reply, no curl', () => {
-    const { allow } = defaultPermissions('sensei')
+    const { allow } = defaultPermissions('sensei', DOJO)
     expect(allow).toContain('mcp__jean__send')
     expect(allow).toContain('mcp__jean__infra')
     expect(allow).not.toContain('mcp__jean__reply')
@@ -12,7 +14,7 @@ describe('defaultPermissions', () => {
   })
 
   test('worker gets reply + infra + edit/write, no send', () => {
-    const { allow } = defaultPermissions('worker')
+    const { allow } = defaultPermissions('worker', DOJO)
     expect(allow).toContain('mcp__jean__reply')
     expect(allow).toContain('mcp__jean__infra')
     expect(allow).toContain('Edit')
@@ -22,12 +24,12 @@ describe('defaultPermissions', () => {
   })
 
   test('user role mirrors worker', () => {
-    expect(defaultPermissions('user')).toEqual(defaultPermissions('worker'))
+    expect(defaultPermissions('user', DOJO)).toEqual(defaultPermissions('worker', DOJO))
   })
 
   test('every role includes safe read + git', () => {
     for (const role of ['sensei', 'worker', 'user'] as const) {
-      const { allow } = defaultPermissions(role)
+      const { allow } = defaultPermissions(role, DOJO)
       expect(allow).toContain('Read')
       expect(allow).toContain('Glob')
       expect(allow).toContain('Grep')
@@ -35,25 +37,17 @@ describe('defaultPermissions', () => {
     }
   })
 
-  test('without dojoRoot: deny is empty (backwards-compatible)', () => {
-    expect(defaultPermissions('sensei').deny).toEqual([])
-    expect(defaultPermissions('worker').deny).toEqual([])
-    expect(defaultPermissions('user').deny).toEqual([])
-  })
-
   test('with dojoRoot: every role denies Edit/Write on .jean/context/**', () => {
-    const dojoRoot = '/tmp/test-dojo'
-    const ctx = resolve(dojoRoot, '.jean', 'context')
+    const ctx = resolve(DOJO, '.jean', 'context')
     for (const role of ['sensei', 'worker', 'user'] as const) {
-      const { deny } = defaultPermissions(role, dojoRoot)
+      const { deny } = defaultPermissions(role, DOJO)
       expect(deny).toContain(`Edit(${ctx}/**)`)
       expect(deny).toContain(`Write(${ctx}/**)`)
     }
   })
 
   test('librarian: gets Edit/Write allow, no deny on context (it IS the writer)', () => {
-    const dojoRoot = '/tmp/test-dojo'
-    const { allow, deny } = defaultPermissions('librarian', dojoRoot)
+    const { allow, deny } = defaultPermissions('librarian', DOJO)
 
     // The librarian is the only role that may write the wiki, so its allow
     // includes Edit + Write and its deny does NOT block .jean/context/**.
@@ -69,14 +63,14 @@ describe('defaultPermissions', () => {
   })
 
   test('librarian: no MCP tools at all (runs without channel plugin)', () => {
-    const { allow } = defaultPermissions('librarian', '/tmp/test-dojo')
+    const { allow } = defaultPermissions('librarian', DOJO)
     for (const rule of allow) {
       expect(rule.startsWith('mcp__')).toBe(false)
     }
   })
 
   test('librarian: includes Bash(curl) for infra HTTP calls', () => {
-    const { allow } = defaultPermissions('librarian', '/tmp/test-dojo')
+    const { allow } = defaultPermissions('librarian', DOJO)
     expect(allow).toContain('Bash(curl:*)')
   })
 

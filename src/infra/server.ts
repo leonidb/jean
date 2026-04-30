@@ -30,15 +30,16 @@ import { type Board, canTransition, type TaskStatus } from './board.ts'
 import { resolveConfig } from './config.ts'
 import { recoverWikiLayout, spawnHeadless } from './librarian.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
-import type {
-  AgentRole,
-  CreateTaskRequest,
-  DeliverMsg,
-  InboundMsg,
-  OutboundMsg,
-  SendRequest,
-  UpdateStatusRequest,
-  UpdateTaskRequest,
+import {
+  AGENT_ROLES,
+  type AgentRole,
+  type CreateTaskRequest,
+  type DeliverMsg,
+  type InboundMsg,
+  type OutboundMsg,
+  type SendRequest,
+  type UpdateStatusRequest,
+  type UpdateTaskRequest,
 } from './protocol.ts'
 import {
   type AckData,
@@ -428,6 +429,86 @@ function syncTriggerJobs() {
   }
 }
 
+function recordHeadlessFailure(triggerId: string, role: AgentRole, message: string) {
+  void record('headless-completed', TRIGGERS_STREAM, {
+    triggerId,
+    role,
+    exitCode: -1,
+    durationMs: 0,
+    timedOut: false,
+    stderrTail: String(message).slice(-2000),
+  } satisfies HeadlessCompletedData)
+}
+
+async function runHeadlessTrigger(trigger: Trigger) {
+  const role = trigger.agent as AgentRole
+  // Wiki consolidation is structured-editing work — Sonnet is plenty.
+  // Per-trigger model always wins; only the librarian default kicks in.
+  const model = trigger.model ?? (role === 'librarian' ? 'sonnet' : undefined)
+  const dojoRoot = resolve(DATA_DIR, '..')
+
+  if (role === 'librarian') {
+    try {
+      const rec = recoverWikiLayout(dojoRoot)
+      if (rec.recovered !== 'none') {
+        process.stderr.write(`[jean] librarian wiki layout recovered (${rec.recovered})\n`)
+      }
+    } catch (err) {
+      recordHeadlessFailure(trigger.id, role, `wiki layout recovery failed: ${err}`)
+      process.stderr.write(`[jean] librarian aborted: ${err}\n`)
+      return
+    }
+  }
+
+  process.stderr.write(`[jean] trigger ${trigger.id} fired → headless ${role}${model ? ` (${model})` : ''}\n`)
+  try {
+    const result = await spawnHeadless({
+      dojoRoot,
+      role,
+      prompt: trigger.prompt,
+      ...(model && { model }),
+    })
+    const stderrTail = result.exitCode !== 0 ? result.stderr.slice(-2000) : undefined
+    void record('headless-completed', TRIGGERS_STREAM, {
+      triggerId: trigger.id,
+      role,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      timedOut: result.timedOut,
+      ...(stderrTail && { stderrTail }),
+      ...(result.parsed?.sessionId && { sessionId: result.parsed.sessionId }),
+      ...(result.parsed?.costUsd !== undefined && { costUsd: result.parsed.costUsd }),
+      ...(result.parsed?.totalTokens !== undefined && { totalTokens: result.parsed.totalTokens }),
+      ...(result.parsed?.model && { model: result.parsed.model }),
+    } satisfies HeadlessCompletedData)
+    process.stderr.write(
+      `[jean] trigger ${trigger.id} headless ${role} done: exit=${result.exitCode} duration=${result.durationMs}ms${result.timedOut ? ' TIMED-OUT' : ''}${result.parsed?.sessionId ? ` session=${result.parsed.sessionId}` : ''}\n`,
+    )
+  } catch (err) {
+    recordHeadlessFailure(trigger.id, role, String(err))
+    process.stderr.write(`[jean] trigger ${trigger.id} headless ${role} spawn failed: ${err}\n`)
+  }
+}
+
+/** Block until a headless run for `triggerId` records its completion event.
+ *  Used by the startup catch-up loop to sequentialize spawns and avoid
+ *  parallel-Claude stampede. Polls every 1s up to 15 minutes. */
+async function waitForHeadlessCompletion(triggerId: string, timeoutMs = 15 * 60 * 1000): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const events = await store.read({ stream: TRIGGERS_STREAM })
+    const completion = events.find(
+      (e) =>
+        e.type === 'headless-completed' &&
+        (e.data as Record<string, unknown>).triggerId === triggerId &&
+        new Date(e.ts).getTime() >= start,
+    )
+    if (completion) return
+    await Bun.sleep(1000)
+  }
+  process.stderr.write(`[jean] catch-up: gave up waiting for ${triggerId} after ${timeoutMs}ms\n`)
+}
+
 async function fireTrigger(trigger: Trigger) {
   await record('trigger-fired', TRIGGERS_STREAM, {
     triggerId: trigger.id,
@@ -437,82 +518,13 @@ async function fireTrigger(trigger: Trigger) {
   } satisfies TriggerFiredData)
 
   if (trigger.kind === 'headless') {
-    // Spawn a one-shot Claude under the role's permissions/skills.
-    // `agent` field carries the role name for headless triggers.
-    const role = trigger.agent as AgentRole
-    // Wiki consolidation/distillation is structured-editing work that
-    // doesn't need Opus-level reasoning; default the librarian to Sonnet
-    // to cut cost ~5x. Other roles fall back to Claude Code's default.
-    // Per-trigger override always wins.
-    const model = trigger.model ?? (role === 'librarian' ? 'sonnet' : undefined)
-    const dojoRoot = resolve(DATA_DIR, '..')
-
-    // Pre-spawn: deterministically recover the wiki layout from any
-    // mid-swap crash of a previous run. After this, `.jean/context/` is
-    // a real directory, no LLM judgment required. See librarian.ts.
-    if (role === 'librarian') {
-      try {
-        const rec = recoverWikiLayout(dojoRoot)
-        if (rec.recovered !== 'none') {
-          process.stderr.write(`[jean] librarian wiki layout recovered (${rec.recovered})\n`)
-        }
-      } catch (err) {
-        void record('headless-completed', TRIGGERS_STREAM, {
-          triggerId: trigger.id,
-          role,
-          exitCode: -1,
-          durationMs: 0,
-          timedOut: false,
-          stderrTail: `wiki layout recovery failed: ${err}`,
-        } satisfies HeadlessCompletedData)
-        process.stderr.write(`[jean] librarian aborted: ${err}\n`)
-        return
-      }
-    }
-
-    process.stderr.write(`[jean] trigger ${trigger.id} fired → headless ${role}${model ? ` (${model})` : ''}\n`)
-    try {
-      const result = await spawnHeadless({
-        dojoRoot,
-        role,
-        prompt: trigger.prompt,
-        ...(model && { model }),
-      })
-      // Tail of stderr surfaced on failure for debuggability without
-      // dumping the full stream into the event log.
-      const stderrTail = result.exitCode !== 0 ? result.stderr.slice(-2000) : undefined
-      void record('headless-completed', TRIGGERS_STREAM, {
-        triggerId: trigger.id,
-        role,
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        timedOut: result.timedOut,
-        ...(stderrTail && { stderrTail }),
-        ...(result.parsed?.sessionId && { sessionId: result.parsed.sessionId }),
-        ...(result.parsed?.costUsd !== undefined && { costUsd: result.parsed.costUsd }),
-        ...(result.parsed?.totalTokens !== undefined && { totalTokens: result.parsed.totalTokens }),
-        ...(result.parsed?.model && { model: result.parsed.model }),
-      } satisfies HeadlessCompletedData)
-      process.stderr.write(
-        `[jean] trigger ${trigger.id} headless ${role} done: exit=${result.exitCode} duration=${result.durationMs}ms${result.timedOut ? ' TIMED-OUT' : ''}${result.parsed?.sessionId ? ` session=${result.parsed.sessionId}` : ''}\n`,
-      )
-    } catch (err) {
-      // Spawn itself failed (e.g. role dir missing). Record so the failure
-      // is auditable; cursor doesn't advance, retried next trigger.
-      void record('headless-completed', TRIGGERS_STREAM, {
-        triggerId: trigger.id,
-        role,
-        exitCode: -1,
-        durationMs: 0,
-        timedOut: false,
-        stderrTail: String(err).slice(-2000),
-      } satisfies HeadlessCompletedData)
-      process.stderr.write(`[jean] trigger ${trigger.id} headless ${role} spawn failed: ${err}\n`)
-    }
+    // Detached: don't block the cron callback (or HTTP fire endpoint) on
+    // a multi-minute Claude spawn. The headless-completed event is the
+    // observable signal when the run finishes.
+    void runHeadlessTrigger(trigger)
     return
   }
 
-  // kind === 'agent' — existing routing path
   const delivered = deliverToAgent(trigger.agent, {
     type: 'deliver',
     from: 'trigger',
@@ -1128,13 +1140,12 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         }
         if (kind === 'headless') {
           // For headless triggers the `agent` field is the role name. Validate
-          // it matches a known role so misspellings fail early at create time
-          // rather than on first fire.
-          const validRoles: AgentRole[] = ['sensei', 'worker', 'user', 'peer', 'librarian']
-          if (!validRoles.includes(body.agent as AgentRole)) {
+          // against the canonical role list so misspellings fail at create
+          // time rather than on first fire.
+          if (!(AGENT_ROLES as readonly string[]).includes(body.agent)) {
             return Response.json(
               {
-                error: `headless trigger requires 'agent' to be a valid role; got "${body.agent}". Valid: ${validRoles.join(', ')}`,
+                error: `headless trigger requires 'agent' to be a valid role; got "${body.agent}". Valid: ${AGENT_ROLES.join(', ')}`,
               },
               { status: 400 },
             )
@@ -1600,14 +1611,24 @@ syncTriggerJobs()
 
 // Catch up: if a cron trigger has lastFiredAt older than the most recent
 // scheduled time, fire it once on startup. Handles "machine was off when
-// the nightly run was due." See src/infra/trigger-catchup.ts.
+// the nightly run was due." Sequential await for headless triggers so we
+// don't stampede multiple parallel Claude spawns when many are overdue.
+// See src/infra/trigger-catchup.ts.
 {
   const now = new Date()
   for (const trigger of triggerProjection.state.triggers) {
     if (trigger.status !== 'active') continue
     if (!shouldCatchUp(trigger, now)) continue
     process.stderr.write(`[jean] trigger ${trigger.id} catch-up fire on startup (last fired ${trigger.lastFiredAt})\n`)
-    void fireTrigger(trigger)
+    if (trigger.kind === 'headless') {
+      await fireTrigger(trigger)
+      // For headless catch-up specifically, wait for the spawn to actually
+      // complete before launching the next — fireTrigger detaches the
+      // spawn so we have to track it via the headless-completed event.
+      await waitForHeadlessCompletion(trigger.id)
+    } else {
+      void fireTrigger(trigger)
+    }
   }
 }
 

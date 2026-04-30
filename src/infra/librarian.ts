@@ -16,7 +16,7 @@
  * See docs/llm-wiki-design.md (Adaptation 7).
  */
 
-import { existsSync, lstatSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { relative, resolve } from 'node:path'
 import type { AgentRole } from './protocol.ts'
 
@@ -117,44 +117,33 @@ export function recoverWikiLayout(dojoRoot: string): { recovered: 'staging' | 'o
     ? readdirSync(consolidator)
         .filter((n) => n.startsWith('old-'))
         .map((n) => resolve(consolidator, n))
+        .sort()
     : []
 
-  const contextExists = existsSync(context)
-
-  if (!contextExists) {
-    // Mid-swap crash. Prefer staging/ (we'd built the new version); else
-    // fall back to the most recent old-<ts>/ (rollback).
+  if (!existsSync(context)) {
     if (existsSync(staging)) {
       renameSync(staging, context)
-      // staging won; any old-<ts> dirs are stale leftovers.
       for (const o of oldDirs) rmSync(o, { recursive: true, force: true })
       return { recovered: 'staging' }
     }
     if (oldDirs.length > 0) {
-      const newest = oldDirs.sort().at(-1) as string
+      const newest = oldDirs[oldDirs.length - 1] as string
       renameSync(newest, context)
-      for (const o of oldDirs) {
-        if (o !== newest && existsSync(o)) rmSync(o, { recursive: true, force: true })
-      }
+      for (const o of oldDirs.slice(0, -1)) rmSync(o, { recursive: true, force: true })
       return { recovered: 'old' }
     }
-    // No way to recover — neither staging nor old-* exists. Caller should
-    // bootstrap the layout (e.g. via cmdLibrarianSetup) before retrying.
     throw new Error(
       `wiki-recovery: .jean/context/ missing and no staging/ or old-*/ to restore. ` +
         `Bootstrap the wiki at ${context} before running the librarian.`,
     )
   }
 
-  // Steady state: context/ exists. If old-<ts>/ also exists, the swap
-  // completed but the rm-rf hadn't run — finish that.
+  // Steady state: context/ exists. Sweep transient dirs from a previous run.
   if (oldDirs.length > 0) {
     for (const o of oldDirs) rmSync(o, { recursive: true, force: true })
     return { recovered: 'cleanup' }
   }
-
-  // Stale staging/ from a crash before the swap began — wipe it.
-  if (existsSync(staging) && lstatSync(staging).isDirectory()) {
+  if (existsSync(staging)) {
     rmSync(staging, { recursive: true, force: true })
     return { recovered: 'cleanup' }
   }
@@ -179,10 +168,6 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
   const roleDir = resolve(jeanDir, 'roles', opts.role)
   const relJean = relative(roleDir, jeanDir) || '.'
   const outputFormat = opts.outputFormat ?? 'json'
-  // Headless runs do NOT load MCP. The librarian uses native Read/Edit/Write
-  // for files and Bash(curl) for the few HTTP calls it needs (recording
-  // wiki-consolidated events). One fewer moving part vs spawning the channel
-  // plugin per run; no WS registration noise; simpler skill prose.
   return [
     opts.binary ?? 'claude',
     '-p',
@@ -207,14 +192,14 @@ export function parseHeadlessJson(stdout: string): HeadlessParsed | undefined {
     const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined)
     const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
     const usage = (obj.usage ?? {}) as Record<string, unknown>
+    const inputT = num(usage.input_tokens)
+    const outputT = num(usage.output_tokens)
+    const sumT = inputT !== undefined || outputT !== undefined ? (inputT ?? 0) + (outputT ?? 0) : undefined
     return {
       sessionId: str(obj.session_id) ?? str(obj.sessionId),
       response: str(obj.result) ?? str(obj.response),
       costUsd: num(obj.total_cost_usd) ?? num(obj.cost_usd) ?? num(obj.costUsd),
-      totalTokens:
-        num(usage.total_tokens) ??
-        num(usage.totalTokens) ??
-        ((num(usage.input_tokens) ?? 0) + (num(usage.output_tokens) ?? 0) || undefined),
+      totalTokens: num(usage.total_tokens) ?? num(usage.totalTokens) ?? sumT,
       model: str(obj.model),
     }
   } catch {

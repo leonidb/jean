@@ -164,8 +164,8 @@ async function main() {
 // The librarian is the headless Claude that consolidates the wiki. It runs
 // on a `consolidate-wiki` trigger; not a persistent agent, not user-addable
 // via `jean agent add`. Setup is one-time per dojo: ships the consolidate-
-// wiki skill, writes a settings.local.json with librarian permissions, and
-// the .mcp.json so the librarian can read `infra` HTTP endpoints via MCP.
+// wiki skill and writes a settings.local.json with librarian permissions.
+// No .mcp.json — the librarian uses native Read/Edit/Write + Bash(curl).
 
 function cmdLibrarian(args: string[]) {
   const sub = args[0]
@@ -184,11 +184,9 @@ function cmdLibrarianSetup() {
   const jeanDir = resolve(dojoRoot, '.jean')
   const roleDir = resolve(jeanDir, 'roles', 'librarian')
 
-  // 1. Skill (idempotent — overwrites if framework skill changed)
   shipSkill(roleDir, 'consolidate-wiki')
 
-  // 2. Settings — librarian-role permissions, no Stop/PermissionRequest hooks
-  //    (it's a one-shot process, no need to phone home on idle)
+  // No Stop/PermissionRequest hooks — one-shot process, nothing to phone home about.
   const settingsDir = resolve(roleDir, '.claude')
   const settingsPath = resolve(settingsDir, 'settings.local.json')
   if (!existsSync(settingsPath)) {
@@ -201,12 +199,6 @@ function cmdLibrarianSetup() {
   } else {
     console.log(`  ${DIM}skip${RESET}  ${relative(dojoRoot, settingsPath)} (already exists)`)
   }
-
-  // No .mcp.json. The headless librarian uses native Read/Edit/Write for
-  // files and Bash(curl) for the few HTTP calls it needs (recording the
-  // wiki-consolidated event). Skipping MCP saves a per-run channel-plugin
-  // spawn and a WS registration round-trip; for once-a-night runs the
-  // simplification is real and observable in startup latency.
 
   console.log(`\n${GREEN}Librarian setup complete in ${dojoRoot}/.jean/roles/librarian/${RESET}`)
   console.log()
@@ -1480,7 +1472,10 @@ function cmdAgent(args: string[]) {
 import type { AgentRole } from '../infra/protocol.ts'
 import { defaultPermissions } from './permissions.ts'
 
-const AGENT_ROLES: readonly AgentRole[] = ['worker', 'sensei', 'user']
+/** Roles users can add via `jean agent add`. A subset of AGENT_ROLES from
+ *  protocol.ts: 'peer' is registered via `jean peer add`, and 'librarian'
+ *  is infra-spawned via `jean librarian setup`. */
+const USER_ADDABLE_ROLES: readonly AgentRole[] = ['worker', 'sensei', 'user']
 
 type AgentMeta = { name: string; tags: string[]; role: AgentRole }
 type AgentInfo = AgentMeta & { path: string; branch?: string }
@@ -1602,7 +1597,7 @@ function cmdAgentAdd(args: string[]) {
   const existingMode = args.includes('--existing')
 
   const roleStr = flagValue(args, '--role') ?? 'worker'
-  if (!(AGENT_ROLES as readonly string[]).includes(roleStr)) {
+  if (!(USER_ADDABLE_ROLES as readonly string[]).includes(roleStr)) {
     console.error(`Invalid role "${roleStr}". Must be: worker, sensei, or user.`)
     process.exit(1)
   }
