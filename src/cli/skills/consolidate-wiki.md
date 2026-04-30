@@ -44,9 +44,23 @@ Apply these when building or updating pages:
 - **Compact older content.** Detail that is no longer load-bearing (intermediate decisions superseded by later ones, exploratory notes that resolved into a final answer) should be summarized to a one-liner. Move historical detail to `log.md` if it has narrative value, otherwise drop it. Pages don't grow forever.
 - **Wiki-links are first-class navigation.** Every reference to another concept on the wiki uses `[[Page Name]]` syntax. Readers traverse the wiki by following these — index-first, then link-hop. When you split or rename a page, update inbound links.
 - **Schema consistency for entity-class pages.** Pages of the same kind share a structure. All subscription pages have the same fields (cost, status, last-charged). All project pages have the same fields (status, owner, last-touched). Don't reinvent shape per page.
-- **Optional frontmatter.** When a page benefits from structured metadata (`status:`, `last-updated:`, `tags:`), use YAML frontmatter. Apply where it earns its keep — not strict.
+- **Every page has a `description:` in frontmatter.** YAML frontmatter at the top of every page, with a one-sentence summary of what's on it. The `index.md` is built by lifting these descriptions — readers scan the index and decide which 1–3 pages to actually open. A page without a description is invisible to a reader who hasn't opened it. Example:
 
-`index.md` is the entry point: organized by category, one line per page describing what's on it. A reader should find the right 1–3 pages from the index without opening anything else.
+  ```markdown
+  ---
+  description: Gym membership — cancelled 2025-11-03, $45/mo saved.
+  ---
+
+  # Gym membership
+
+  ...
+  ```
+
+  Tight and load-bearing. Not "notes about Gym membership"; tell the reader the actual content. When the page changes meaningfully, update the description.
+
+- **Other frontmatter is optional.** `status:` (`active`, `archived`, `superseded`), `updated:` (ISO date), `type:` (entity class for schema enforcement) — add when they earn their keep.
+
+`index.md` is the entry point. Build it by lifting each page's `description:` — `- [[Page]] — <description>`. Group by category (alphabetical, by type, or by domain — whatever fits the dojo's content). A reader should find the right 1–3 pages from the index without opening anything else.
 
 ## Procedure
 
@@ -152,7 +166,9 @@ For each input you decided to distill:
 
 Apply the **Page principles** above as you write: one concept per page, split when it grows past ~50 lines or multi-entity, compact older detail, wiki-link every concept reference, keep entity-class pages schema-consistent. Splitting and compaction are normal operations during this step — do them when warranted, not just for new content.
 
-Rebuild `index.md` so it reflects all current pages, organized by category, one line per page.
+Every page you create or meaningfully change must carry a `description:` in frontmatter. When you change a page, ask: does the description still describe what's there? If not, update it.
+
+Rebuild `index.md` by lifting each page's `description:` — `- [[Page]] — <description>` per line, grouped by category. The index is generated, not hand-written.
 
 Append a summary entry to `log.md`:
 
@@ -173,6 +189,8 @@ Before swapping, scan `.jean/.consolidator/staging/` for issues:
 - **Stale claims** that newer memory events have superseded — update.
 - **Oversize pages** (>~50 lines or covering >1 distinct entity) — split per the Page principles. Update `index.md` and inbound `[[links]]`.
 - **Stale detail that should be compacted** — sections that aren't load-bearing anymore (superseded decisions, resolved explorations) get summarized down to a one-liner; archive narrative detail in `log.md` if it matters.
+- **Missing or stale `description:` frontmatter** — every page needs one; when the body has drifted from the description, rewrite the description to match. The index is only as useful as the descriptions it lifts.
+- **`index.md` out of sync with page descriptions** — regenerate so each entry matches its page's current `description:`.
 - **Concept references without `[[wiki-links]]`** — when a page mentions another concept that has its own page, link it. Wiki-links are how readers navigate.
 - **Schema drift** in entity-class pages (e.g. one subscription page is missing the `cost` field everyone else has) — normalize.
 - **Orphan pages** with no inbound links — flag in `log.md`, do not delete.
