@@ -55,11 +55,18 @@ describe('defaultPermissions', () => {
     expect(allow).toContain('Write')
     expect(allow).toContain('Read')
 
-    // No deny anywhere on .jean/context — the very thing this role exists to do.
+    // No deny on .jean/context — the very thing this role exists to do.
     for (const rule of deny) {
       expect(rule).not.toContain('.jean/context')
       expect(rule).not.toContain('.jean/.consolidator')
     }
+  })
+
+  test('librarian: deny Edit/Write on .jean/raw_context/** (immutable sources)', () => {
+    const { deny } = defaultPermissions('librarian', DOJO)
+    const rawCtx = resolve(DOJO, '.jean', 'raw_context')
+    expect(deny).toContain(`Edit(${rawCtx}/**)`)
+    expect(deny).toContain(`Write(${rawCtx}/**)`)
   })
 
   test('librarian: no MCP tools at all (runs without channel plugin)', () => {

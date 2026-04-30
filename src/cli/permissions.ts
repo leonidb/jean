@@ -22,11 +22,14 @@ export type Permissions = {
 export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissions {
   if (role === 'librarian') {
     // Librarian is the wiki's only writer and runs headless without MCP.
-    // Reads history.jsonl + wiki pages directly via Read/Glob/Grep, builds
-    // the staging dir via Edit/Write, swaps via Bash(mv/rm), and emits the
-    // wiki-consolidated event via Bash(curl) against the local infra.
+    // Reads history.jsonl + wiki pages + raw_context/ directly via
+    // Read/Glob/Grep, builds the staging dir via Edit/Write, swaps via
+    // Bash(mv/rm), and emits the wiki-consolidated event via Bash(curl).
     // No deny on .jean/context/** — that would block the very thing this
-    // role exists to do.
+    // role exists to do. Deny on .jean/raw_context/** — those are
+    // human-curated source material; librarian reads but never modifies
+    // (Karpathy's immutability rule, Adaptation 9).
+    const rawCtx = resolve(dojoRoot, '.jean', 'raw_context')
     return {
       allow: [
         'Read',
@@ -45,8 +48,9 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
         'Bash(curl:*)',
         'Bash(date:*)',
         'Bash(ls:*)',
+        'Bash(find:*)',
       ],
-      deny: [],
+      deny: [`Edit(${rawCtx}/**)`, `Write(${rawCtx}/**)`],
     }
   }
 

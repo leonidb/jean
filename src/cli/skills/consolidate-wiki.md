@@ -19,8 +19,10 @@ Steady state — one real directory at `.jean/context/`:
 ```
 .jean/
   history.jsonl              — event log (read-only for you)
+  raw_context/               — human-curated source material (READ-ONLY for you)
+    <files>.md, *.csv, *.pdf, ...
   .consolidator/
-    cursor.json              — { lastEventId, lastConsolidatedAt }
+    cursor.json              — { lastEventId, lastConsolidatedAt, lastRawConsolidatedAt }
   context/                   — real dir, the current wiki
     index.md
     log.md
@@ -61,33 +63,38 @@ Branch on what exists:
 
 ### 2. Read inputs
 
-You don't have MCP. Use native `Read` for `history.jsonl` directly, and `Bash(curl)` against the local infra for projection queries (tasks with comments, etc.).
+Three input types: memory events, completed tasks, raw_context source files.
 
-The infra port is in `.jean/infra.port`:
+**Memory events** — use `Bash(curl)` against the local infra (port in `.jean/infra.port`):
 
 ```bash
 PORT=$(cat ../../infra.port)
+curl -s "http://127.0.0.1:$PORT/history?stream=memory&afterId=<lastEventId>"
 ```
 
-Read new memory events directly from the event log (one JSONL line per event):
+Or read directly from the event log:
 
 ```bash
 cat ../../history.jsonl | jq -c 'select(.type == "memory" and .id > <lastEventId>)'
 ```
 
-Or via the HTTP API (returns the same data, but pre-filtered):
-
-```bash
-curl -s "http://127.0.0.1:$PORT/history?stream=memory&afterId=<lastEventId>"
-```
-
-For completed-task distillation, fetch tasks with their comments via the API (the projection isn't trivial to rebuild):
+**Completed tasks** — fetch with comments via the API (the projection isn't trivial to rebuild):
 
 ```bash
 curl -s "http://127.0.0.1:$PORT/tasks/<id>?include=comments,messages,playbook"
 ```
 
-Filter `task-update` events with `data.to === "done"` from the event log to find candidates.
+Filter `task-update` events with `data.to === "done"` from the event log to find candidates since cursor.
+
+**raw_context files** — human-curated source material under `.jean/raw_context/`. Find new/modified files since the raw cursor:
+
+```bash
+find ../../raw_context -type f -newermt "<lastRawConsolidatedAt>" 2>/dev/null
+```
+
+Read text files (`.md`, `.txt`) directly with the `Read` tool. For binary files (PDFs, XLSX, PNGs), don't try to extract content — just *list* them in the appropriate wiki page as `references` (e.g. "Source: `raw_context/sources/bills-archive.pdf`"). Future "raw-extract" capability will handle binaries.
+
+You may NOT modify anything under `.jean/raw_context/` — Edit/Write there is denied. Read-only by design (Karpathy's immutability rule).
 
 ### 3. Decide what to distill
 
@@ -163,9 +170,12 @@ Write the new cursor:
 .jean/.consolidator/cursor.json
 {
   "lastEventId": <highest event id you processed>,
-  "lastConsolidatedAt": "<ISO timestamp>"
+  "lastConsolidatedAt": "<ISO timestamp>",
+  "lastRawConsolidatedAt": "<run-start ISO — covers all files modified up to now>"
 }
 ```
+
+`lastRawConsolidatedAt` should be the time you started this run, NOT the latest mtime you saw — using run-start ensures any file modified during your run gets picked up next time (avoiding the lost-update window).
 
 Then record the run via the infra HTTP API:
 

@@ -184,6 +184,16 @@ function cmdLibrarianSetup() {
   const jeanDir = resolve(dojoRoot, '.jean')
   const roleDir = resolve(jeanDir, 'roles', 'librarian')
 
+  // Create raw_context/ if missing — librarian reads from here, never writes.
+  // Empty dir is fine; users drop source material in as they accumulate it.
+  const rawContextDir = resolve(jeanDir, 'raw_context')
+  if (!existsSync(rawContextDir)) {
+    mkdirSync(rawContextDir, { recursive: true })
+    console.log(
+      `  ${GREEN}created${RESET} ${relative(dojoRoot, rawContextDir)}/  (drop human-curated source material here)`,
+    )
+  }
+
   shipSkill(roleDir, 'consolidate-wiki')
 
   // No Stop/PermissionRequest hooks — one-shot process, nothing to phone home about.
