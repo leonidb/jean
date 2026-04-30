@@ -49,7 +49,7 @@ Each adaptation below either fills a gap (Karpathy is single-user, human-driven)
 
 **Jean**: two kinds of inputs flow through the event log, both consumed by the librarian:
 
-1. **Explicit `memory` events** — agents call infra `POST /memorize` to write a `memory` event to `history.jsonl`. Used for cross-task knowledge that should outlive the task it was discovered in.
+1. **Explicit `memory` events** — agents call infra `POST /context/memorize` to write a `memory` event to `history.jsonl`. Used for cross-task knowledge that should outlive the task it was discovered in.
 2. **Completed tasks** — `task-update` events with `status: done`. The librarian inspects each task's content (description, curated `task-comment` events, final `reply` chain) and decides whether the task contains durable knowledge worth distilling into wiki pages.
 
 The line between them: in-task progress / per-task findings stay in `task-comment` events on the task. Memorize is reserved for knowledge useful in *other* tasks. If you'd want to read it next month while working on something different, memorize it; otherwise it lives on the task.
@@ -62,7 +62,7 @@ memory event payload:
     text: "...", scope?: "dojo" | "user", taskId?: "..." }
 ```
 
-**How agents call it**: via the existing `infra` MCP tool — `infra(method="POST", path="/memorize", body={text, scope?, taskId?})`. **No new MCP tool by default.** Adding a dedicated `memorize` tool to the channel plugin (alongside `reply`, `send`, `comment`) is a possible upgrade if direct discoverability matters in practice — defer until we observe agents skipping memorize because it's not visible enough.
+**How agents call it**: via the existing `infra` MCP tool — `infra(method="POST", path="/context/memorize", body={text, scope?, taskId?})`. **No new MCP tool by default.** Adding a dedicated `memorize` tool to the channel plugin (alongside `reply`, `send`, `comment`) is a possible upgrade if direct discoverability matters in practice — defer until we observe agents skipping memorize because it's not visible enough.
 
 **Who can memorize**: all agents — workers, sensei, peer-bridge alike. The event payload's `role` field lets the consolidator distinguish *memories from a worker* (field reports / findings) from *memories from sensei* (decisions / synthesis / orchestrator-level observation) from *memories from peers* (inbound advice from another dojo). Single-writer-per-wiki still holds: sensei is the only *consolidator*; workers and peers are *contributors* to the event log only.
 
@@ -287,7 +287,7 @@ User-layer memory (facts about *you* that should span all dojos) is a separate, 
 ### Memory lifecycle
 
 1. Sensei (or any agent, but mostly sensei) observes something worth keeping during a task. Calls `memorize("Gym membership cancelled, ~$45/mo saved", scope: "dojo")`.
-2. Channel plugin → infra `POST /memorize` → infra writes a `memory` event to `history.jsonl`.
+2. Channel plugin → infra `POST /context/memorize` → infra writes a `memory` event to `history.jsonl`.
 3. Time passes; more `memory` events accumulate.
 4. `consolidate-wiki` trigger fires (e.g. nightly). Sensei nudge arrives.
 5. Sensei runs the consolidator skill: reads `.jean/context/.cursor.json`, reads memory events with `id > lastEventId` from `history.jsonl`.
@@ -349,7 +349,7 @@ Karpathy uses `raw/` because most of his ingest flow is "clip an article, drop i
 2. **Catch-up on startup**: if `lastConsolidatedAt` older than cadence, fire on infra start, then resume schedule.
 3. **Who can memorize**: all agents (workers, sensei, peer-bridge). `role` field on event lets librarian weight differently.
 4. **Who consolidates**: a *headless Claude* librarian process — NOT sensei, NOT a persistent registered agent. Spawned by trigger, exits when done. Avoids blocking sensei during long consolidations and avoids always-on resource cost.
-5. **memorize tool surface**: no dedicated MCP tool in MVP — agents call via existing `infra` tool with `POST /memorize`. Upgrade only if discoverability bites.
+5. **memorize tool surface**: no dedicated MCP tool in MVP — agents call via existing `infra` tool with `POST /context/memorize`. Upgrade only if discoverability bites.
 6. **`raw_context/` folder**: not in MVP; event-log-only. Design for the future implementation lives in Adaptation 9.
 7. **Recall reads only the consolidated wiki**, never the raw event log directly.
 8. **Read-write asymmetry**: workers + sensei get `Read` on `.jean/context/`, deny on `Edit/Write`. Librarian is the only writer. Permissions enforced at Claude Code's permission layer, not skill discipline.
@@ -409,7 +409,7 @@ Anyone who wants to apply this without Jean takes Part 1 verbatim — that's pur
 
 ## Implementation sequence (proposed)
 
-1. **Memorize endpoint**: add `POST /memorize` to infra; emit `memory` event with `agent`, `role`, `text`, `scope`, `taskId`. ~30 min.
+1. **Memorize endpoint**: add `POST /context/memorize` to infra; emit `memory` event with `agent`, `role`, `text`, `scope`, `taskId`. ~30 min.
 2. **Permissions**: extend `defaultPermissions(role)` — sensei + worker get `Read(<dojo>/.jean/context/**)` allow + `Edit/Write` deny. Librarian-role permission set (used by the headless spawn) gets full read/write on `.jean/context/**` and `.jean/.consolidator/**`. ~30 min.
 3. **Librarian-spawn capability in infra**: code path that, on `consolidate-wiki` trigger, spawns headless Claude (`claude -p`) with librarian-role permissions + the consolidate-wiki skill loaded. Captures stdout/stderr for logging. **Infra-owned; no user-facing command.** ~1–1.5 hours.
 4. **Framework `context` skill** at `src/cli/skills/context.md`: Karpathy conventions + memorize-vs-task-comment protocol + stale-correction protocol + the navigation/recall pattern. Loaded by sensei + workers. ~1–2 hours.
@@ -437,7 +437,7 @@ Four layers, each catching different failure modes. Layers 1 and 4 ship alongsid
 
 Code-level, no LLM. Lives next to existing tests; runs in default `bun test`.
 
-- **`POST /memorize`**: verify event payload shape (`agent`, `role`, `text`, `scope`, `taskId`); event lands in `history.jsonl`; returns event id.
+- **`POST /context/memorize`**: verify event payload shape (`agent`, `role`, `text`, `scope`, `taskId`); event lands in `history.jsonl`; returns event id.
 - **Permissions deny**: sensei agent attempting `Edit` on `.jean/context/index.md` is denied. Same for worker. Librarian-role permission set allows it.
 - **Atomic symlink swap**: tight-loop reader vs. swap-in-progress; reader never sees a missing file or partial page.
 - **Cursor mechanics**: cursor advances only on successful run; crash-during-run leaves cursor unchanged.
