@@ -40,10 +40,10 @@ Wiki pages are for LLM consumption — terse, bullet-pointed, structured. Not hu
 Apply these when building or updating pages:
 
 - **One concept per page.** A page is about one thing — one subscription, one project, one decision, one person. When a page accumulates content about multiple distinct entities, split it.
-- **Split trigger.** When a page exceeds ~50 lines, or covers >1 distinct entity, split it into separate pages and update `index.md` + inbound cross-links. Splitting is a normal operation, not exceptional.
+- **Split when scanning slows down.** When a page covers more than one distinct entity, or has grown long enough that finding the right bit takes scrolling, split it and update `index.md` + inbound cross-links. No hard threshold — use judgment. Splitting and merging are normal operations; the wiki's shape should follow the content, not a fixed template.
 - **Compact older content.** Detail that is no longer load-bearing (intermediate decisions superseded by later ones, exploratory notes that resolved into a final answer) should be summarized to a one-liner. Move historical detail to `log.md` if it has narrative value, otherwise drop it. Pages don't grow forever.
 - **Wiki-links are first-class navigation.** Every reference to another concept on the wiki uses `[[Page Name]]` syntax. Readers traverse the wiki by following these — index-first, then link-hop. When you split or rename a page, update inbound links.
-- **Schema consistency for entity-class pages.** Pages of the same kind share a structure. All subscription pages have the same fields (cost, status, last-charged). All project pages have the same fields (status, owner, last-touched). Don't reinvent shape per page.
+- **Notice when similar pages diverge.** When several pages cover the same kind of thing (subscriptions, projects, people), patterns will emerge — fields they share, sections they have in common. Lean into them when consistency helps the reader. But when a page diverges because *that page genuinely needs different fields*, preserve the divergence — it carries information. Don't normalize for normalization's sake.
 - **Every page has a `description:` in frontmatter.** YAML frontmatter at the top of every page, with a one-sentence summary of what's on it. The `index.md` is built by lifting these descriptions — readers scan the index and decide which 1–3 pages to actually open. A page without a description is invisible to a reader who hasn't opened it. Example:
 
   ```markdown
@@ -201,19 +201,17 @@ Append a summary entry to `log.md`:
 
 The wiki is a projection of events. Your job is to keep that projection current. Manual user edits are NOT immortal — they get reconciled with event evidence like anything else.
 
-Before swapping, scan `.jean/.consolidator/staging/` for issues:
+Before swapping, do a judgment pass over `.jean/.consolidator/staging/`. The questions to ask while you read:
 
-- **Contradictions** between pages — fix per the most recent evidence; note in `log.md`.
-- **Stale claims** that newer memory events have superseded — update.
-- **Oversize pages** (>~50 lines or covering >1 distinct entity) — split per the Page principles. Update `index.md` and inbound `[[links]]`.
-- **Stale detail that should be compacted** — sections that aren't load-bearing anymore (superseded decisions, resolved explorations) get summarized down to a one-liner; archive narrative detail in `log.md` if it matters.
-- **Missing or stale `description:` frontmatter** — every page needs one; when the body has drifted from the description, rewrite the description to match. The index is only as useful as the descriptions it lifts. Use the header-only `awk` scan from step 4 to find pages missing `description:` without reading any page body.
-- **`index.md` out of sync with page descriptions** — regenerate it from the same header-only scan; never hand-edit the index.
-- **Concept references without `[[wiki-links]]`** — when a page mentions another concept that has its own page, link it. Wiki-links are how readers navigate.
-- **Schema drift** in entity-class pages (e.g. one subscription page is missing the `cost` field everyone else has) — normalize.
-- **Orphan pages** with no inbound links — flag in `log.md`, do not delete.
-- **Important concepts referenced but lacking their own page** — note in `log.md` for next run.
-- **User-edited content** — treat as a strong prior, not as immutable. If new memory events contradict it, update the page; preserve the user's framing where the new evidence is silent. If no event-evidence touches the user's content, leave it alone.
+- **Does anything contradict?** Fix per the most recent evidence; note in `log.md`.
+- **Has anything been superseded?** Newer memory events may have made claims stale — update.
+- **Do descriptions still describe?** Use the header-only `awk` scan from step 4 to find pages missing `description:` or whose `description:` no longer matches the body. Regenerate `index.md` from the descriptions; never hand-edit the index.
+- **Should anything be split or compacted?** Page principles apply across the whole staging dir, not only to what you just touched.
+- **Where should there be a `[[wiki-link]]` that isn't?** Concepts with their own page should be linked when mentioned.
+- **Did the user write anything here?** Treat user-edited content as a strong prior. If new event-evidence contradicts it, update the page; preserve the user's framing where the new evidence is silent.
+- **Anything worth noting but not worth auto-fixing?** Orphan pages, concepts referenced enough to deserve their own page — flag in `log.md` for next run, don't act unilaterally.
+
+This is a judgment pass, not a checklist. Read, think, fix what's wrong; don't tick boxes.
 
 The principle: **don't delete or rewrite without reason. Do update when evidence shows current content is wrong or stale, regardless of who wrote it.**
 
