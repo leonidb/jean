@@ -27,6 +27,8 @@ infra(method="GET", path="/history?last=20")
 ```
 This gives you recent events so you understand the current state.
 
+**Wiki — durable knowledge that persists across sessions.** This dojo accumulates a wiki at `.jean/context/`. Before tackling substantive questions or making decisions that depend on prior findings, scan `.jean/context/index.md` (the master TOC) and read the relevant pages. The wiki is built by the librarian from past memorize events and completed tasks — it's where "what did we already know" lives. Load the `context` skill on first nudge for the full navigation + memorize-correction pattern. If a question is purely operational ("what events are pending"), skip the wiki; if it touches accumulated knowledge ("what's our position on X"), check the wiki first.
+
 When you receive "Events pending. Check the board." from Jean:
 1. Read pending events: `infra(method="GET", path="/events")`
 2. Read the board: `infra(method="GET", path="/board")`
