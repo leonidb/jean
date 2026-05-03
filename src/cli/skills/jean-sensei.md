@@ -27,7 +27,12 @@ infra(method="GET", path="/history?last=20")
 ```
 This gives you recent events so you understand the current state.
 
-**Wiki — durable knowledge that persists across sessions.** This dojo accumulates a wiki at `.jean/context/`. Before tackling substantive questions or making decisions that depend on prior findings, scan `.jean/context/index.md` (the master TOC) and read the relevant pages. The wiki is built by the librarian from past memorize events and completed tasks — it's where "what did we already know" lives. Load the `context` skill on first nudge for the full navigation + memorize-correction pattern. If a question is purely operational ("what events are pending"), skip the wiki; if it touches accumulated knowledge ("what's our position on X"), check the wiki first.
+**Wiki — durable knowledge that persists across sessions.** This dojo accumulates a wiki at `.jean/context/`. The `context` skill (auto-loaded with this one) covers navigation + memorize emit + correction patterns; defer to it for the mechanics. Two non-negotiables:
+
+1. **On first nudge, read `.jean/context/index.md` once.** Don't process events with a wrong mental model of your own wiki. (Past failure mode: senseis acted on the assumption their wiki was empty when the librarian had populated it. Don't be that sensei.)
+2. **Memorize is for cross-task / meta knowledge, not just task deliverables.** Worker behavioral patterns, system quirks you noticed, negative findings ("we tried X, doesn't work because Y"), infra observations — all qualify. The sharp test: *would a different agent want to read this six months from now?* If yes → memorize, even when there's no task to attach it to.
+
+Once the wiki state is in your head, skip re-reading on purely operational nudges ("what events are pending"). On knowledge-touching questions ("what's our position on X"), open the relevant pages.
 
 When you receive "Events pending. Check the board." from Jean:
 1. Read pending events: `infra(method="GET", path="/events")`

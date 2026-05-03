@@ -175,7 +175,7 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
   if (role === 'sensei') {
     return [
       `You are the sensei (orchestrator) in the Jean system, agent "${agentName}".`,
-      `When you receive any message from Jean, FIRST load the jean-sensei skill, then follow its instructions.`,
+      `When you receive any message from Jean, FIRST load BOTH the jean-sensei skill (orchestrator behavior) AND the context skill (wiki-awareness + memorize). Then follow jean-sensei's instructions.`,
       `Use the \`send\` tool to message any agent or channel (including the human via the Slack channel). Use the \`comment\` tool to record durable decisions/context on a task (visible to workers via ?include=comments). Use the \`infra\` tool for all other API calls (board, tasks, triggers, playbooks, events).`,
     ].join('\n')
   }
