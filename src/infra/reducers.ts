@@ -121,6 +121,14 @@ export type TriggerCreatedData = {
    * because the agent is already a running session with a fixed model.
    */
   model?: string
+  /**
+   * Retry budget for headless triggers. Default 0 (single attempt).
+   * On probe-fail, timeout, or non-zero exit, retry up to N more times with
+   * a fixed 60-sec backoff between attempts. Each attempt records its own
+   * `headless-completed` event with `attempt: N` so failed retries stay
+   * auditable. Only meaningful for kind='headless'; agent triggers ignore it.
+   */
+  retries?: number
   metadata?: Record<string, unknown>
 }
 
@@ -168,6 +176,23 @@ export type HeadlessCompletedData = {
   totalTokens?: number
   /** Model that actually answered (post-fallback if any). */
   model?: string
+  /**
+   * 1-indexed attempt number for retry-enabled headless triggers. Omitted
+   * when the trigger has no retry budget (single-attempt run). When present,
+   * each retry emits its own headless-completed event so the timeline of a
+   * retried run is fully auditable.
+   */
+  attempt?: number
+  /**
+   * Pre-flight probe outcome when retries are enabled. `latencyMs` is the
+   * observed round-trip for a tiny haiku call; high latency or absence
+   * (probe failed) is the signal that the network stack hasn't recovered
+   * from sleep yet, which is the load-bearing failure mode this surface
+   * was added to mitigate.
+   */
+  probeLatencyMs?: number
+  /** True when the spawn was skipped because the pre-flight probe failed. */
+  probeFailed?: boolean
 }
 
 // ── Memory event data ───────────────────────────────────────────
@@ -399,6 +424,8 @@ type TriggerBase = {
   kind: TriggerKind
   /** Only meaningful when kind='headless'. Undefined = use Claude Code default. */
   model?: string
+  /** Retry budget for kind='headless'. Default 0 = single attempt. See TriggerCreatedData.retries. */
+  retries?: number
   status: 'active' | 'fired' | 'disabled'
   actor: string
   createdAt: string
@@ -436,6 +463,7 @@ export const triggerReducer: Reducer<TriggerState> = (state, event) => {
         // Default 'agent' for legacy events that pre-date the kind field.
         kind: d.kind ?? 'agent',
         ...(d.model && { model: d.model }),
+        ...(d.retries !== undefined && d.retries > 0 && { retries: d.retries }),
         status: 'active',
         // TODO: remove createdBy fallback once legacy events are cleaned from all dojos
         actor: d.actor ?? ((d as Record<string, unknown>).createdBy as string | undefined) ?? 'unknown',

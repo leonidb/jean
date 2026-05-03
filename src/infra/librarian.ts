@@ -261,3 +261,56 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnHeadl
     ...(parsed && { parsed }),
   }
 }
+
+export type ProbeResult = {
+  ok: boolean
+  latencyMs: number
+  /** Populated when ok=false. Short human-readable cause. */
+  error?: string
+}
+
+/**
+ * Pre-flight probe for the Anthropic API. Spawns a tiny `claude -p`
+ * call with Haiku and a hard timeout — if it doesn't return within
+ * `timeoutMs`, the network stack is the suspected culprit (e.g. the
+ * laptop just woke from deep sleep and DNS / TCP keepalive state is
+ * stale). Failures here let the caller skip a doomed multi-minute
+ * Sonnet spawn and either retry or defer.
+ *
+ * The probe deliberately uses Haiku regardless of the real run's
+ * model: the failure mode this guards against is network-stack
+ * level (a hung TCP socket post-wake), not model-specific.
+ *
+ * The prompt is the canonical "What is the capital of France?" —
+ * it's a content-free check; we only care that *some* response
+ * arrives within the window.
+ */
+export async function probeAnthropicAPI(opts?: { binary?: string; timeoutMs?: number }): Promise<ProbeResult> {
+  const timeoutMs = opts?.timeoutMs ?? 10_000
+  const binary = opts?.binary ?? 'claude'
+  const start = Date.now()
+
+  let timedOut = false
+  let proc: ReturnType<typeof Bun.spawn>
+  try {
+    proc = Bun.spawn([binary, '-p', 'What is the capital of France?', '--model', 'haiku', '--output-format', 'json'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+  } catch (err) {
+    return { ok: false, latencyMs: Date.now() - start, error: `spawn failed: ${err}` }
+  }
+
+  const timer = setTimeout(() => {
+    timedOut = true
+    proc.kill()
+  }, timeoutMs)
+
+  const exitCode = await proc.exited
+  clearTimeout(timer)
+  const latencyMs = Date.now() - start
+
+  if (timedOut) return { ok: false, latencyMs, error: `probe timed out after ${timeoutMs}ms` }
+  if (exitCode !== 0) return { ok: false, latencyMs, error: `probe exit code ${exitCode}` }
+  return { ok: true, latencyMs }
+}

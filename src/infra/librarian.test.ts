@@ -5,6 +5,7 @@ import {
   buildHeadlessCommand,
   LibrarianRoleNotInitializedError,
   parseHeadlessJson,
+  probeAnthropicAPI,
   recoverWikiLayout,
   spawnHeadless,
 } from './librarian.ts'
@@ -370,5 +371,50 @@ EOF`,
     })
     expect(result.exitCode).toBe(0)
     expect(result.parsed).toBeUndefined()
+  })
+})
+
+describe('probeAnthropicAPI', () => {
+  beforeEach(() => {
+    try {
+      rmSync(TMP, { recursive: true })
+    } catch {}
+    mkdirSync(TMP, { recursive: true })
+  })
+
+  afterEach(() => {
+    try {
+      rmSync(TMP, { recursive: true })
+    } catch {}
+  })
+
+  test('returns ok=true when stub binary exits 0 quickly', async () => {
+    const stub = writeScript(resolve(TMP, 'probe-ok.sh'), 'exit 0')
+    const result = await probeAnthropicAPI({ binary: stub, timeoutMs: 2000 })
+    expect(result.ok).toBe(true)
+    expect(result.error).toBeUndefined()
+    expect(result.latencyMs).toBeGreaterThanOrEqual(0)
+    expect(result.latencyMs).toBeLessThan(2000)
+  })
+
+  test('returns ok=false with timeout error when stub hangs past timeoutMs', async () => {
+    const stub = writeScript(resolve(TMP, 'probe-hang.sh'), 'sleep 5')
+    const result = await probeAnthropicAPI({ binary: stub, timeoutMs: 200 })
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('timed out')
+    expect(result.latencyMs).toBeLessThan(2000)
+  })
+
+  test('returns ok=false when stub binary exits non-zero', async () => {
+    const stub = writeScript(resolve(TMP, 'probe-fail.sh'), 'exit 3')
+    const result = await probeAnthropicAPI({ binary: stub, timeoutMs: 2000 })
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('exit code 3')
+  })
+
+  test('returns ok=false when binary does not exist', async () => {
+    const result = await probeAnthropicAPI({ binary: '/nonexistent/path/to/claude', timeoutMs: 2000 })
+    expect(result.ok).toBe(false)
+    expect(result.error).toBeDefined()
   })
 })

@@ -578,10 +578,11 @@ async function cmdTriggerAdd(args: string[]) {
   const id = flagValue(args, '--id')
   const kind = flagValue(args, '--kind')
   const model = flagValue(args, '--model')
+  const retriesRaw = flagValue(args, '--retries')
 
   if (!agent || !prompt) {
     console.error(
-      'Usage: jean trigger add --agent <name> --prompt "..." [--cron "..."|--at "..."] [--id <id>] [--kind agent|headless] [--model <model>]',
+      'Usage: jean trigger add --agent <name> --prompt "..." [--cron "..."|--at "..."] [--id <id>] [--kind agent|headless] [--model <model>] [--retries N]',
     )
     process.exit(1)
   }
@@ -592,6 +593,14 @@ async function cmdTriggerAdd(args: string[]) {
   if (kind !== undefined && kind !== 'agent' && kind !== 'headless') {
     console.error(`Invalid --kind "${kind}". Must be 'agent' or 'headless'.`)
     process.exit(1)
+  }
+  let retries: number | undefined
+  if (retriesRaw !== undefined) {
+    retries = Number.parseInt(retriesRaw, 10)
+    if (Number.isNaN(retries) || retries < 0 || retries > 10) {
+      console.error('--retries must be an integer between 0 and 10')
+      process.exit(1)
+    }
   }
 
   const res = await infraFetch('/triggers', {
@@ -605,6 +614,7 @@ async function cmdTriggerAdd(args: string[]) {
       prompt,
       ...(kind && { kind }),
       ...(model && { model }),
+      ...(retries !== undefined && { retries }),
       actor: 'cli',
     }),
   })
@@ -613,12 +623,20 @@ async function cmdTriggerAdd(args: string[]) {
     console.error(`Error: ${err.error}`)
     process.exit(1)
   }
-  const trigger = (await res.json()) as { id: string; cron?: string; at?: string; kind?: string; model?: string }
+  const trigger = (await res.json()) as {
+    id: string
+    cron?: string
+    at?: string
+    kind?: string
+    model?: string
+    retries?: number
+  }
   console.log(`${GREEN}Trigger "${trigger.id}" created.${RESET}`)
   if (trigger.cron) console.log(`  Schedule: ${trigger.cron}`)
   if (trigger.at) console.log(`  Fires at: ${trigger.at}`)
   console.log(`  Agent:    ${agent}${trigger.kind === 'headless' ? ' (headless)' : ''}`)
   if (trigger.model) console.log(`  Model:    ${trigger.model}`)
+  if (trigger.retries) console.log(`  Retries:  ${trigger.retries}`)
 }
 
 async function cmdTriggerList() {

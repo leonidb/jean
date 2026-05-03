@@ -28,7 +28,7 @@ import {
 import { INFRA_IDENTITY, type InfraInfo, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Board, canTransition, type TaskStatus } from './board.ts'
 import { resolveConfig } from './config.ts'
-import { recoverWikiLayout, spawnHeadless } from './librarian.ts'
+import { probeAnthropicAPI, recoverWikiLayout, spawnHeadless } from './librarian.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
 import {
   AGENT_ROLES,
@@ -431,7 +431,7 @@ function syncTriggerJobs() {
   }
 }
 
-function recordHeadlessFailure(triggerId: string, role: AgentRole, message: string) {
+function recordHeadlessFailure(triggerId: string, role: AgentRole, message: string, attempt?: number) {
   void record('headless-completed', TRIGGERS_STREAM, {
     triggerId,
     role,
@@ -439,7 +439,89 @@ function recordHeadlessFailure(triggerId: string, role: AgentRole, message: stri
     durationMs: 0,
     timedOut: false,
     stderrTail: String(message).slice(-2000),
+    ...(attempt !== undefined && { attempt }),
   } satisfies HeadlessCompletedData)
+}
+
+/**
+ * Backoff between attempts when a headless run fails and `retries > 0`.
+ * Empirically (May 1 + May 3 dark-wake hangs), the network stack is back
+ * in a healthy state within 1–2 minutes after a deep-sleep wake, so 60s
+ * is enough. Exposed as a constant so tests can override.
+ */
+const HEADLESS_RETRY_BACKOFF_MS = 60_000
+
+/** One attempt of a headless trigger run: probe → spawn → record. */
+async function runHeadlessAttempt(opts: {
+  trigger: Trigger
+  role: AgentRole
+  model?: string
+  dojoRoot: string
+  attempt: number
+  totalAttempts: number
+  doProbe: boolean
+}): Promise<{ succeeded: boolean }> {
+  const { trigger, role, model, dojoRoot, attempt, totalAttempts, doProbe } = opts
+  const attemptTag = totalAttempts > 1 ? ` attempt=${attempt}/${totalAttempts}` : ''
+
+  let probeLatencyMs: number | undefined
+  if (doProbe) {
+    const probe = await probeAnthropicAPI()
+    probeLatencyMs = probe.latencyMs
+    if (!probe.ok) {
+      process.stderr.write(
+        `[jean] trigger ${trigger.id}${attemptTag} probe failed (${probe.latencyMs}ms): ${probe.error}\n`,
+      )
+      void record('headless-completed', TRIGGERS_STREAM, {
+        triggerId: trigger.id,
+        role,
+        exitCode: -2, // probe-failed sentinel
+        durationMs: probe.latencyMs,
+        timedOut: false,
+        stderrTail: `pre-flight probe failed: ${probe.error}`,
+        probeFailed: true,
+        probeLatencyMs: probe.latencyMs,
+        ...(totalAttempts > 1 && { attempt }),
+      } satisfies HeadlessCompletedData)
+      return { succeeded: false }
+    }
+    process.stderr.write(`[jean] trigger ${trigger.id}${attemptTag} probe ok (${probe.latencyMs}ms)\n`)
+  }
+
+  process.stderr.write(
+    `[jean] trigger ${trigger.id}${attemptTag} fired → headless ${role}${model ? ` (${model})` : ''}\n`,
+  )
+  try {
+    const result = await spawnHeadless({
+      dojoRoot,
+      role,
+      prompt: trigger.prompt,
+      ...(model && { model }),
+    })
+    const stderrTail = result.exitCode !== 0 ? result.stderr.slice(-2000) : undefined
+    void record('headless-completed', TRIGGERS_STREAM, {
+      triggerId: trigger.id,
+      role,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      timedOut: result.timedOut,
+      ...(stderrTail && { stderrTail }),
+      ...(result.parsed?.sessionId && { sessionId: result.parsed.sessionId }),
+      ...(result.parsed?.costUsd !== undefined && { costUsd: result.parsed.costUsd }),
+      ...(result.parsed?.totalTokens !== undefined && { totalTokens: result.parsed.totalTokens }),
+      ...(result.parsed?.model && { model: result.parsed.model }),
+      ...(totalAttempts > 1 && { attempt }),
+      ...(probeLatencyMs !== undefined && { probeLatencyMs }),
+    } satisfies HeadlessCompletedData)
+    process.stderr.write(
+      `[jean] trigger ${trigger.id}${attemptTag} headless ${role} done: exit=${result.exitCode} duration=${result.durationMs}ms${result.timedOut ? ' TIMED-OUT' : ''}${result.parsed?.sessionId ? ` session=${result.parsed.sessionId}` : ''}\n`,
+    )
+    return { succeeded: result.exitCode === 0 }
+  } catch (err) {
+    recordHeadlessFailure(trigger.id, role, String(err), totalAttempts > 1 ? attempt : undefined)
+    process.stderr.write(`[jean] trigger ${trigger.id}${attemptTag} headless ${role} spawn failed: ${err}\n`)
+    return { succeeded: false }
+  }
 }
 
 async function runHeadlessTrigger(trigger: Trigger) {
@@ -462,33 +544,29 @@ async function runHeadlessTrigger(trigger: Trigger) {
     }
   }
 
-  process.stderr.write(`[jean] trigger ${trigger.id} fired → headless ${role}${model ? ` (${model})` : ''}\n`)
-  try {
-    const result = await spawnHeadless({
+  // Probe + retry are entirely opt-in via the trigger's `retries` field.
+  // Default 0 = preserve historical single-attempt behavior with no probe.
+  const retries = trigger.retries ?? 0
+  const totalAttempts = retries + 1
+  const doProbe = retries > 0
+
+  for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+    const { succeeded } = await runHeadlessAttempt({
+      trigger,
+      role,
+      ...(model !== undefined && { model }),
       dojoRoot,
-      role,
-      prompt: trigger.prompt,
-      ...(model && { model }),
+      attempt,
+      totalAttempts,
+      doProbe,
     })
-    const stderrTail = result.exitCode !== 0 ? result.stderr.slice(-2000) : undefined
-    void record('headless-completed', TRIGGERS_STREAM, {
-      triggerId: trigger.id,
-      role,
-      exitCode: result.exitCode,
-      durationMs: result.durationMs,
-      timedOut: result.timedOut,
-      ...(stderrTail && { stderrTail }),
-      ...(result.parsed?.sessionId && { sessionId: result.parsed.sessionId }),
-      ...(result.parsed?.costUsd !== undefined && { costUsd: result.parsed.costUsd }),
-      ...(result.parsed?.totalTokens !== undefined && { totalTokens: result.parsed.totalTokens }),
-      ...(result.parsed?.model && { model: result.parsed.model }),
-    } satisfies HeadlessCompletedData)
-    process.stderr.write(
-      `[jean] trigger ${trigger.id} headless ${role} done: exit=${result.exitCode} duration=${result.durationMs}ms${result.timedOut ? ' TIMED-OUT' : ''}${result.parsed?.sessionId ? ` session=${result.parsed.sessionId}` : ''}\n`,
-    )
-  } catch (err) {
-    recordHeadlessFailure(trigger.id, role, String(err))
-    process.stderr.write(`[jean] trigger ${trigger.id} headless ${role} spawn failed: ${err}\n`)
+    if (succeeded) return
+    if (attempt < totalAttempts) {
+      process.stderr.write(
+        `[jean] trigger ${trigger.id} retrying in ${HEADLESS_RETRY_BACKOFF_MS}ms (attempt ${attempt + 1}/${totalAttempts})\n`,
+      )
+      await Bun.sleep(HEADLESS_RETRY_BACKOFF_MS)
+    }
   }
 }
 
@@ -1132,6 +1210,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           prompt: string
           kind?: TriggerKind
           model?: string
+          retries?: number
           actor?: string
           metadata?: Record<string, unknown>
         }
@@ -1183,6 +1262,19 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             { status: 400 },
           )
         }
+        if (body.retries !== undefined) {
+          if (!Number.isInteger(body.retries) || body.retries < 0 || body.retries > 10) {
+            return Response.json({ error: 'retries must be an integer between 0 and 10' }, { status: 400 })
+          }
+          if (kind !== 'headless' && body.retries > 0) {
+            // Same reason as `model`: agent triggers don't have an attempt cycle
+            // to retry — they message a running session.
+            return Response.json(
+              { error: "retries is only valid for headless triggers; set kind: 'headless' or remove retries" },
+              { status: 400 },
+            )
+          }
+        }
 
         const id = body.id ?? crypto.randomUUID().slice(0, 8)
         if (triggerProjection.state.triggers.some((t) => t.id === id)) {
@@ -1197,6 +1289,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           prompt: body.prompt,
           kind,
           ...(body.model && { model: body.model }),
+          ...(body.retries !== undefined && body.retries > 0 && { retries: body.retries }),
           actor: body.actor ?? 'api',
           metadata: body.metadata,
         } satisfies TriggerCreatedData)
