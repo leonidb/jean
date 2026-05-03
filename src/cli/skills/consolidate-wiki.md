@@ -90,6 +90,23 @@ Branch on what exists:
 - **Pre-existing populated `.jean/context/`** (e.g. work-dojo's existing pages): preserve all current content; build a one-time `index.md` from existing pages if missing; set `cursor.json` to current max event ID so you don't try to distill events that pre-date the wiki's existence.
 - **Steady state**: `cursor.json` exists, `.jean/context/` has `index.md` and pages. Read the cursor and proceed.
 
+When `cursor.json` exists, **trust it as-is** even if `lastEventId` is 0 — that may be a deliberate human reset for a historical harvest. The "set to max" override only applies when `cursor.json` is missing entirely.
+
+### 1b. Reflect on prior runs
+
+```bash
+jq -c 'select(.type == "wiki-consolidated")' ../../history.jsonl | tail -5
+jq -c 'select(.type == "headless-completed" and .data.triggerId == "consolidate-wiki")' ../../history.jsonl | tail -3
+```
+
+**If the last `wiki-consolidated.data.anomalies` is empty AND the last `headless-completed` shows `timedOut: false, exitCode: 0`, skip to step 2.** Otherwise:
+
+- **Anomaly carry-forward.** For each anomaly in the most recent run, re-query the referenced entity (batch independent `gh` / Read calls in one tool block — they don't depend on each other). Three outcomes:
+  - Resolved now → integrate the resolution into the appropriate wiki page; drop the anomaly.
+  - Still unresolved → include in this run's `data.anomalies`, annotated `(persisting since YYYY-MM-DD)`.
+  - Persisted 3+ runs → escalate: add an entry to a `known-issues` (or equivalent) wiki page, OR emit a task comment when task-shaped. Use judgment.
+- **Run-health check** (only when prior `timedOut: true` or `exitCode != 0`): confirm `index.md` / `log.md` exist and every page in the index is on disk and parseable. Correct inconsistencies before proceeding.
+
 ### 2. Read inputs
 
 Three input types: memory events, completed tasks, raw_context source files.
@@ -113,7 +130,7 @@ cat ../../history.jsonl | jq -c 'select(.type == "memory" and .id > <lastEventId
 curl -s "http://127.0.0.1:$PORT/tasks/<id>?include=comments,messages,playbook"
 ```
 
-Filter `task-update` events with `data.to === "done"` from the event log to find candidates since cursor.
+Filter `task-status` events with `data.to === "done"` from the event log to find candidates since cursor. Each event's `stream` field is `task-<id>`, and `data.from` shows the prior state (e.g. `active` → `done`).
 
 **raw_context files** — human-curated source material under `.jean/raw_context/`. Find new/modified files since the raw cursor:
 
