@@ -1083,6 +1083,58 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       })()
     }
 
+    // GET /context/recent — memorize events not yet folded into the wiki.
+    //
+    // Returns events from MEMORY_STREAM with id > the consolidator cursor's
+    // lastEventId (i.e. what the librarian hasn't seen yet). Lets sensei
+    // verify a memorize event landed and read its own pre-consolidation
+    // queue; lets freshly-dispatched workers pick up facts memorized in the
+    // current session before the next librarian run (~24h batched cadence).
+    //
+    // Query:
+    //   ?since=<id>   override cursor lookup; events with id > <id>
+    //   ?limit=<N>    cap to last N events (chronological tail)
+    //
+    // Response:
+    //   { cursor: { lastEventId, lastConsolidatedAt? } | null, events: [...] }
+    //
+    // No filtering by agent — all memorize events are returned. Different
+    // readers want different views (sensei wants own writes; researcher
+    // bootstrapping wants everyone's). Filtering is the caller's job.
+
+    if (path === '/context/recent' && req.method === 'GET') {
+      return (async () => {
+        const cursorPath = resolve(DATA_DIR, '.consolidator', 'cursor.json')
+        let cursor: { lastEventId: number; lastConsolidatedAt?: string } | null = null
+        try {
+          cursor = JSON.parse(await Bun.file(cursorPath).text()) as {
+            lastEventId: number
+            lastConsolidatedAt?: string
+          }
+        } catch {
+          // No cursor file — fresh dojo or librarian has never run.
+        }
+
+        const sinceParam = url.searchParams.get('since')
+        const since = sinceParam !== null ? Number(sinceParam) : (cursor?.lastEventId ?? 0)
+
+        const limitParam = url.searchParams.get('limit')
+        const limit = limitParam !== null ? Number(limitParam) : undefined
+
+        let events = await store.read({ stream: MEMORY_STREAM, afterId: since })
+        if (limit !== undefined && limit > 0) events = events.slice(-limit)
+
+        return Response.json({
+          cursor,
+          events: events.map((e) => ({
+            id: e.id,
+            ts: e.ts,
+            ...(e.data as MemoryData),
+          })),
+        })
+      })()
+    }
+
     // ── Message routing ─────────────────────────────────────────
 
     if (path === '/send' && req.method === 'POST') {

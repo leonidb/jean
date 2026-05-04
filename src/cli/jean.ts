@@ -139,6 +139,9 @@ async function main() {
     case 'permissions':
       await cmdPermissions(args[1])
       break
+    case 'context':
+      await cmdContext(args.slice(1))
+      break
     case 'trigger':
       await cmdTrigger(args.slice(1))
       break
@@ -545,6 +548,82 @@ function summarizeSamples(tool: string, samples: Record<string, unknown>[]): str
     return `${paths.size} files`
   }
   return ''
+}
+
+// ── Context (wiki) subcommands ────────────────────────────────────
+//
+// Read-side surface on the wiki/memorize pipeline. Today: just `recent`,
+// for inspecting the memorize queue between consolidation runs (sensei
+// self-inspection + worker dispatch-fanout). Future: `list`, `page`,
+// `search` if/when we hide the filesystem behind an API (see BACKLOG).
+
+async function cmdContext(args: string[]) {
+  const sub = args[0]
+  switch (sub) {
+    case 'recent':
+      await cmdContextRecent(args.slice(1))
+      break
+    default:
+      console.error('Usage: jean context <recent>')
+      process.exit(1)
+  }
+}
+
+async function cmdContextRecent(args: string[]) {
+  const useJson = args.includes('--json')
+  const limitIdx = args.indexOf('--limit')
+  const limit = limitIdx >= 0 ? args[limitIdx + 1] : undefined
+  const sinceIdx = args.indexOf('--since')
+  const since = sinceIdx >= 0 ? args[sinceIdx + 1] : undefined
+
+  const params = new URLSearchParams()
+  if (limit) params.set('limit', limit)
+  if (since) params.set('since', since)
+  const qs = params.toString() ? `?${params.toString()}` : ''
+
+  const res = await infraFetch(`/context/recent${qs}`)
+  const data = (await res.json()) as {
+    cursor: { lastEventId: number; lastConsolidatedAt?: string } | null
+    events: Array<{
+      id: number
+      ts: string
+      agent: string
+      role: string
+      text: string
+      scope: string
+      taskId?: string
+    }>
+  }
+
+  if (useJson) {
+    console.log(JSON.stringify(data, null, 2))
+    return
+  }
+
+  const cursorLine = data.cursor
+    ? `${DIM}Last consolidated: ${data.cursor.lastConsolidatedAt ?? 'unknown'} (through event #${data.cursor.lastEventId})${RESET}`
+    : `${DIM}No consolidator cursor — librarian has not run yet.${RESET}`
+
+  console.log()
+  console.log(cursorLine)
+  console.log(`${DIM}${data.events.length} pending memorize event(s):${RESET}`)
+  console.log()
+
+  if (data.events.length === 0) {
+    console.log(`  ${DIM}(empty queue — nothing waiting for the librarian)${RESET}`)
+    console.log()
+    return
+  }
+
+  for (const ev of data.events) {
+    const taskTag = ev.taskId ? ` ${DIM}task-${ev.taskId}${RESET}` : ''
+    const scopeTag = ev.scope === 'user' ? ` ${DIM}[user]${RESET}` : ''
+    console.log(`  ${BOLD}#${ev.id}${RESET} ${DIM}${ev.ts}${RESET} ${BOLD}${ev.agent}${RESET}${scopeTag}${taskTag}`)
+    const lines = ev.text.split('\n')
+    for (const line of lines.slice(0, 2)) console.log(`    ${line}`)
+    if (lines.length > 2) console.log(`    ${DIM}...${RESET}`)
+    console.log()
+  }
 }
 
 // ── Trigger subcommands ───────────────────────────────────────────
@@ -2131,6 +2210,8 @@ Commands:
   jean send <agent> <msg>                     Send a message to an agent
   jean status                                 Infrastructure status + recent events
   jean permissions [agent]                    Show permission requests by agent
+  jean context recent [--since <id>] [--limit <N>] [--json]
+                                              Memorize events not yet consolidated into the wiki
 
   jean task log <id>                          Show task event history
   jean task undo <id> [--actor <name>]        Revert the most recent status change

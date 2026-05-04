@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { Subprocess } from 'bun'
 
 const TEST_PORT = 8799
@@ -216,6 +217,72 @@ describe('infrastructure server', () => {
     expect(ev?.data.pagesUpdated).toBe(2)
     // Empty anomalies array should be omitted (undefined)
     expect(ev?.data.anomalies).toBeUndefined()
+  })
+
+  test('/context/recent without cursor file returns all memorize events with cursor:null', async () => {
+    const res = await fetch(`${BASE}/context/recent`)
+    expect(res.status).toBe(200)
+    const data = (await res.json()) as {
+      cursor: null | { lastEventId: number }
+      events: Array<{ id: number; agent: string; text: string }>
+    }
+    expect(data.cursor).toBeNull()
+    expect(Array.isArray(data.events)).toBe(true)
+    // At least the events created by the memorize tests above
+    expect(data.events.length).toBeGreaterThan(0)
+    expect(data.events[0]).toHaveProperty('id')
+    expect(data.events[0]).toHaveProperty('agent')
+    expect(data.events[0]).toHaveProperty('text')
+  })
+
+  test('/context/recent honors ?since= override and ?limit= cap', async () => {
+    // First grab everything to know our id range
+    const all = (await (await fetch(`${BASE}/context/recent`)).json()) as {
+      events: Array<{ id: number }>
+    }
+    expect(all.events.length).toBeGreaterThan(1)
+    const firstId = all.events[0]?.id ?? 0
+
+    // since=<firstId> drops the first event
+    const sinceRes = await fetch(`${BASE}/context/recent?since=${firstId}`)
+    const since = (await sinceRes.json()) as { events: Array<{ id: number }> }
+    expect(since.events.every((e) => e.id > firstId)).toBe(true)
+    expect(since.events.length).toBe(all.events.length - 1)
+
+    // limit=1 returns the most recent only
+    const limitRes = await fetch(`${BASE}/context/recent?limit=1`)
+    const limited = (await limitRes.json()) as { events: Array<{ id: number }> }
+    expect(limited.events.length).toBe(1)
+    expect(limited.events[0]?.id).toBe(all.events[all.events.length - 1]?.id)
+  })
+
+  test('/context/recent reads cursor from .consolidator/cursor.json', async () => {
+    const all = (await (await fetch(`${BASE}/context/recent`)).json()) as {
+      events: Array<{ id: number }>
+    }
+    const ids = all.events.map((e) => e.id)
+    const midId = ids[Math.floor(ids.length / 2) - 1] ?? 0
+
+    // Simulate a librarian run: cursor at midId means events with id > midId
+    // are pending. Endpoint should return only those.
+    const consolidatorDir = resolve(DATA_DIR, '.consolidator')
+    mkdirSync(consolidatorDir, { recursive: true })
+    writeFileSync(
+      resolve(consolidatorDir, 'cursor.json'),
+      JSON.stringify({ lastEventId: midId, lastConsolidatedAt: '2026-05-04T00:00:00Z' }),
+    )
+
+    const res = await fetch(`${BASE}/context/recent`)
+    const data = (await res.json()) as {
+      cursor: { lastEventId: number; lastConsolidatedAt?: string } | null
+      events: Array<{ id: number }>
+    }
+    expect(data.cursor?.lastEventId).toBe(midId)
+    expect(data.cursor?.lastConsolidatedAt).toBe('2026-05-04T00:00:00Z')
+    expect(data.events.every((e) => e.id > midId)).toBe(true)
+
+    // Cleanup so subsequent tests start without cursor
+    rmSync(consolidatorDir, { recursive: true })
   })
 
   test('/context/memorize 400s on missing agent / role / empty text', async () => {
