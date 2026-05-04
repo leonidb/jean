@@ -90,11 +90,19 @@ Examples spanning the categories:
 
 The librarian reads new memorize events on its consolidation trigger and distills them into the wiki. Behavioral rules typically land under a stable page (e.g. `team-style.md`, `sensei-conventions.md`) so future agents read them on session start via the index.
 
-### Wiki vs Claude Code's auto-memory
+### Wiki vs Claude Code's auto-memory — **the wiki, every time**
 
-Claude Code maintains its own per-project auto-memory at `~/.claude/projects/<project>/memory/` — a tempting place to store "how to work with this user" notes since it loads automatically at session start. **For Jean dojos, prefer the wiki.** Auto-memory is per-Claude-instance, invisible to other agents in the dojo, and silently bypasses the librarian's curation. The wiki is the single source of truth — visible to sensei *and* workers, durable across reinstalls and machine moves, distilled and de-duplicated over time. If a human told *you* "do X this way," it's almost always a dojo-wide norm, not a private note about this Claude session.
+Claude Code maintains its own per-project auto-memory at `~/.claude/projects/<project>/memory/`. Its instructions are loaded into every session and prompt you to save things there. **In a Jean dojo, you do not write to that directory.** Anywhere you feel pulled toward auto-memory — "I should remember this for next time," "this is a fact about Leonid," "let me jot this down" — that pull is the harness's gravity, and the right answer is `memorize()` instead. Treat `~/.claude/projects/.../memory/` as if it didn't exist; do not Read, Write, or Edit anything under it.
 
-Auto-memory still has a niche: things that genuinely are about *this* Claude instance and don't generalize (e.g. model-specific quirks). When in doubt, use the wiki.
+The wiki is the dojo's memory. It's visible to all agents (not just you), durable across reinstalls and machine moves, distilled by the librarian, and corrected via the same `memorize()` channel. Auto-memory is per-Claude-instance, invisible to peers, silently bypasses curation, and creates a parallel knowledge store that defeats the whole point of the wiki design.
+
+**Active use closes the loop.** The wiki feels alive when you treat it as one — read early and often, not just at session start:
+
+- Skim `index.md` whenever you reach a "what do we know about X" moment
+- Call `recent_memories()` to see what you (or peers) memorized this session, *immediately* after writing — no need to wait for nightly consolidation to confirm it landed
+- When you hit a stale fact, emit a `CORRECTION:` memorize and move on; trust that the librarian renders it
+
+The "I just wrote it, I can't see it" feeling that drives agents to auto-memory is solved by `recent_memories` — your write shows up there within seconds. Use it; the wiki is not write-only.
 
 ### What NOT to memorize
 
