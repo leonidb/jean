@@ -157,6 +157,90 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
   }
 
+  if (req.params.name === 'memorize') {
+    const text = optionalString(args, 'text')
+    if (!text) {
+      return {
+        content: [{ type: 'text' as const, text: 'memorize requires non-empty `text`.' }],
+        isError: true,
+      }
+    }
+    const scope = args.scope === 'user' ? 'user' : 'dojo'
+    const taskId = optionalString(args, 'taskId')
+    const base = discoverInfraHttpBase()
+    if (base === null) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `memorize: infra not running for this dojo (${DOJO_ROOT ?? '<unknown>'}).`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    try {
+      const res = await fetch(`${base}/context/memorize`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          agent: AGENT_NAME,
+          role: AGENT_ROLE,
+          text,
+          scope,
+          ...(taskId && { taskId }),
+        }),
+      })
+      const body = (await res.json().catch(() => ({}))) as { id?: number; error?: string }
+      if (!res.ok) {
+        return {
+          content: [{ type: 'text' as const, text: `memorize failed: ${body.error ?? res.statusText}` }],
+          isError: true,
+        }
+      }
+      return {
+        content: [{ type: 'text' as const, text: `Memorized as event #${body.id}.` }],
+      }
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `memorize: request failed — ${err}` }],
+        isError: true,
+      }
+    }
+  }
+
+  if (req.params.name === 'recent_memories') {
+    const params = new URLSearchParams()
+    if (typeof args.since === 'number') params.set('since', String(args.since))
+    if (typeof args.limit === 'number') params.set('limit', String(args.limit))
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    const base = discoverInfraHttpBase()
+    if (base === null) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `recent_memories: infra not running for this dojo (${DOJO_ROOT ?? '<unknown>'}).`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    try {
+      const res = await fetch(`${base}/context/recent${qs}`)
+      const { text, isError } = formatInfraResponse(res.status, res.statusText, await res.text())
+      return {
+        content: [{ type: 'text' as const, text }],
+        ...(isError && { isError: true }),
+      }
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `recent_memories: request failed — ${err}` }],
+        isError: true,
+      }
+    }
+  }
+
   if (req.params.name === 'infra') {
     const method = typeof args.method === 'string' ? args.method.toUpperCase() : ''
     const path = typeof args.path === 'string' ? args.path : ''

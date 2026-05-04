@@ -5,27 +5,29 @@ import {
   buildTools,
   formatInfraResponse,
   INFRA_MAX_BODY_BYTES,
+  MEMORIZE_TOOL,
+  RECENT_MEMORIES_TOOL,
   REPLY_TOOL,
   resolveReplyTaskId,
   SEND_TOOL,
 } from './tools.ts'
 
 describe('buildTools', () => {
-  test('sensei gets send + comment + infra (no reply — sensei messages have explicit recipients)', () => {
+  test('sensei gets send + comment + memorize + recent_memories + infra (no reply)', () => {
     const names = buildTools('sensei').map((t) => t.name)
-    expect(names).toEqual(['send', 'comment', 'infra'])
+    expect(names).toEqual(['send', 'comment', 'memorize', 'recent_memories', 'infra'])
     expect(names).not.toContain('reply')
   })
 
-  test('worker gets reply + comment + infra (no send — only sensei routes messages)', () => {
+  test('worker gets reply + comment + memorize + recent_memories + infra (no send)', () => {
     const names = buildTools('worker').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'infra'])
     expect(names).not.toContain('send')
   })
 
   test('user role matches worker (non-sensei has same toolset)', () => {
     const names = buildTools('user').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'infra'])
   })
 })
 
@@ -67,6 +69,26 @@ describe('tool shapes', () => {
   test('send requires to and text, taskId optional', () => {
     expect(SEND_TOOL.inputSchema.required).toEqual(['to', 'text'])
     expect(propsOf(SEND_TOOL).taskId).toBeDefined()
+  })
+
+  test('memorize requires text; scope and taskId optional', () => {
+    expect(MEMORIZE_TOOL.inputSchema.required).toEqual(['text'])
+    const props = propsOf(MEMORIZE_TOOL)
+    expect(props.text).toBeDefined()
+    expect(props.scope).toBeDefined()
+    expect(props.taskId).toBeDefined()
+  })
+
+  test('memorize scope is enum dojo|user', () => {
+    const scope = propsOf(MEMORIZE_TOOL).scope as { enum?: string[] }
+    expect(scope.enum).toEqual(['dojo', 'user'])
+  })
+
+  test('recent_memories has no required fields; since and limit are number', () => {
+    expect(RECENT_MEMORIES_TOOL.inputSchema.required).toBeUndefined()
+    const props = propsOf(RECENT_MEMORIES_TOOL)
+    expect((props.since as { type: string }).type).toBe('number')
+    expect((props.limit as { type: string }).type).toBe('number')
   })
 })
 

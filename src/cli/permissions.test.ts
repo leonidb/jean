@@ -23,6 +23,14 @@ describe('defaultPermissions', () => {
     expect(allow).not.toContain('Bash(curl:*)')
   })
 
+  test('every channel-loading role gets memorize + recent_memories tools', () => {
+    for (const role of ['sensei', 'worker', 'user'] as const) {
+      const { allow } = defaultPermissions(role, DOJO)
+      expect(allow).toContain('mcp__jean__memorize')
+      expect(allow).toContain('mcp__jean__recent_memories')
+    }
+  })
+
   test('user role mirrors worker', () => {
     expect(defaultPermissions('user', DOJO)).toEqual(defaultPermissions('worker', DOJO))
   })

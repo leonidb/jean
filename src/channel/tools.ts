@@ -62,6 +62,55 @@ export const SEND_TOOL: Tool = {
   },
 }
 
+export const MEMORIZE_TOOL: Tool = {
+  name: 'memorize',
+  description:
+    'Record a durable cross-task observation in the dojo wiki pipeline. ' +
+    'Use for findings, decisions, conventions, or learnings worth surfacing to future tasks ' +
+    '(NOT in-task progress — that goes via `comment`). ' +
+    'The librarian batches and distills these into `.jean/context/` on its consolidation cadence. ' +
+    'See the `context` skill for the full mental model.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: 'Observation, finding, or decision (full sentence)' },
+      scope: {
+        type: 'string',
+        enum: ['dojo', 'user'],
+        description: '`dojo` (default) for dojo-specific knowledge; `user` for cross-dojo identity facts',
+      },
+      taskId: {
+        type: 'string',
+        description: 'Optional — task this memory came up in, for librarian attribution',
+      },
+    },
+    required: ['text'],
+  },
+}
+
+export const RECENT_MEMORIES_TOOL: Tool = {
+  name: 'recent_memories',
+  description:
+    'Read memorize events not yet folded into the wiki — i.e. since the last librarian consolidation. ' +
+    'Use to verify your own writes landed, or when bootstrapping fresh on a task to pick up facts memorized ' +
+    "earlier in the current session that aren't in `.jean/context/` yet (the wiki is yesterday's snapshot). " +
+    'Returns the consolidator cursor (when last consolidated, through which event id) and the events queue. ' +
+    'No agent filter — all memorize events are returned; pick out the relevant ones yourself.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      since: {
+        type: 'number',
+        description: 'Optional event id; only events with id > since (overrides cursor lookup)',
+      },
+      limit: {
+        type: 'number',
+        description: 'Optional cap on returned events (chronological tail of N)',
+      },
+    },
+  },
+}
+
 /** HTTP verbs per role. Sensei has full access; workers/users are read-only.
  *  Peers never run as local channels (they don't load this plugin); the entry
  *  exists only to keep the Record exhaustive and would act as read-only if
@@ -131,8 +180,8 @@ export function buildInfraTool(role: AgentRole): Tool {
 
 /** The MCP tool list exposed to Claude for a given role. */
 export function buildTools(role: AgentRole): Tool[] {
-  if (role === 'sensei') return [SEND_TOOL, COMMENT_TOOL, buildInfraTool(role)]
-  return [REPLY_TOOL, COMMENT_TOOL, buildInfraTool(role)]
+  if (role === 'sensei') return [SEND_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, RECENT_MEMORIES_TOOL, buildInfraTool(role)]
+  return [REPLY_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, RECENT_MEMORIES_TOOL, buildInfraTool(role)]
 }
 
 /** Read a tool argument that should be a non-empty string. Non-string, empty, or whitespace-only values return undefined. */

@@ -58,12 +58,36 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
   // (headless Claude on the consolidate-wiki trigger) may write. Direct
   // edits would create state that can't be reproduced from the event log.
   // See docs/llm-wiki-design.md (Adaptation 5: read-write asymmetry).
+  //
+  // memorize + recent_memories are first-class MCP tools (see
+  // src/channel/tools.ts) — every agent that can talk to infra also gets
+  // them, so they're in the allow list for sensei + worker + user.
   const ctx = resolve(dojoRoot, '.jean', 'context')
   return {
     allow:
       role === 'sensei'
-        ? ['mcp__jean__send', 'mcp__jean__infra', 'Read', 'Glob', 'Grep', 'Bash(git:*)']
-        : ['mcp__jean__reply', 'mcp__jean__infra', 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git:*)'],
+        ? [
+            'mcp__jean__send',
+            'mcp__jean__infra',
+            'mcp__jean__memorize',
+            'mcp__jean__recent_memories',
+            'Read',
+            'Glob',
+            'Grep',
+            'Bash(git:*)',
+          ]
+        : [
+            'mcp__jean__reply',
+            'mcp__jean__infra',
+            'mcp__jean__memorize',
+            'mcp__jean__recent_memories',
+            'Read',
+            'Glob',
+            'Grep',
+            'Edit',
+            'Write',
+            'Bash(git:*)',
+          ],
     deny: [`Edit(${ctx}/**)`, `Write(${ctx}/**)`],
   }
 }

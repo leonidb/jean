@@ -55,15 +55,17 @@ If the index is missing or empty (fresh dojo), the wiki hasn't been populated ye
 The wiki is *yesterday's* snapshot. Memorize events emitted today don't land in `.jean/context/` until the next librarian run (typically nightly). To see what's been memorized but not yet consolidated:
 
 ```
-infra(method="GET", path="/context/recent")
+recent_memories()                 # everything since the consolidator cursor
+recent_memories(since=1180)       # explicit event-id override
+recent_memories(limit=20)         # only the tail of N events
 ```
 
 Returns the consolidator cursor (when the wiki was last updated and through which event id) plus every memorize event since. Two situations want this:
 
 - **Verification after writing.** You memorized something a few minutes ago and want to confirm it landed.
-- **Bootstrap as a fresh worker.** When you're dispatched on a task, the wiki gives you durable knowledge as of last night — `recent` gives you facts memorized earlier in the *current* session that aren't in the wiki yet. Read both: wiki for lasting context, `recent` for fresh facts the dispatching sensei (or peers on this task) just wrote.
+- **Bootstrap as a fresh worker.** When you're dispatched on a task, the wiki gives you durable knowledge as of last night — `recent_memories` gives you facts memorized earlier in the *current* session that aren't in the wiki yet. Read both: wiki for lasting context, `recent_memories` for fresh facts the dispatching sensei (or peers on this task) just wrote.
 
-Optional query params: `?since=<id>` to start after a specific event id, `?limit=<N>` to see only the tail. No agent filter — all memorize events are returned; you pick out the ones relevant to you. The wiki remains authoritative for most questions; reach for `recent` when you suspect the wiki is missing something fresh.
+No agent filter — all memorize events are returned; you pick out the ones relevant to you. The wiki remains authoritative for most questions; reach for `recent_memories` when you suspect the wiki is missing something fresh.
 
 ## Recording durable knowledge — `memorize`
 
