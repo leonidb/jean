@@ -1032,7 +1032,7 @@ function readSkillTemplate(name: string): string {
 }
 
 const FRAMEWORK_SKILLS: Partial<Record<AgentRole, string[]>> = {
-  sensei: ['create-playbook', 'jean-sensei', 'context'],
+  sensei: ['create-playbook', 'jean-sensei', 'context', 'wiki-sweep'],
   worker: ['jean-worker', 'context'],
   // Librarian is spawned headless; its skill ships into the role dir but
   // the role isn't user-addable via `jean agent add` (intentional — it's
