@@ -1564,8 +1564,11 @@ function cmdAgent(args: string[]) {
     case 'sync-permissions':
       cmdAgentSyncPermissions(args.slice(1))
       break
+    case 'sync-skills':
+      cmdAgentSyncSkills(args.slice(1))
+      break
     default:
-      console.error('Usage: jean agent <add|list|tag|remove|start|sync-permissions>')
+      console.error('Usage: jean agent <add|list|tag|remove|start|sync-permissions|sync-skills>')
       process.exit(1)
   }
 }
@@ -2033,6 +2036,85 @@ function cmdAgentSyncPermissions(args: string[]) {
   }
 }
 
+// ── Agent Sync Skills ─────────────────────────────────────────────
+//
+// Re-applies framework skill files from src/cli/skills/ to existing
+// role dirs. Unlike sync-permissions, no merge — skills are framework-
+// owned (agents shouldn't edit them); copy if missing or different.
+
+function cmdAgentSyncSkills(args: string[]) {
+  const dryRun = args.includes('--dry-run')
+  const dojoRoot = findDojoRoot()
+
+  type Target = { role: AgentRole; skillName: string; destPath: string }
+  const targets: Target[] = []
+
+  for (const [role, skillNames] of Object.entries(FRAMEWORK_SKILLS)) {
+    if (!skillNames) continue
+    const roleDir = resolve(dojoRoot, '.jean', 'roles', role)
+    if (!existsSync(roleDir)) continue
+    for (const name of skillNames) {
+      targets.push({
+        role: role as AgentRole,
+        skillName: name,
+        destPath: resolve(roleDir, '.claude', 'skills', name, 'SKILL.md'),
+      })
+    }
+  }
+
+  if (targets.length === 0) {
+    console.log('No role dirs found. Run `jean agent add` or `jean librarian setup` first.')
+    return
+  }
+
+  console.log()
+  let added = 0
+  let updated = 0
+  let okCount = 0
+
+  for (const t of targets) {
+    const label = `${BOLD}${t.role}${RESET}/${t.skillName}`
+    const expected = readSkillTemplate(t.skillName)
+
+    if (!existsSync(t.destPath)) {
+      console.log(`  ${GREEN}add${RESET}    ${label}`)
+      added++
+      if (!dryRun) {
+        mkdirSync(dirname(t.destPath), { recursive: true })
+        writeFileSync(t.destPath, expected)
+      }
+      continue
+    }
+
+    if (readFileSync(t.destPath, 'utf8') === expected) {
+      console.log(`  ${DIM}ok${RESET}     ${label}`)
+      okCount++
+    } else {
+      console.log(`  ${GREEN}update${RESET} ${label}`)
+      updated++
+      if (!dryRun) writeFileSync(t.destPath, expected)
+    }
+  }
+
+  console.log()
+  const changes = added + updated
+  if (changes === 0) {
+    console.log(`${DIM}All ${targets.length} framework skill(s) already current.${RESET}`)
+    return
+  }
+
+  if (dryRun) {
+    console.log(
+      `${DIM}Dry run — ${added} skill(s) would be added, ${updated} updated. Re-run without --dry-run to apply.${RESET}`,
+    )
+  } else {
+    console.log(
+      `${GREEN}Synced ${changes} skill(s) (${added} new, ${updated} updated, ${okCount} already current).${RESET}`,
+    )
+    console.log(`${DIM}Note: agents pick up updated skills on their next session start.${RESET}`)
+  }
+}
+
 // ── Agent Tag ─────────────────────────────────────────────────────
 
 function cmdAgentTag(args: string[]) {
@@ -2231,6 +2313,8 @@ Commands:
   jean agent start <name>                     Start an agent
   jean agent sync-permissions [--dry-run]     Refresh existing agents' settings.local.json
                                               with current framework defaults (additive)
+  jean agent sync-skills [--dry-run]          Refresh existing role dirs' SKILL.md files
+                                              from src/cli/skills/ (overwrite if changed)
 
   jean peek <dojo-path>                       Read another dojo's state from disk
     --since-last     Only events since last peek; updates cursor
