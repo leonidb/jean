@@ -169,6 +169,7 @@ export function buildInfraTool(role: AgentRole): Tool {
         },
         ...(isSensei && {
           body: {
+            type: 'object',
             description: 'Optional JSON body for POST/PATCH/PUT. Pass a structured object, not a string.',
           },
         }),

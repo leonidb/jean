@@ -127,7 +127,19 @@ async function callInfraTool(toolName: string, method: string, path: string, bod
   try {
     const init: RequestInit = { method }
     if (body !== undefined && method !== 'GET') {
-      init.body = JSON.stringify(body)
+      // Models sometimes pass body as a JSON-encoded string despite the
+      // schema description saying object — JSON.stringify would then
+      // produce a quoted string-of-a-string and the server reads
+      // body fields as undefined. Unpack first.
+      let payload = body
+      if (typeof payload === 'string') {
+        try {
+          payload = JSON.parse(payload)
+        } catch {
+          /* keep as string if not valid JSON */
+        }
+      }
+      init.body = JSON.stringify(payload)
       init.headers = { 'content-type': 'application/json' }
     }
     const res = await fetch(`${base}${path}`, init)
