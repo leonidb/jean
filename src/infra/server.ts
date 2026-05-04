@@ -1083,24 +1083,10 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
       })()
     }
 
-    // GET /context/recent — memorize events not yet folded into the wiki.
-    //
-    // Returns events from MEMORY_STREAM with id > the consolidator cursor's
-    // lastEventId (i.e. what the librarian hasn't seen yet). Lets sensei
-    // verify a memorize event landed and read its own pre-consolidation
-    // queue; lets freshly-dispatched workers pick up facts memorized in the
-    // current session before the next librarian run (~24h batched cadence).
-    //
-    // Query:
-    //   ?since=<id>   override cursor lookup; events with id > <id>
-    //   ?limit=<N>    cap to last N events (chronological tail)
-    //
-    // Response:
-    //   { cursor: { lastEventId, lastConsolidatedAt? } | null, events: [...] }
-    //
-    // No filtering by agent — all memorize events are returned. Different
-    // readers want different views (sensei wants own writes; researcher
-    // bootstrapping wants everyone's). Filtering is the caller's job.
+    // GET /context/recent — memorize events not yet folded into the wiki
+    // (id > consolidator cursor). No agent filter: different readers want
+    // different views (sensei wants own writes; bootstrapping workers want
+    // everyone's). Filtering is the caller's job.
 
     if (path === '/context/recent' && req.method === 'GET') {
       return (async () => {

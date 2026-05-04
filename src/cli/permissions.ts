@@ -58,10 +58,6 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
   // (headless Claude on the consolidate-wiki trigger) may write. Direct
   // edits would create state that can't be reproduced from the event log.
   // See docs/llm-wiki-design.md (Adaptation 5: read-write asymmetry).
-  //
-  // memorize + recent_memories are first-class MCP tools (see
-  // src/channel/tools.ts) — every agent that can talk to infra also gets
-  // them, so they're in the allow list for sensei + worker + user.
   const ctx = resolve(dojoRoot, '.jean', 'context')
   return {
     allow:
@@ -93,15 +89,13 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
 }
 
 /**
- * Union-merge framework defaults into an existing permissions object,
- * preserving user-added entries. Returns the merged result and the lists
- * of allow/deny rules that weren't already present. Pure function.
+ * Union-merge framework defaults into an existing permissions object.
  *
  * Why union, not replace: existing settings.local.json files may carry
- * project-specific allows the user added (e.g. `Bash(npm:*)` for a JS dojo).
- * A reset-style sync would silently drop those. Framework deny rules are
- * the load-bearing piece — they MUST be present — so we add what's missing
- * without removing user customizations.
+ * project-specific allows the user added (e.g. `Bash(npm:*)` for a JS
+ * dojo). A reset-style sync would silently drop those. Framework deny
+ * rules are the load-bearing piece — they MUST be present — so we add
+ * what's missing without removing user customizations.
  */
 export function mergePermissions(
   existing: Partial<Permissions> | undefined,

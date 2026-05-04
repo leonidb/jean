@@ -551,11 +551,6 @@ function summarizeSamples(tool: string, samples: Record<string, unknown>[]): str
 }
 
 // ── Context (wiki) subcommands ────────────────────────────────────
-//
-// Read-side surface on the wiki/memorize pipeline. Today: just `recent`,
-// for inspecting the memorize queue between consolidation runs (sensei
-// self-inspection + worker dispatch-fanout). Future: `list`, `page`,
-// `search` if/when we hide the filesystem behind an API (see BACKLOG).
 
 async function cmdContext(args: string[]) {
   const sub = args[0]
@@ -571,10 +566,8 @@ async function cmdContext(args: string[]) {
 
 async function cmdContextRecent(args: string[]) {
   const useJson = args.includes('--json')
-  const limitIdx = args.indexOf('--limit')
-  const limit = limitIdx >= 0 ? args[limitIdx + 1] : undefined
-  const sinceIdx = args.indexOf('--since')
-  const since = sinceIdx >= 0 ? args[sinceIdx + 1] : undefined
+  const limit = parseFlag(args, 'limit')
+  const since = parseFlag(args, 'since')
 
   const params = new URLSearchParams()
   if (limit) params.set('limit', limit)
@@ -1948,11 +1941,10 @@ function cmdAgentList() {
 
 // ── Agent Sync Permissions ────────────────────────────────────────
 //
-// Re-applies framework default permissions to existing agents'
-// settings.local.json. Union semantics: missing rules are added; nothing
-// is removed. Exists because (a) `jean agent add` only writes settings
-// once at creation time, and (b) framework defaults change over time
-// (e.g. wiki deny rules added 2026-04-30, sensei tool migrations).
+// Union-merges current defaultPermissions into each existing agent's
+// settings.local.json. `jean agent add` only writes settings on first
+// creation; this command keeps existing dojos current as framework
+// defaults evolve.
 
 function cmdAgentSyncPermissions(args: string[]) {
   const dryRun = args.includes('--dry-run')

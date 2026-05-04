@@ -106,6 +106,44 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: buildTools(AGENT_ROLE),
 }))
 
+type ToolResponse = {
+  content: { type: 'text'; text: string }[]
+  isError?: true
+}
+
+async function callInfraTool(toolName: string, method: string, path: string, body?: unknown): Promise<ToolResponse> {
+  const base = discoverInfraHttpBase()
+  if (base === null) {
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `${toolName}: infra not running for this dojo (${DOJO_ROOT ?? '<unknown>'}).`,
+        },
+      ],
+      isError: true,
+    }
+  }
+  try {
+    const init: RequestInit = { method }
+    if (body !== undefined && method !== 'GET') {
+      init.body = JSON.stringify(body)
+      init.headers = { 'content-type': 'application/json' }
+    }
+    const res = await fetch(`${base}${path}`, init)
+    const { text, isError } = formatInfraResponse(res.status, res.statusText, await res.text())
+    return {
+      content: [{ type: 'text' as const, text }],
+      ...(isError && { isError: true }),
+    }
+  } catch (err) {
+    return {
+      content: [{ type: 'text' as const, text: `${toolName}: request failed — ${err}` }],
+      isError: true,
+    }
+  }
+}
+
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
 
@@ -167,78 +205,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
     const scope = args.scope === 'user' ? 'user' : 'dojo'
     const taskId = optionalString(args, 'taskId')
-    const base = discoverInfraHttpBase()
-    if (base === null) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: `memorize: infra not running for this dojo (${DOJO_ROOT ?? '<unknown>'}).`,
-          },
-        ],
-        isError: true,
-      }
-    }
-    try {
-      const res = await fetch(`${base}/context/memorize`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          agent: AGENT_NAME,
-          role: AGENT_ROLE,
-          text,
-          scope,
-          ...(taskId && { taskId }),
-        }),
-      })
-      const body = (await res.json().catch(() => ({}))) as { id?: number; error?: string }
-      if (!res.ok) {
-        return {
-          content: [{ type: 'text' as const, text: `memorize failed: ${body.error ?? res.statusText}` }],
-          isError: true,
-        }
-      }
-      return {
-        content: [{ type: 'text' as const, text: `Memorized as event #${body.id}.` }],
-      }
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `memorize: request failed — ${err}` }],
-        isError: true,
-      }
-    }
+    return callInfraTool('memorize', 'POST', '/context/memorize', {
+      agent: AGENT_NAME,
+      role: AGENT_ROLE,
+      text,
+      scope,
+      ...(taskId && { taskId }),
+    })
   }
 
   if (req.params.name === 'recent_memories') {
     const params = new URLSearchParams()
-    if (typeof args.since === 'number') params.set('since', String(args.since))
-    if (typeof args.limit === 'number') params.set('limit', String(args.limit))
+    // Coerce in case the LLM client sent a string despite the schema.
+    const since = Number(args.since)
+    const limit = Number(args.limit)
+    if (Number.isFinite(since)) params.set('since', String(since))
+    if (Number.isFinite(limit)) params.set('limit', String(limit))
     const qs = params.toString() ? `?${params.toString()}` : ''
-    const base = discoverInfraHttpBase()
-    if (base === null) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: `recent_memories: infra not running for this dojo (${DOJO_ROOT ?? '<unknown>'}).`,
-          },
-        ],
-        isError: true,
-      }
-    }
-    try {
-      const res = await fetch(`${base}/context/recent${qs}`)
-      const { text, isError } = formatInfraResponse(res.status, res.statusText, await res.text())
-      return {
-        content: [{ type: 'text' as const, text }],
-        ...(isError && { isError: true }),
-      }
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `recent_memories: request failed — ${err}` }],
-        isError: true,
-      }
-    }
+    return callInfraTool('recent_memories', 'GET', `/context/recent${qs}`)
   }
 
   if (req.params.name === 'infra') {
@@ -267,37 +251,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         isError: true,
       }
     }
-    const base = discoverInfraHttpBase()
-    if (base === null) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: `infra: not running for this dojo (${DOJO_ROOT ?? '<unknown>'}). Start it with 'jean infra start'.`,
-          },
-        ],
-        isError: true,
-      }
-    }
-    const url = `${base}${path}`
-    try {
-      const init: RequestInit = { method }
-      if (args.body !== undefined && method !== 'GET') {
-        init.body = JSON.stringify(args.body)
-        init.headers = { 'content-type': 'application/json' }
-      }
-      const res = await fetch(url, init)
-      const { text, isError } = formatInfraResponse(res.status, res.statusText, await res.text())
-      return {
-        content: [{ type: 'text' as const, text }],
-        ...(isError && { isError: true }),
-      }
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `infra: request failed — ${err}` }],
-        isError: true,
-      }
-    }
+    return callInfraTool('infra', method, path, args.body)
   }
 
   return {
