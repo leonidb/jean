@@ -48,15 +48,15 @@ Apply these when building or updating pages:
 
   ```markdown
   ---
-  description: Gym membership — cancelled 2025-11-03, $45/mo saved.
+  description: Gym membership — cancelled 2025-11-03, ~$45/mo saved, was unused 3+ months.
   ---
 
-  # Gym membership
+  # <service-name>
 
   ...
   ```
 
-  Tight and load-bearing. Not "notes about Gym membership"; tell the reader the actual content. When the page changes meaningfully, update the description.
+  Tight and load-bearing. Not "notes about X"; tell the reader the actual content. When the page changes meaningfully, update the description.
 
 - **Other frontmatter is optional.** `status:` (`active`, `archived`, `superseded`), `updated:` (ISO date), `type:` (entity class for schema enforcement) — add when they earn their keep.
 
@@ -87,7 +87,7 @@ ls -d .jean/context/index.md 2>/dev/null
 Branch on what exists:
 
 - **Empty (fresh dojo)**: no `.jean/context/` content yet (the dir might exist but `index.md` doesn't). Bootstrap: create `.jean/context/index.md` and `log.md` as empty starter files, write `.jean/.consolidator/cursor.json` with `lastEventId: 0`.
-- **Pre-existing populated `.jean/context/`** (e.g. work-dojo's existing pages): preserve all current content; build a one-time `index.md` from existing pages if missing; set `cursor.json` to current max event ID so you don't try to distill events that pre-date the wiki's existence.
+- **Pre-existing populated `.jean/context/`** (e.g. a dojo with hand-authored pages from before the librarian existed): preserve all current content; build a one-time `index.md` from existing pages if missing; set `cursor.json` to current max event ID so you don't try to distill events that pre-date the wiki's existence.
 - **Steady state**: `cursor.json` exists, `.jean/context/` has `index.md` and pages. Read the cursor and proceed.
 
 When `cursor.json` exists, **trust it as-is** even if `lastEventId` is 0 — that may be a deliberate human reset for a historical harvest. The "set to max" override only applies when `cursor.json` is missing entirely.
@@ -210,7 +210,7 @@ Append a summary entry to `log.md`:
 ```markdown
 ## [2026-04-29] consolidate | <N> events processed
 - Updated: [[bills]], [[savings]]
-- Created: [[gym-membership]]
+- Created: [[<new-page>]]
 - Distilled from task #042
 ```
 

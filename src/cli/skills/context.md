@@ -92,7 +92,7 @@ The librarian reads new memorize events on its consolidation trigger and distill
 
 ### Wiki vs Claude Code's auto-memory — **the wiki, every time**
 
-Claude Code maintains its own per-project auto-memory at `~/.claude/projects/<project>/memory/`. Its instructions are loaded into every session and prompt you to save things there. **In a Jean dojo, you do not write to that directory.** Anywhere you feel pulled toward auto-memory — "I should remember this for next time," "this is a fact about Leonid," "let me jot this down" — that pull is the harness's gravity, and the right answer is `memorize()` instead. Treat `~/.claude/projects/.../memory/` as if it didn't exist; do not Read, Write, or Edit anything under it.
+Claude Code maintains its own per-project auto-memory at `~/.claude/projects/<project>/memory/`. Its instructions are loaded into every session and prompt you to save things there. **In a Jean dojo, you do not write to that directory.** Anywhere you feel pulled toward auto-memory — "I should remember this for next time," "this is a fact about the human," "let me jot this down" — that pull is the harness's gravity, and the right answer is `memorize()` instead. Treat `~/.claude/projects/.../memory/` as if it didn't exist; do not Read, Write, or Edit anything under it.
 
 The wiki is the dojo's memory. It's visible to all agents (not just you), durable across reinstalls and machine moves, distilled by the librarian, and corrected via the same `memorize()` channel. Auto-memory is per-Claude-instance, invisible to peers, silently bypasses curation, and creates a parallel knowledge store that defeats the whole point of the wiki design.
 
@@ -117,7 +117,7 @@ The sharp test: *would I want to read this six months from now while working on 
 The wiki may say something out of date. Don't fix the wiki yourself (you can't — Edit/Write is denied). **Memorize the correction:**
 
 ```
-memorize text="CORRECTION: bills.md says 'gym membership active' — actually cancelled 2025-11-03, see task #042."
+memorize text="CORRECTION: bills.md says '<service> active' — actually cancelled 2025-11-03, see task #042."
 ```
 
 The librarian picks up corrections on the next consolidation, updates the page, and logs the change in `log.md`. You don't have to do anything else.

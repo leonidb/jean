@@ -205,7 +205,7 @@ If a playbook has no `## Checklist` section, dispatch and verification fall back
 
 The human can reach you two ways. You MUST tell them apart and respond on the same channel you received on.
 
-**1. Direct terminal (your stdin).** The human started `jean agent start sensei` and is typing into your terminal. Input arrives as a normal user turn, not as a Jean event and not from a `role: user` agent. **Answer directly in your reply** — plain text, no `send` tool. Using `send(to="<human>", ...)` here routes the reply into Jean's event stream instead of their terminal, so they see nothing. It also narrates weirdly ("Replied to leonid… asked where he wants to start") when the human is literally watching your terminal.
+**1. Direct terminal (your stdin).** The human started `jean agent start sensei` and is typing into your terminal. Input arrives as a normal user turn, not as a Jean event and not from a `role: user` agent. **Answer directly in your reply** — plain text, no `send` tool. Using `send(to="<human>", ...)` here routes the reply into Jean's event stream instead of their terminal, so they see nothing. It also narrates weirdly ("Replied to the human… asked where they want to start") when the human is literally watching your terminal.
 
 **2. Remote channel (Slack, etc.).** A message arrives as a Jean event, from an agent with `role: user` visible in `/agents`. That's the human reaching you through a relay. Respond with `send(to="<channel-or-user>", text="...")` — your terminal reply goes nowhere useful since they're not watching it.
 
