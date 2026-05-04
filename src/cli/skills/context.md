@@ -69,24 +69,32 @@ No agent filter — all memorize events are returned; you pick out the ones rele
 
 ## Recording durable knowledge — `memorize`
 
-When you observe something that should outlive this task — a pattern, a decision, a finding worth surfacing in future tasks — emit a `memory` event:
+When you observe something that should outlive this task, record it via the `memorize` tool. "Durable" is broader than just project facts — anything cross-task, cross-session, and worth surfacing to future agents (or your future self) belongs here:
+
+- **Project facts** — decisions, findings, what changed in the world
+- **Behavioral rules and team conventions** — norms the human has expressed about how you (or workers) should operate; collaboration patterns the dojo has settled on
+- **Orchestration / sensei lessons** — dispatch shapes that worked, anti-patterns to avoid, when to confirm vs auto-fire
+- **Cross-cutting tooling notes** — version-pin rationale, gotchas with external systems, deprecated patterns
 
 ```
-infra(method="POST", path="/context/memorize", body={
-  agent: "<your name>",
-  role: "<your role>",
-  text: "<observation, finding, decision — full sentence>",
-  scope: "dojo",        // or "user" for cross-dojo identity facts
-  taskId: "<task-id>"   // optional, when the memory came up during a task
-})
+memorize(text="<observation, finding, decision, rule — full sentence>")
+memorize(text="...", scope="user")    # cross-dojo identity facts about the human
+memorize(text="...", taskId="042")    # when the memory came up during a task
 ```
 
-Some examples:
-- `"Gym membership cancelled 2025-11-03, ~$45/mo saved. Was unused for 3+ months."`
-- `"Convention in this dojo: every refactor needs a perf benchmark before merge."`
-- `"Formatter evaluation: <option A> was too slow on save; switched to <option B>."`
+Examples spanning the categories:
+- `"Gym membership cancelled 2025-11-03, ~$45/mo saved. Was unused for 3+ months."` *(project fact)*
+- `"Convention in this dojo: every refactor needs a perf benchmark before merge."` *(behavioral rule)*
+- `"The human prefers I pause and confirm before dispatching design-touching tasks — auto-fire is for mechanical fixes only."` *(orchestration norm)*
+- `"Formatter evaluation: <option A> was too slow on save; switched to <option B>."` *(tooling note)*
 
-The librarian reads new `memory` events on its consolidation trigger and distills them into the wiki.
+The librarian reads new memorize events on its consolidation trigger and distills them into the wiki. Behavioral rules typically land under a stable page (e.g. `team-style.md`, `sensei-conventions.md`) so future agents read them on session start via the index.
+
+### Wiki vs Claude Code's auto-memory
+
+Claude Code maintains its own per-project auto-memory at `~/.claude/projects/<project>/memory/` — a tempting place to store "how to work with this user" notes since it loads automatically at session start. **For Jean dojos, prefer the wiki.** Auto-memory is per-Claude-instance, invisible to other agents in the dojo, and silently bypasses the librarian's curation. The wiki is the single source of truth — visible to sensei *and* workers, durable across reinstalls and machine moves, distilled and de-duplicated over time. If a human told *you* "do X this way," it's almost always a dojo-wide norm, not a private note about this Claude session.
+
+Auto-memory still has a niche: things that genuinely are about *this* Claude instance and don't generalize (e.g. model-specific quirks). When in doubt, use the wiki.
 
 ### What NOT to memorize
 
