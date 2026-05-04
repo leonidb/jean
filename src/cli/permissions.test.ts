@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { resolve } from 'node:path'
-import { defaultPermissions } from './permissions.ts'
+import { defaultPermissions, mergePermissions } from './permissions.ts'
 
 const DOJO = '/tmp/test-dojo'
 
@@ -89,5 +89,78 @@ describe('defaultPermissions', () => {
     for (const rule of deny) {
       expect(rule).toMatch(/^(Edit|Write)\(\//)
     }
+  })
+})
+
+describe('mergePermissions', () => {
+  test('adds missing framework rules without removing user-added entries', () => {
+    const existing = {
+      allow: ['Read', 'Glob', 'Grep', 'Bash(npm:*)'], // user-added Bash(npm:*)
+      deny: [], // pre-wiki-deny era
+    }
+    const defaults = defaultPermissions('sensei', '/dojo')
+
+    const { merged, addedAllow, addedDeny } = mergePermissions(existing, defaults)
+
+    // Preserves user customization
+    expect(merged.allow).toContain('Bash(npm:*)')
+    // Adds framework defaults that were missing
+    expect(merged.allow).toContain('mcp__jean__send')
+    expect(merged.allow).toContain('mcp__jean__infra')
+    // Adds the wiki deny rules
+    expect(merged.deny).toContain('Edit(/dojo/.jean/context/**)')
+    expect(merged.deny).toContain('Write(/dojo/.jean/context/**)')
+
+    expect(addedAllow).toContain('mcp__jean__send')
+    expect(addedDeny).toContain('Edit(/dojo/.jean/context/**)')
+  })
+
+  test('idempotent — second merge is a no-op', () => {
+    const defaults = defaultPermissions('worker', '/dojo')
+    const first = mergePermissions(undefined, defaults)
+    const second = mergePermissions(first.merged, defaults)
+
+    expect(second.addedAllow).toEqual([])
+    expect(second.addedDeny).toEqual([])
+    expect(second.merged).toEqual(first.merged)
+  })
+
+  test('handles missing existing.permissions gracefully', () => {
+    const defaults = defaultPermissions('sensei', '/dojo')
+    const { merged, addedAllow, addedDeny } = mergePermissions(undefined, defaults)
+
+    expect(merged.allow).toEqual(defaults.allow)
+    expect(merged.deny).toEqual(defaults.deny)
+    expect(addedAllow).toEqual(defaults.allow)
+    expect(addedDeny).toEqual(defaults.deny)
+  })
+
+  test('does NOT remove user-added deny rules absent from defaults', () => {
+    // A user might add their own deny rules — e.g. denying a specific
+    // file. Sync should leave those alone.
+    const existing = {
+      allow: defaultPermissions('worker', '/dojo').allow,
+      deny: ['Edit(/dojo/secrets.json)'], // user-added, not in defaults
+    }
+    const defaults = defaultPermissions('worker', '/dojo')
+    const { merged } = mergePermissions(existing, defaults)
+
+    expect(merged.deny).toContain('Edit(/dojo/secrets.json)')
+    // And framework rules still present
+    expect(merged.deny).toContain('Edit(/dojo/.jean/context/**)')
+  })
+
+  test('preserves order: existing entries first, additions appended', () => {
+    const existing = {
+      allow: ['Bash(custom:*)', 'Read'],
+      deny: [],
+    }
+    const defaults = defaultPermissions('sensei', '/dojo')
+    const { merged } = mergePermissions(existing, defaults)
+
+    // User's Bash(custom:*) stays at index 0 — readers can tell what's
+    // user-added by reading top-down.
+    expect(merged.allow[0]).toBe('Bash(custom:*)')
+    expect(merged.allow[1]).toBe('Read')
   })
 })

@@ -67,3 +67,34 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
     deny: [`Edit(${ctx}/**)`, `Write(${ctx}/**)`],
   }
 }
+
+/**
+ * Union-merge framework defaults into an existing permissions object,
+ * preserving user-added entries. Returns the merged result and the lists
+ * of allow/deny rules that weren't already present. Pure function.
+ *
+ * Why union, not replace: existing settings.local.json files may carry
+ * project-specific allows the user added (e.g. `Bash(npm:*)` for a JS dojo).
+ * A reset-style sync would silently drop those. Framework deny rules are
+ * the load-bearing piece — they MUST be present — so we add what's missing
+ * without removing user customizations.
+ */
+export function mergePermissions(
+  existing: Partial<Permissions> | undefined,
+  defaults: Permissions,
+): { merged: Permissions; addedAllow: string[]; addedDeny: string[] } {
+  const existingAllow = existing?.allow ?? []
+  const existingDeny = existing?.deny ?? []
+
+  const addedAllow = defaults.allow.filter((rule) => !existingAllow.includes(rule))
+  const addedDeny = defaults.deny.filter((rule) => !existingDeny.includes(rule))
+
+  return {
+    merged: {
+      allow: [...existingAllow, ...addedAllow],
+      deny: [...existingDeny, ...addedDeny],
+    },
+    addedAllow,
+    addedDeny,
+  }
+}

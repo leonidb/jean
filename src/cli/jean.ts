@@ -1489,8 +1489,11 @@ function cmdAgent(args: string[]) {
     case 'start':
       cmdAgentStart(args[1])
       break
+    case 'sync-permissions':
+      cmdAgentSyncPermissions(args.slice(1))
+      break
     default:
-      console.error('Usage: jean agent <add|list|tag|remove|start>')
+      console.error('Usage: jean agent <add|list|tag|remove|start|sync-permissions>')
       process.exit(1)
   }
 }
@@ -1498,7 +1501,7 @@ function cmdAgent(args: string[]) {
 // ── Agent helpers ─────────────────────────────────────────────────
 
 import type { AgentRole } from '../infra/protocol.ts'
-import { defaultPermissions } from './permissions.ts'
+import { defaultPermissions, mergePermissions } from './permissions.ts'
 
 /** Roles users can add via `jean agent add`. A subset of AGENT_ROLES from
  *  protocol.ts: 'peer' is registered via `jean peer add`, and 'librarian'
@@ -1864,6 +1867,101 @@ function cmdAgentList() {
   console.log()
 }
 
+// ── Agent Sync Permissions ────────────────────────────────────────
+//
+// Re-applies framework default permissions to existing agents'
+// settings.local.json. Union semantics: missing rules are added; nothing
+// is removed. Exists because (a) `jean agent add` only writes settings
+// once at creation time, and (b) framework defaults change over time
+// (e.g. wiki deny rules added 2026-04-30, sensei tool migrations).
+
+function cmdAgentSyncPermissions(args: string[]) {
+  const dryRun = args.includes('--dry-run')
+  const dojoRoot = findDojoRoot()
+
+  type Target = { name: string; role: AgentRole; settingsPath: string }
+  const targets: Target[] = []
+
+  for (const a of discoverAgents(dojoRoot)) {
+    targets.push({
+      name: a.name,
+      role: a.role,
+      settingsPath: resolve(a.path, '.claude', 'settings.local.json'),
+    })
+  }
+
+  // Librarian lives outside the agent worktree convention.
+  const librarianDir = resolve(dojoRoot, '.jean', 'roles', 'librarian')
+  if (existsSync(librarianDir)) {
+    targets.push({
+      name: 'librarian',
+      role: 'librarian',
+      settingsPath: resolve(librarianDir, '.claude', 'settings.local.json'),
+    })
+  }
+
+  if (targets.length === 0) {
+    console.log('No agents found.')
+    return
+  }
+
+  console.log()
+  let totalChanges = 0
+  let touchedAgents = 0
+
+  for (const t of targets) {
+    const label = `${BOLD}${t.name}${RESET}${DIM} (${t.role})${RESET}`
+
+    if (!existsSync(t.settingsPath)) {
+      console.log(`  ${DIM}skip${RESET}  ${label} — no settings.local.json`)
+      continue
+    }
+
+    let json: Record<string, unknown>
+    try {
+      json = JSON.parse(readFileSync(t.settingsPath, 'utf8')) as Record<string, unknown>
+    } catch {
+      console.log(`  ${DIM}error${RESET} ${label} — invalid JSON, skipping`)
+      continue
+    }
+
+    const expected = defaultPermissions(t.role, dojoRoot)
+    const existing = (json.permissions ?? {}) as Partial<{ allow: string[]; deny: string[] }>
+    const { merged, addedAllow, addedDeny } = mergePermissions(existing, expected)
+
+    if (addedAllow.length === 0 && addedDeny.length === 0) {
+      console.log(`  ${DIM}ok${RESET}    ${label} — already current`)
+      continue
+    }
+
+    console.log(`  ${GREEN}sync${RESET}  ${label}`)
+    for (const rule of addedAllow) console.log(`    ${GREEN}+${RESET} Allow: ${rule}`)
+    for (const rule of addedDeny) console.log(`    ${GREEN}+${RESET} Deny:  ${rule}`)
+    totalChanges += addedAllow.length + addedDeny.length
+    touchedAgents++
+
+    if (!dryRun) {
+      json.permissions = merged
+      writeFileSync(t.settingsPath, `${JSON.stringify(json, null, 2)}\n`)
+    }
+  }
+
+  console.log()
+  if (totalChanges === 0) {
+    console.log(`${DIM}All ${targets.length} agent(s) already current.${RESET}`)
+    return
+  }
+
+  if (dryRun) {
+    console.log(
+      `${DIM}Dry run — ${totalChanges} rule(s) would be added across ${touchedAgents} agent(s). Re-run without --dry-run to apply.${RESET}`,
+    )
+  } else {
+    console.log(`${GREEN}Synced ${totalChanges} rule(s) across ${touchedAgents} agent(s).${RESET}`)
+    console.log(`${DIM}Note: running agents continue with their loaded permissions until next restart.${RESET}`)
+  }
+}
+
 // ── Agent Tag ─────────────────────────────────────────────────────
 
 function cmdAgentTag(args: string[]) {
@@ -2058,6 +2156,8 @@ Commands:
   jean agent tag <name> [tags...] [--remove]  View or manage tags
   jean agent remove <name> [--force] [--keep] Remove an agent
   jean agent start <name>                     Start an agent
+  jean agent sync-permissions [--dry-run]     Refresh existing agents' settings.local.json
+                                              with current framework defaults (additive)
 
   jean peek <dojo-path>                       Read another dojo's state from disk
     --since-last     Only events since last peek; updates cursor
