@@ -193,6 +193,13 @@ export type HeadlessCompletedData = {
   probeLatencyMs?: number
   /** True when the spawn was skipped because the pre-flight probe failed. */
   probeFailed?: boolean
+  /**
+   * When the run was launched in stream-json mode with a tee, this is the
+   * dojo-relative path to the captured stdout JSONL. Even a kill mid-flight
+   * leaves a partial trace at this path — the line-by-line tool calls show
+   * which step stalled. Absent for single-shot JSON or text runs.
+   */
+  streamPath?: string
 }
 
 // ── Memory event data ───────────────────────────────────────────

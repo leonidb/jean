@@ -5,6 +5,7 @@ import {
   buildHeadlessCommand,
   LibrarianRoleNotInitializedError,
   parseHeadlessJson,
+  parseHeadlessStreamJson,
   probeAnthropicAPI,
   recoverWikiLayout,
   spawnHeadless,
@@ -101,6 +102,20 @@ describe('buildHeadlessCommand', () => {
       outputFormat: 'text',
     })
     expect(argv).not.toContain('--output-format')
+  })
+
+  test('streamSinkPath switches to --output-format stream-json --verbose, overriding outputFormat', () => {
+    const argv = buildHeadlessCommand({
+      dojoRoot: '/dojo',
+      role: 'librarian',
+      prompt: 'x',
+      streamSinkPath: '.jean/.headless/x.jsonl',
+    })
+    const idx = argv.indexOf('--output-format')
+    expect(idx).toBeGreaterThan(0)
+    expect(argv[idx + 1]).toBe('stream-json')
+    // Claude Code rejects --output-format stream-json without --verbose under -p.
+    expect(argv).toContain('--verbose')
   })
 })
 
@@ -248,6 +263,57 @@ describe('parseHeadlessJson', () => {
   })
 })
 
+describe('parseHeadlessStreamJson', () => {
+  test('finds the final result event in a multi-line stream and extracts fields', () => {
+    const stream = [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'abc' }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'thinking' }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        session_id: 'abc',
+        result: 'done',
+        total_cost_usd: 0.05,
+        usage: { input_tokens: 1000, output_tokens: 200 },
+        model: 'claude-sonnet-4-6',
+      }),
+    ].join('\n')
+    const parsed = parseHeadlessStreamJson(stream)
+    expect(parsed?.sessionId).toBe('abc')
+    expect(parsed?.response).toBe('done')
+    expect(parsed?.costUsd).toBe(0.05)
+    expect(parsed?.totalTokens).toBe(1200)
+    expect(parsed?.model).toBe('claude-sonnet-4-6')
+  })
+
+  test('returns undefined when no result line is present (e.g. killed mid-flight)', () => {
+    const partialStream = [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'abc' }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'still thinking' }] } }),
+      // no result line — process was killed before final event
+    ].join('\n')
+    expect(parseHeadlessStreamJson(partialStream)).toBeUndefined()
+  })
+
+  test('skips malformed trailing lines and finds the result line above them', () => {
+    const stream =
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        session_id: 'abc',
+        total_cost_usd: 0.01,
+      }) + '\n{ truncated half-line'
+    const parsed = parseHeadlessStreamJson(stream)
+    expect(parsed?.sessionId).toBe('abc')
+    expect(parsed?.costUsd).toBe(0.01)
+  })
+
+  test('returns undefined for empty stdout', () => {
+    expect(parseHeadlessStreamJson('')).toBeUndefined()
+  })
+})
+
 describe('spawnHeadless', () => {
   beforeEach(() => {
     try {
@@ -371,6 +437,32 @@ EOF`,
     })
     expect(result.exitCode).toBe(0)
     expect(result.parsed).toBeUndefined()
+  })
+
+  test('streamSinkPath tees stdout to disk (relative-to-dojoRoot) and parses the result line', async () => {
+    const stub = writeScript(
+      resolve(TMP, 'stream.sh'),
+      `cat <<'EOF'
+{"type":"system","subtype":"init","session_id":"sess-1"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}
+{"type":"result","subtype":"success","session_id":"sess-1","result":"done","total_cost_usd":0.02,"usage":{"input_tokens":500,"output_tokens":100},"model":"claude-sonnet-4-6"}
+EOF`,
+    )
+    const sinkRel = '.jean/.headless/librarian-test.jsonl'
+    const result = await spawnHeadless({
+      dojoRoot: TMP,
+      role: 'librarian',
+      prompt: 'unused',
+      binary: stub,
+      streamSinkPath: sinkRel,
+    })
+    expect(result.exitCode).toBe(0)
+    expect(result.parsed?.sessionId).toBe('sess-1')
+    expect(result.parsed?.response).toBe('done')
+    expect(result.parsed?.totalTokens).toBe(600)
+    const onDisk = readFileSync(resolve(TMP, sinkRel), 'utf8')
+    expect(onDisk).toContain('"type":"result"')
+    expect(onDisk).toContain('"session_id":"sess-1"')
   })
 })
 

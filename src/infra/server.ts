@@ -491,11 +491,16 @@ async function runHeadlessAttempt(opts: {
   process.stderr.write(
     `[jean] trigger ${trigger.id}${attemptTag} fired → headless ${role}${model ? ` (${model})` : ''}\n`,
   )
+  // Tee stdout to a per-run JSONL so a killed run still leaves a trace
+  // showing which tool call stalled.
+  const startIso = new Date().toISOString().replace(/[:.]/g, '-')
+  const streamSinkPath = `.jean/.headless/${role}-${trigger.id}-${startIso}.jsonl`
   try {
     const result = await spawnHeadless({
       dojoRoot,
       role,
       prompt: trigger.prompt,
+      streamSinkPath,
       ...(model && { model }),
     })
     const stderrTail = result.exitCode !== 0 ? result.stderr.slice(-2000) : undefined
@@ -512,6 +517,7 @@ async function runHeadlessAttempt(opts: {
       ...(result.parsed?.model && { model: result.parsed.model }),
       ...(totalAttempts > 1 && { attempt }),
       ...(probeLatencyMs !== undefined && { probeLatencyMs }),
+      streamPath: streamSinkPath,
     } satisfies HeadlessCompletedData)
     process.stderr.write(
       `[jean] trigger ${trigger.id}${attemptTag} headless ${role} done: exit=${result.exitCode} duration=${result.durationMs}ms${result.timedOut ? ' TIMED-OUT' : ''}${result.parsed?.sessionId ? ` session=${result.parsed.sessionId}` : ''}\n`,

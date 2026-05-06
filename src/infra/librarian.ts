@@ -16,8 +16,8 @@
  * See docs/llm-wiki-design.md (Adaptation 7).
  */
 
-import { existsSync, readdirSync, renameSync, rmSync } from 'node:fs'
-import { relative, resolve } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { dirname, relative, resolve } from 'node:path'
 import type { AgentRole } from './protocol.ts'
 
 export type SpawnHeadlessOpts = {
@@ -35,13 +35,19 @@ export type SpawnHeadlessOpts = {
    */
   model?: string
   /**
-   * Output format. Default `'json'` — Claude Code returns a single JSON
-   * object with `session_id`, the final response, and usage stats. We parse
-   * this and surface session_id + cost/tokens in SpawnHeadlessResult.parsed.
-   * `'text'` keeps stdout as raw response text — useful when JSON parsing
-   * would get in the way (rare).
+   * Output format. `'json'` (default) returns a single JSON object on exit;
+   * `'text'` keeps stdout as raw response text. Setting `streamSinkPath`
+   * overrides this to stream-json mode regardless.
    */
   outputFormat?: 'json' | 'text'
+  /**
+   * Relative-to-dojoRoot path. When set, the spawn switches to stream-json
+   * output (one JSON event per line — assistant turns, tool_use,
+   * tool_result, final `result`) and tees stdout to this path as it
+   * arrives. A killed run still leaves a forensic trace at this path.
+   * Parent dir is created if missing.
+   */
+  streamSinkPath?: string
   /**
    * Override binary. Default `'claude'`. Tests use this to point at a stub
    * (e.g. `/bin/echo`) so they don't need a real Claude installation.
@@ -167,6 +173,7 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
   const jeanDir = resolve(opts.dojoRoot, '.jean')
   const roleDir = resolve(jeanDir, 'roles', opts.role)
   const relJean = relative(roleDir, jeanDir) || '.'
+  const streaming = opts.streamSinkPath !== undefined
   const outputFormat = opts.outputFormat ?? 'json'
   return [
     opts.binary ?? 'claude',
@@ -180,9 +187,31 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
     // bypasses the "ask the user" step, not the OS-level access controls.
     '--dangerously-skip-permissions',
     ...(opts.model ? ['--model', opts.model] : []),
-    ...(outputFormat === 'json' ? ['--output-format', 'json'] : []),
+    // Claude Code requires --verbose alongside --output-format stream-json
+    // when running with -p; without it the CLI rejects the combination.
+    ...(streaming
+      ? ['--output-format', 'stream-json', '--verbose']
+      : outputFormat === 'json'
+        ? ['--output-format', 'json']
+        : []),
     ...(opts.extraArgs ?? []),
   ]
+}
+
+function extractParsedFields(obj: Record<string, unknown>): HeadlessParsed {
+  const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined)
+  const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+  const usage = (obj.usage ?? {}) as Record<string, unknown>
+  const inputT = num(usage.input_tokens)
+  const outputT = num(usage.output_tokens)
+  const sumT = inputT !== undefined || outputT !== undefined ? (inputT ?? 0) + (outputT ?? 0) : undefined
+  return {
+    sessionId: str(obj.session_id) ?? str(obj.sessionId),
+    response: str(obj.result) ?? str(obj.response),
+    costUsd: num(obj.total_cost_usd) ?? num(obj.cost_usd) ?? num(obj.costUsd),
+    totalTokens: num(usage.total_tokens) ?? num(usage.totalTokens) ?? sumT,
+    model: str(obj.model),
+  }
 }
 
 /**
@@ -193,23 +222,33 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
  */
 export function parseHeadlessJson(stdout: string): HeadlessParsed | undefined {
   try {
-    const obj = JSON.parse(stdout) as Record<string, unknown>
-    const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined)
-    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
-    const usage = (obj.usage ?? {}) as Record<string, unknown>
-    const inputT = num(usage.input_tokens)
-    const outputT = num(usage.output_tokens)
-    const sumT = inputT !== undefined || outputT !== undefined ? (inputT ?? 0) + (outputT ?? 0) : undefined
-    return {
-      sessionId: str(obj.session_id) ?? str(obj.sessionId),
-      response: str(obj.result) ?? str(obj.response),
-      costUsd: num(obj.total_cost_usd) ?? num(obj.cost_usd) ?? num(obj.costUsd),
-      totalTokens: num(usage.total_tokens) ?? num(usage.totalTokens) ?? sumT,
-      model: str(obj.model),
-    }
+    return extractParsedFields(JSON.parse(stdout) as Record<string, unknown>)
   } catch {
     return undefined
   }
+}
+
+/**
+ * Find the final `result` event in a `--output-format stream-json` stdout
+ * and extract the same summary fields parseHeadlessJson surfaces.
+ *
+ * stream-json produces one JSON object per line. The terminal event has
+ * `type: "result"` (or sometimes `subtype: "success"`) and carries the
+ * same session_id / total_cost_usd / usage fields as single-shot JSON mode.
+ * If the run was killed mid-flight, no result line is emitted and we
+ * return undefined — callers should treat that the same as a failed parse.
+ */
+export function parseHeadlessStreamJson(stdout: string): HeadlessParsed | undefined {
+  const lines = stdout.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]?.trim()
+    if (!line) continue
+    try {
+      const obj = JSON.parse(line) as Record<string, unknown>
+      if (obj.type === 'result') return extractParsedFields(obj)
+    } catch {}
+  }
+  return undefined
 }
 
 /**
@@ -229,6 +268,8 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnHeadl
   const argv = buildHeadlessCommand(opts)
   const start = Date.now()
   const timeoutMs = opts.timeoutMs ?? 1_200_000
+  const streaming = opts.streamSinkPath !== undefined
+  const outputFormat = opts.outputFormat ?? 'json'
 
   let timedOut = false
   const proc = Bun.spawn(argv, {
@@ -242,15 +283,18 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnHeadl
     proc.kill()
   }, timeoutMs)
 
-  const [exitCode, stdout, stderr] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ])
+  const stdoutP = streaming
+    ? teeStreamToFile(proc.stdout, resolve(opts.dojoRoot, opts.streamSinkPath as string))
+    : new Response(proc.stdout).text()
+
+  const [exitCode, stdout, stderr] = await Promise.all([proc.exited, stdoutP, new Response(proc.stderr).text()])
   clearTimeout(timer)
 
-  const outputFormat = opts.outputFormat ?? 'json'
-  const parsed = exitCode === 0 && outputFormat === 'json' ? parseHeadlessJson(stdout) : undefined
+  let parsed: HeadlessParsed | undefined
+  if (exitCode === 0) {
+    if (streaming) parsed = parseHeadlessStreamJson(stdout)
+    else if (outputFormat === 'json') parsed = parseHeadlessJson(stdout)
+  }
 
   return {
     exitCode,
@@ -260,6 +304,30 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnHeadl
     timedOut,
     ...(parsed && { parsed }),
   }
+}
+
+async function teeStreamToFile(stream: ReadableStream<Uint8Array>, path: string): Promise<string> {
+  mkdirSync(dirname(path), { recursive: true })
+  const writer = Bun.file(path).writer()
+  const decoder = new TextDecoder()
+  const reader = stream.getReader()
+  let acc = ''
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      writer.write(value)
+      // Flush per chunk so a kill -9 still leaves the partial run visible
+      // on disk. stream-json chunks are small (per-tool-call); flush cost
+      // is negligible compared to the visibility win.
+      await writer.flush()
+      acc += decoder.decode(value, { stream: true })
+    }
+    acc += decoder.decode()
+  } finally {
+    await writer.end()
+  }
+  return acc
 }
 
 export type ProbeResult = {
