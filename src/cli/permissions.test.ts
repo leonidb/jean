@@ -5,30 +5,23 @@ import { defaultPermissions, mergePermissions } from './permissions.ts'
 const DOJO = '/tmp/test-dojo'
 
 describe('defaultPermissions', () => {
-  test('sensei gets send + read-only infra, no reply, no curl', () => {
-    const { allow } = defaultPermissions('sensei', DOJO)
-    expect(allow).toContain('mcp__jean__send')
-    expect(allow).toContain('mcp__jean__infra')
-    expect(allow).not.toContain('mcp__jean__reply')
-    expect(allow).not.toContain('Bash(curl:*)')
-  })
-
-  test('worker gets reply + infra + edit/write, no send', () => {
-    const { allow } = defaultPermissions('worker', DOJO)
-    expect(allow).toContain('mcp__jean__reply')
-    expect(allow).toContain('mcp__jean__infra')
-    expect(allow).toContain('Edit')
-    expect(allow).toContain('Write')
-    expect(allow).not.toContain('mcp__jean__send')
-    expect(allow).not.toContain('Bash(curl:*)')
-  })
-
-  test('every channel-loading role gets memorize + recent_memories tools', () => {
+  test('every channel-loading role allows all Jean MCP tools via wildcard', () => {
     for (const role of ['sensei', 'worker', 'user'] as const) {
       const { allow } = defaultPermissions(role, DOJO)
-      expect(allow).toContain('mcp__jean__memorize')
-      expect(allow).toContain('mcp__jean__recent_memories')
+      expect(allow).toContain('mcp__jean__*')
     }
+  })
+
+  test('sensei has no curl', () => {
+    const { allow } = defaultPermissions('sensei', DOJO)
+    expect(allow).not.toContain('Bash(curl:*)')
+  })
+
+  test('worker has edit/write + no curl (per-role distinctions are filesystem, not MCP)', () => {
+    const { allow } = defaultPermissions('worker', DOJO)
+    expect(allow).toContain('Edit')
+    expect(allow).toContain('Write')
+    expect(allow).not.toContain('Bash(curl:*)')
   })
 
   test('user role mirrors worker', () => {
@@ -113,13 +106,12 @@ describe('mergePermissions', () => {
     // Preserves user customization
     expect(merged.allow).toContain('Bash(npm:*)')
     // Adds framework defaults that were missing
-    expect(merged.allow).toContain('mcp__jean__send')
-    expect(merged.allow).toContain('mcp__jean__infra')
+    expect(merged.allow).toContain('mcp__jean__*')
     // Adds the wiki deny rules
     expect(merged.deny).toContain('Edit(/dojo/.jean/context/**)')
     expect(merged.deny).toContain('Write(/dojo/.jean/context/**)')
 
-    expect(addedAllow).toContain('mcp__jean__send')
+    expect(addedAllow).toContain('mcp__jean__*')
     expect(addedDeny).toContain('Edit(/dojo/.jean/context/**)')
   })
 

@@ -60,32 +60,16 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
   // See docs/llm-wiki-design.md (Adaptation 5: read-write asymmetry).
   const ctx = resolve(dojoRoot, '.jean', 'context')
   return {
+    // mcp__jean__* covers all current + future Jean MCP tools (send, reply,
+    // infra, memorize, recent_memories, ack, …). The channel plugin gates
+    // tool exposure per role at the server level (sensei sees `send`,
+    // workers see `reply`, etc.) and gates infra method per role at the
+    // dispatch level — so the wildcard here is safe: it only grants what
+    // the server already exposes to this role's session.
     allow:
       role === 'sensei'
-        ? [
-            'mcp__jean__send',
-            'mcp__jean__infra',
-            'mcp__jean__memorize',
-            'mcp__jean__recent_memories',
-            'mcp__jean__ack',
-            'Read',
-            'Glob',
-            'Grep',
-            'Bash(git:*)',
-          ]
-        : [
-            'mcp__jean__reply',
-            'mcp__jean__infra',
-            'mcp__jean__memorize',
-            'mcp__jean__recent_memories',
-            'mcp__jean__ack',
-            'Read',
-            'Glob',
-            'Grep',
-            'Edit',
-            'Write',
-            'Bash(git:*)',
-          ],
+        ? ['mcp__jean__*', 'Read', 'Glob', 'Grep', 'Bash(git:*)']
+        : ['mcp__jean__*', 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git:*)'],
     deny: [`Edit(${ctx}/**)`, `Write(${ctx}/**)`],
   }
 }
