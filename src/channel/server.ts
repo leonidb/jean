@@ -237,6 +237,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     return callInfraTool('recent_memories', 'GET', `/context/recent${qs}`)
   }
 
+  if (req.params.name === 'ack') {
+    const upToId = Number(args.upToId)
+    if (!Number.isFinite(upToId) || upToId < 1) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'ack requires `upToId` (a positive number — the highest event id processed).',
+          },
+        ],
+        isError: true,
+      }
+    }
+    return callInfraTool('ack', 'POST', '/events/ack', { upToId, agent: AGENT_NAME })
+  }
+
   if (req.params.name === 'infra') {
     const method = typeof args.method === 'string' ? args.method.toUpperCase() : ''
     const path = typeof args.path === 'string' ? args.path : ''

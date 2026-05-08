@@ -88,6 +88,25 @@ export const MEMORIZE_TOOL: Tool = {
   },
 }
 
+export const ACK_TOOL: Tool = {
+  name: 'ack',
+  description:
+    'Acknowledge events as processed, advancing the per-agent pending count. ' +
+    'Pass `upToId` = the highest event id you have read and decided about — including events you decided to "hold" or take no action on. ' +
+    'Without acking, the orchestrator keeps re-nudging with the same pendingCount, producing an infinite loop. ' +
+    'Treat ack as a normal part of every turn that consumed events, not a rare operation.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      upToId: {
+        type: 'number',
+        description: 'Highest event id you have read and processed. All pending events with id ≤ upToId are acked.',
+      },
+    },
+    required: ['upToId'],
+  },
+}
+
 export const RECENT_MEMORIES_TOOL: Tool = {
   name: 'recent_memories',
   description:
@@ -181,8 +200,9 @@ export function buildInfraTool(role: AgentRole): Tool {
 
 /** The MCP tool list exposed to Claude for a given role. */
 export function buildTools(role: AgentRole): Tool[] {
-  if (role === 'sensei') return [SEND_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, RECENT_MEMORIES_TOOL, buildInfraTool(role)]
-  return [REPLY_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, RECENT_MEMORIES_TOOL, buildInfraTool(role)]
+  if (role === 'sensei')
+    return [SEND_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, RECENT_MEMORIES_TOOL, ACK_TOOL, buildInfraTool(role)]
+  return [REPLY_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, RECENT_MEMORIES_TOOL, ACK_TOOL, buildInfraTool(role)]
 }
 
 /** Read a tool argument that should be a non-empty string. Non-string, empty, or whitespace-only values return undefined. */
@@ -227,6 +247,7 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
       `You are the sensei (orchestrator) in the Jean system, agent "${agentName}".`,
       `When you receive any message from Jean, FIRST load BOTH the jean-sensei skill (orchestrator behavior) AND the context skill (wiki-awareness + memorize). Then follow jean-sensei's instructions.`,
       `Use the \`send\` tool to message any agent or channel (including the human via the Slack channel). Use the \`comment\` tool to record durable decisions/context on a task (visible to workers via ?include=comments). Use the \`infra\` tool for all other API calls (board, tasks, triggers, playbooks, events).`,
+      `After reading the events that prompted a nudge — and deciding what (if anything) to do about each — call \`ack({upToId: <highest event id you processed>})\`. Ack also when you choose to "hold"; "hold and acked" is a normal verdict, "hold without ack" is the bug that produces nudge-loops.`,
     ].join('\n')
   }
   return [
@@ -235,6 +256,7 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
     `Messages from the orchestrator arrive as <channel source="jean" ...> tags.`,
     `Use the \`reply\` tool for conversation with the orchestrator (including short acks, questions, "still working"). Use the \`comment\` tool when you have something substantive worth recording on a task — findings, blocker resolved, phase done. Comments are curated; replies are chat.`,
     `Use the \`infra\` tool (read-only — GET only) to look up context: \`GET /tasks/<id>?include=comments,messages\` for both the curated comments and the full correspondence on a task you're working on, \`GET /board\` for related tasks, \`GET /agents\` to see who else is connected. State changes are the sensei's job — if you need something written, ask via \`reply\`.`,
+    `After reading a nudge's pending events and deciding about each, call \`ack({upToId: <highest event id you processed>})\` to clear them from your pending queue. Hold-and-acked is a fine verdict; hold-without-ack creates nudge-loops.`,
     `ALWAYS end a turn with \`reply\` — your stdout is invisible to the sensei, and \`agent-idle\` does not wake it. If you finish, hit a blocker, or need to stop, call \`reply\` before stopping. Not doing so means the sensei never learns anything happened.`,
   ].join('\n')
 }

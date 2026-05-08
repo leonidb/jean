@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  ACK_TOOL,
   buildInfraTool,
   buildInstructions,
   buildTools,
@@ -13,21 +14,21 @@ import {
 } from './tools.ts'
 
 describe('buildTools', () => {
-  test('sensei gets send + comment + memorize + recent_memories + infra (no reply)', () => {
+  test('sensei gets send + comment + memorize + recent_memories + ack + infra (no reply)', () => {
     const names = buildTools('sensei').map((t) => t.name)
-    expect(names).toEqual(['send', 'comment', 'memorize', 'recent_memories', 'infra'])
+    expect(names).toEqual(['send', 'comment', 'memorize', 'recent_memories', 'ack', 'infra'])
     expect(names).not.toContain('reply')
   })
 
-  test('worker gets reply + comment + memorize + recent_memories + infra (no send)', () => {
+  test('worker gets reply + comment + memorize + recent_memories + ack + infra (no send)', () => {
     const names = buildTools('worker').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'ack', 'infra'])
     expect(names).not.toContain('send')
   })
 
   test('user role matches worker (non-sensei has same toolset)', () => {
     const names = buildTools('user').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'ack', 'infra'])
   })
 })
 
@@ -89,6 +90,12 @@ describe('tool shapes', () => {
     const props = propsOf(RECENT_MEMORIES_TOOL)
     expect((props.since as { type: string }).type).toBe('number')
     expect((props.limit as { type: string }).type).toBe('number')
+  })
+
+  test('ack requires upToId (number)', () => {
+    expect(ACK_TOOL.inputSchema.required).toEqual(['upToId'])
+    const props = propsOf(ACK_TOOL)
+    expect((props.upToId as { type: string }).type).toBe('number')
   })
 })
 
@@ -190,5 +197,14 @@ describe('buildInstructions', () => {
   test('worker instructions steer state changes back to sensei', () => {
     const instr = buildInstructions('worker', 'x')
     expect(instr).toContain("sensei's job")
+  })
+
+  test('both roles include ack guidance with upToId', () => {
+    const sensei = buildInstructions('sensei', 's')
+    const worker = buildInstructions('worker', 'w')
+    expect(sensei).toContain('ack(')
+    expect(sensei).toContain('upToId')
+    expect(worker).toContain('ack(')
+    expect(worker).toContain('upToId')
   })
 })
