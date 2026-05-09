@@ -16,9 +16,10 @@
  * See docs/llm-wiki-design.md (Adaptation 7).
  */
 
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
 import type { AgentRole } from './protocol.ts'
+import type { WikiConsolidatedData } from './reducers.ts'
 
 export type SpawnHeadlessOpts = {
   /** The dojo root containing `.jean/`. */
@@ -114,10 +115,7 @@ export class LibrarianRoleNotInitializedError extends Error {
  * Steady state where context/ exists and no old-* exists is a no-op.
  */
 export function recoverWikiLayout(dojoRoot: string): { recovered: 'staging' | 'old' | 'cleanup' | 'none' } {
-  const jeanDir = resolve(dojoRoot, '.jean')
-  const consolidator = resolve(jeanDir, '.consolidator')
-  const context = resolve(jeanDir, 'context')
-  const staging = resolve(consolidator, 'staging')
+  const { consolidator, context, staging } = consolidatorPaths(dojoRoot)
 
   const oldDirs = existsSync(consolidator)
     ? readdirSync(consolidator)
@@ -328,6 +326,150 @@ async function teeStreamToFile(stream: ReadableStream<Uint8Array>, path: string)
     await writer.end()
   }
   return acc
+}
+
+// ── Multi-phase consolidation pipeline ──────────────────────────────
+// Phases 1 + 2 are CC subprocess spawns (see runHeadlessAttempt in server.ts);
+// phase 3 (commitConsolidation below) stays in-process so failures are
+// observable and not subject to SDK lifecycle issues.
+
+export type LibrarianPhase = 'draft' | 'review'
+
+type AnomalyEntry = string | { type?: string; text?: string; [k: string]: unknown }
+
+export type ConsolidatorPlan = {
+  phase: 'draft'
+  ts?: string
+  newCursor: number
+  newRawCursor?: string
+  decisions: Array<{ op: 'create' | 'update' | 'keep' | 'archive'; page: string; reason?: string }>
+  stats?: {
+    eventsProcessed?: number
+    tasksDistilled?: number
+    rawFilesProcessed?: number
+    pagesCreated?: number
+    pagesUpdated?: number
+    pagesArchived?: number
+    corrections?: number
+  }
+  anomalies?: AnomalyEntry[]
+}
+
+export type ConsolidatorReview = {
+  phase: 'review'
+  ts?: string
+  changes?: Array<{ page: string; kind: string; detail?: string }>
+  anomalies?: AnomalyEntry[]
+}
+
+export type CommitConsolidationResult = {
+  /** Whether the swap actually happened (false when plan.decisions is empty). */
+  swapped: boolean
+  /** Number of pages in context/ after the run. */
+  pageCount: number
+  /** Event payload appended to history. */
+  emitted: WikiConsolidatedData
+}
+
+/** Centralizes the .consolidator/* path strings shared by recovery + commit. */
+function consolidatorPaths(dojoRoot: string) {
+  const jeanDir = resolve(dojoRoot, '.jean')
+  const consolidator = resolve(jeanDir, '.consolidator')
+  return {
+    jeanDir,
+    consolidator,
+    context: resolve(jeanDir, 'context'),
+    staging: resolve(consolidator, 'staging'),
+    planPath: resolve(consolidator, 'plan.json'),
+    reviewPath: resolve(consolidator, 'review.json'),
+    cursorPath: resolve(consolidator, 'cursor.json'),
+  }
+}
+
+function flattenAnomaly(a: AnomalyEntry): string {
+  if (typeof a === 'string') return a
+  const text = typeof a.text === 'string' ? a.text : JSON.stringify(a)
+  return a.type ? `${a.type}: ${text}` : text
+}
+
+/**
+ * Phase 3: read the staging/ + plan.json + (optional) review.json produced
+ * by phases 1–2, atomically swap staging→context, emit wiki-consolidated,
+ * advance cursor, clean up.
+ *
+ * Order is swap → emit → cursor on purpose: if event emission throws, we
+ * leave cursor at its old value so the next run re-emits a no-op event
+ * (decisions are already on disk so hasChanges=false and the swap doesn't
+ * recur). Mid-swap rename failures are recovered by `recoverWikiLayout`
+ * on the next pre-spawn pass.
+ *
+ * Throws if plan.json is missing (phase 1 didn't complete). Tolerates
+ * a missing review.json — commits on plan.json alone in that case.
+ */
+export async function commitConsolidation(opts: {
+  dojoRoot: string
+  recordEvent: (data: WikiConsolidatedData) => Promise<unknown>
+}): Promise<CommitConsolidationResult> {
+  const { dojoRoot, recordEvent } = opts
+  const p = consolidatorPaths(dojoRoot)
+
+  if (!existsSync(p.planPath)) {
+    throw new Error(`commitConsolidation: plan.json missing at ${p.planPath} — draft phase did not complete`)
+  }
+
+  const planObj = JSON.parse(await Bun.file(p.planPath).text()) as ConsolidatorPlan
+  const reviewObj: ConsolidatorReview | undefined = existsSync(p.reviewPath)
+    ? (JSON.parse(await Bun.file(p.reviewPath).text()) as ConsolidatorReview)
+    : undefined
+
+  const decisions = Array.isArray(planObj.decisions) ? planObj.decisions : []
+  const hasChanges = decisions.some((d) => d.op === 'create' || d.op === 'update' || d.op === 'archive')
+
+  // Review is authoritative when present — it carries plan anomalies forward
+  // and adds new ones. Don't union both lists (would double-count).
+  const rawAnomalies: AnomalyEntry[] = reviewObj?.anomalies ?? planObj.anomalies ?? []
+  const anomalies = rawAnomalies.map(flattenAnomaly)
+
+  // Swap. recoverWikiLayout (above) handles any mid-rename crash on next start.
+  if (hasChanges) {
+    if (!existsSync(p.staging)) {
+      throw new Error(`commitConsolidation: plan has changes but staging/ missing at ${p.staging}`)
+    }
+    const ts = `${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}Z`
+    const oldDir = resolve(p.consolidator, `old-${ts}`)
+    if (existsSync(p.context)) renameSync(p.context, oldDir)
+    renameSync(p.staging, p.context)
+    rmSync(oldDir, { recursive: true, force: true })
+  } else {
+    // No-op: sweep any straggler staging/ from a partial draft phase.
+    rmSync(p.staging, { recursive: true, force: true })
+  }
+
+  const stats = planObj.stats ?? {}
+  const emitted: WikiConsolidatedData = {
+    pagesCreated: stats.pagesCreated ?? decisions.filter((d) => d.op === 'create').length,
+    pagesUpdated: stats.pagesUpdated ?? decisions.filter((d) => d.op === 'update').length,
+    eventsProcessed: stats.eventsProcessed ?? 0,
+    tasksDistilled: stats.tasksDistilled ?? 0,
+    rawFilesProcessed: stats.rawFilesProcessed ?? 0,
+    ...(stats.corrections !== undefined && { corrections: stats.corrections }),
+    ...(anomalies.length > 0 && { anomalies }),
+  }
+  await recordEvent(emitted)
+
+  // Cursor only after event lands — keeps cursor and event log in lockstep.
+  const cursor = {
+    lastEventId: typeof planObj.newCursor === 'number' ? planObj.newCursor : 0,
+    lastConsolidatedAt: new Date().toISOString(),
+    lastRawConsolidatedAt: planObj.newRawCursor ?? new Date().toISOString(),
+  }
+  writeFileSync(p.cursorPath, `${JSON.stringify(cursor, null, 2)}\n`)
+
+  rmSync(p.planPath, { force: true })
+  rmSync(p.reviewPath, { force: true })
+
+  const pageCount = existsSync(p.context) ? readdirSync(p.context).filter((n) => n.endsWith('.md')).length : 0
+  return { swapped: hasChanges, pageCount, emitted }
 }
 
 export type ProbeResult = {

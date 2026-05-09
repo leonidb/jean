@@ -13,7 +13,7 @@
  * No LLM — fast, deterministic plumbing.
  */
 
-import { existsSync, mkdirSync, readdirSync, unlinkSync, watch, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, unlinkSync, watch, writeFileSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { Cron } from 'croner'
@@ -28,7 +28,13 @@ import {
 import { INFRA_IDENTITY, type InfraInfo, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Board, canTransition, type TaskStatus } from './board.ts'
 import { resolveConfig } from './config.ts'
-import { probeAnthropicAPI, recoverWikiLayout, spawnHeadless } from './librarian.ts'
+import {
+  commitConsolidation,
+  type LibrarianPhase,
+  probeAnthropicAPI,
+  recoverWikiLayout,
+  spawnHeadless,
+} from './librarian.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
 import {
   AGENT_ROLES,
@@ -460,9 +466,16 @@ async function runHeadlessAttempt(opts: {
   attempt: number
   totalAttempts: number
   doProbe: boolean
+  /**
+   * Set by the multi-phase librarian pipeline to override the trigger's prompt
+   * and tag phase-specific stream-json files (`<role>-<triggerId>-<tag>-<ts>.jsonl`)
+   * so each phase's forensic artifacts stay separable.
+   */
+  phase?: { tag: LibrarianPhase; promptOverride: string }
 }): Promise<{ succeeded: boolean }> {
-  const { trigger, role, model, dojoRoot, attempt, totalAttempts, doProbe } = opts
+  const { trigger, role, model, dojoRoot, attempt, totalAttempts, doProbe, phase } = opts
   const attemptTag = totalAttempts > 1 ? ` attempt=${attempt}/${totalAttempts}` : ''
+  const phaseLog = phase ? ` phase=${phase.tag}` : ''
 
   let probeLatencyMs: number | undefined
   if (doProbe) {
@@ -489,17 +502,19 @@ async function runHeadlessAttempt(opts: {
   }
 
   process.stderr.write(
-    `[jean] trigger ${trigger.id}${attemptTag} fired → headless ${role}${model ? ` (${model})` : ''}\n`,
+    `[jean] trigger ${trigger.id}${attemptTag}${phaseLog} fired → headless ${role}${model ? ` (${model})` : ''}\n`,
   )
   // Tee stdout to a per-run JSONL so a killed run still leaves a trace
   // showing which tool call stalled.
   const startIso = new Date().toISOString().replace(/[:.]/g, '-')
-  const streamSinkPath = `.jean/.headless/${role}-${trigger.id}-${startIso}.jsonl`
+  const streamSinkPath = phase
+    ? `.jean/.headless/${role}-${trigger.id}-${phase.tag}-${startIso}.jsonl`
+    : `.jean/.headless/${role}-${trigger.id}-${startIso}.jsonl`
   try {
     const result = await spawnHeadless({
       dojoRoot,
       role,
-      prompt: trigger.prompt,
+      prompt: phase?.promptOverride ?? trigger.prompt,
       streamSinkPath,
       ...(model && { model }),
     })
@@ -530,11 +545,126 @@ async function runHeadlessAttempt(opts: {
   }
 }
 
+/**
+ * Default model per phase of the librarian's multi-phase pipeline.
+ *
+ * Phase 1 (draft) is mechanical bulk: read events, route to pages, write
+ * structured staging output. Haiku is plenty and reliable.
+ *
+ * Phase 2 (review) is a coherency pass — read the staged draft, fix index
+ * cross-refs, catch contradictions Haiku introduced. Sonnet is sharper here.
+ *
+ * Both can be overridden by setting `trigger.model` (which then applies to
+ * BOTH phases — useful for "use Opus for everything" or "use Haiku for
+ * everything" experiments).
+ */
+const LIBRARIAN_DRAFT_MODEL = 'haiku'
+const LIBRARIAN_REVIEW_MODEL = 'sonnet'
+
+const DRAFT_PROMPT =
+  'Run the consolidate-wiki-draft skill exactly. Phase 1 of 3 — draft only, do not swap, do not advance cursor.'
+const REVIEW_PROMPT =
+  'Run the consolidate-wiki-review skill exactly. Phase 2 of 3 — proofread the staging output from phase 1, do not swap.'
+
+/** Run one librarian phase with the trigger's retry/backoff budget. */
+async function runPhaseWithRetries(opts: {
+  trigger: Trigger
+  dojoRoot: string
+  phase: { tag: LibrarianPhase; promptOverride: string }
+  model: string
+  doProbe: boolean
+  totalAttempts: number
+  /** Extra success predicate beyond exit code (e.g. plan.json must exist). */
+  postCheck?: () => boolean
+}): Promise<boolean> {
+  const { trigger, dojoRoot, phase, model, doProbe, totalAttempts, postCheck } = opts
+  for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+    const { succeeded } = await runHeadlessAttempt({
+      trigger,
+      role: 'librarian',
+      model,
+      dojoRoot,
+      attempt,
+      totalAttempts,
+      doProbe,
+      phase,
+    })
+    if (succeeded && (postCheck === undefined || postCheck())) return true
+    if (attempt < totalAttempts) {
+      process.stderr.write(
+        `[jean] trigger ${trigger.id} ${phase.tag} retrying in ${HEADLESS_RETRY_BACKOFF_MS}ms (${attempt + 1}/${totalAttempts})\n`,
+      )
+      await Bun.sleep(HEADLESS_RETRY_BACKOFF_MS)
+    }
+  }
+  return false
+}
+
+/**
+ * Multi-phase consolidation: draft → review → commit.
+ *
+ * Each phase has its own retry budget. A successful phase 1 is preserved
+ * across phase 2 retries — we don't redo Haiku's work just because Sonnet
+ * died. Phase 3 (commit) is in-process and idempotent; no retry loop needed.
+ */
+async function runLibrarianMultiPhase(trigger: Trigger, dojoRoot: string) {
+  const retries = trigger.retries ?? 0
+  const totalAttempts = retries + 1
+  // trigger.model overrides BOTH phases — single knob for "use opus everywhere"
+  // or "use haiku everywhere". When unset, per-phase defaults apply.
+  const draftModel = trigger.model ?? LIBRARIAN_DRAFT_MODEL
+  const reviewModel = trigger.model ?? LIBRARIAN_REVIEW_MODEL
+  const planPath = resolve(DATA_DIR, '.consolidator', 'plan.json')
+
+  const draftOk = await runPhaseWithRetries({
+    trigger,
+    dojoRoot,
+    phase: { tag: 'draft', promptOverride: DRAFT_PROMPT },
+    model: draftModel,
+    doProbe: retries > 0,
+    totalAttempts,
+    postCheck: () => existsSync(planPath),
+  })
+  if (!draftOk) {
+    process.stderr.write(`[jean] trigger ${trigger.id} draft phase failed all attempts; aborting\n`)
+    return
+  }
+
+  // Skip probe on review — phase 1 already validated the network.
+  const reviewOk = await runPhaseWithRetries({
+    trigger,
+    dojoRoot,
+    phase: { tag: 'review', promptOverride: REVIEW_PROMPT },
+    model: reviewModel,
+    doProbe: false,
+    totalAttempts,
+  })
+  if (!reviewOk) {
+    // Don't commit on draft alone — review's index regen + cross-ref fixes
+    // are load-bearing. Sweep plan.json so the next run starts clean;
+    // pre-spawn recoverWikiLayout handles staging/.
+    rmSync(planPath, { force: true })
+    process.stderr.write(`[jean] trigger ${trigger.id} review phase failed; not committing\n`)
+    return
+  }
+
+  // Phase 3: commit (in-process, deterministic, no retries needed).
+  try {
+    const result = await commitConsolidation({
+      dojoRoot,
+      recordEvent: (data) => record('wiki-consolidated', SYSTEM_STREAM, data),
+    })
+    const anomalyCount = result.emitted.anomalies?.length ?? 0
+    process.stderr.write(
+      `[jean] trigger ${trigger.id} commit done — swapped=${result.swapped} pages=${result.pageCount} anomalies=${anomalyCount}\n`,
+    )
+  } catch (err) {
+    process.stderr.write(`[jean] trigger ${trigger.id} commit failed: ${err}\n`)
+  }
+}
+
 async function runHeadlessTrigger(trigger: Trigger) {
   const role = trigger.agent as AgentRole
-  // Wiki consolidation is structured-editing work — Sonnet is plenty.
-  // Per-trigger model always wins; only the librarian default kicks in.
-  const model = trigger.model ?? (role === 'librarian' ? 'sonnet' : undefined)
   const dojoRoot = resolve(DATA_DIR, '..')
 
   if (role === 'librarian') {
@@ -548,13 +678,21 @@ async function runHeadlessTrigger(trigger: Trigger) {
       process.stderr.write(`[jean] librarian aborted: ${err}\n`)
       return
     }
+    // The wiki-consolidation trigger is the only headless librarian flow we
+    // ship; route it through the multi-phase pipeline. Other librarian
+    // triggers (none today) would fall through to single-phase below.
+    if (trigger.id === 'consolidate-wiki') {
+      await runLibrarianMultiPhase(trigger, dojoRoot)
+      return
+    }
   }
 
-  // Probe + retry are entirely opt-in via the trigger's `retries` field.
-  // Default 0 = preserve historical single-attempt behavior with no probe.
+  // Probe + retry are opt-in via `trigger.retries`. Default 0 keeps the
+  // historical single-attempt behavior with no probe.
   const retries = trigger.retries ?? 0
   const totalAttempts = retries + 1
   const doProbe = retries > 0
+  const model = trigger.model
 
   for (let attempt = 1; attempt <= totalAttempts; attempt++) {
     const { succeeded } = await runHeadlessAttempt({

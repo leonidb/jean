@@ -198,6 +198,8 @@ function cmdLibrarianSetup() {
   }
 
   shipSkill(roleDir, 'consolidate-wiki')
+  shipSkill(roleDir, 'consolidate-wiki-draft')
+  shipSkill(roleDir, 'consolidate-wiki-review')
 
   // No Stop/PermissionRequest hooks — one-shot process, nothing to phone home about.
   const settingsDir = resolve(roleDir, '.claude')
@@ -1037,7 +1039,13 @@ const FRAMEWORK_SKILLS: Partial<Record<AgentRole, string[]>> = {
   // Librarian is spawned headless; its skill ships into the role dir but
   // the role isn't user-addable via `jean agent add` (intentional — it's
   // infra-owned).
-  librarian: ['consolidate-wiki'],
+  // The librarian runs as three phases on each consolidate-wiki trigger:
+  // draft (Haiku), review (Sonnet), commit (in-process shell). The two
+  // phase-specific skills are the operative ones; the legacy single-phase
+  // `consolidate-wiki` skill ships alongside them for one cycle as a
+  // fallback / reference, and will be removed once multi-phase has run
+  // reliably for a few weeks.
+  librarian: ['consolidate-wiki', 'consolidate-wiki-draft', 'consolidate-wiki-review'],
 }
 
 /** Copy a framework skill template into `<parentDir>/.claude/skills/<name>/SKILL.md`. */
