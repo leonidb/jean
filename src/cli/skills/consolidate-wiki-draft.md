@@ -52,6 +52,19 @@ Wiki pages are for LLM consumption — terse, bullet-pointed, structured. Skim-i
   ```
 - **`index.md` is the one exception** to "every page has frontmatter you write" — don't write it at all in this phase. The review phase regenerates it from each other page's `description:`. Skip index.md when you cp/Edit/Write staging files.
 
+### What does NOT belong on a wiki page
+
+The wiki captures **durable cross-task knowledge** — patterns, decisions, lasting findings, learned conventions. State-of-the-world data lives elsewhere and goes stale fast in a wiki page. Refuse to record:
+
+- **Task statuses** — "task 080 done", "task 074 in-progress", "tasks 074/075/076 still in flight". Tasks have their own state on the board (`/tasks` projection); duplicating it into a wiki page guarantees drift.
+- **Project / phase status** — "v1 readiness in-progress", "Phase 1 shipped", "currently in roll-out". The board, the changelog, the release tag own these. The wiki captures *what was learned*, not *where we are*.
+- **PR / issue states** — "PR #123 awaiting review". GitHub owns this; mirroring it into the wiki creates two sources of truth.
+- **Sprint / iteration state** — "current iteration", "carry-over items". External tracker / sprint doc owns this.
+
+You may **reference** tasks/PRs/issues by ID when documenting a *learning that came from one* (e.g. "Lesson from task 012: warming the cache avoids the cold-start timeout"). What you can't do is record "task 012 is done" — that fact's home is the board.
+
+When a memory event mentions task state mainly as scaffolding for a learning, distill the *learning* and drop the state. When the entire memory IS task state, drop the memory.
+
 ## Procedure
 
 ### Step 0 — open progress log
@@ -130,19 +143,6 @@ For each input event/task/file, decide one of:
 A `memory` event whose text starts with `CORRECTION:` always maps to `update` of the page it names.
 
 When uncertain whether a memory is wiki-worthy, lean **conservative — drop it**. Memory events stay in the log; they'll surface again next run if relevant. Over-distilling pollutes the wiki.
-
-#### Dojo board task state stays on the board, not in the wiki
-
-The dojo's own tasks (anything in `infra GET /tasks`) carry state — `active` / `blocked` / `done`, comments, replies, history — and the board IS the canonical source. Don't copy that state into wiki pages.
-
-- ❌ Don't write `task 077 in-progress`, `task 080 done`, `v1 readiness in-progress`, `tasks 074–077 still in-progress`, or similar status restatements into pages or `log.md`.
-- ❌ Don't track per-task milestones, branch tips, or PR/commit state on a wiki page if those are already on the task itself or in the task's playbook output.
-- ✅ Reference a task by ID when distilling **durable knowledge** from it (`approach validated in task 042`, `pattern established in task 006`). The task ID is a citation, not a status announcement.
-- ✅ Per-task progress, blockers, and decisions belong in **task comments** (`infra POST /tasks/<id>/comment`) — not the wiki.
-
-**External-system task references are different.** GitHub PRs/issues by number, real-world checklist items, third-party project state — these are NOT in the local board and the wiki is the right home for durable knowledge about them. The rule is "don't duplicate the local board"; cross-system state isn't duplication.
-
-When in doubt: if you'd find the answer faster by calling `infra GET /tasks/<id>` than by reading the wiki, the wiki shouldn't carry that information.
 
 ### Step 5 — build staging
 

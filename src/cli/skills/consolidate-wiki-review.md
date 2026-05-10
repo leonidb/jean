@@ -45,6 +45,7 @@ You're not redoing the draft's work. You're catching what one-pass writing misse
 - **One concept per page.** A page that grew big enough to cover two distinct entities should be split. Splitting is normal; do it when warranted, update inbound `[[wiki-link]]` references.
 - **Compact older content.** Detail superseded by later events should collapse to a one-liner (or move to `log.md`). Pages don't grow forever.
 - **Wiki-links are first-class.** Every concept reference uses `[[Page Name]]`. When a page mentions another wiki page, link it.
+- **No task / project state.** State-of-the-world data lives on the board, not in pages. If draft wrote phrases like "task 077 in-progress", "v1 readiness in-flight", "PR #123 awaiting review", "currently rolling out X" — strip those clauses. Keep the *learning* (e.g. "warming the cache avoids the cold-start timeout, found in task 012") and drop the state (e.g. "task 077 done"). When a whole sentence is just task state, delete the sentence. When the page's whole reason for existing is to track state, flag it as an `archive` candidate in `anomalies` (don't auto-archive — that's a judgment call for sensei).
 
 ### 2. Cross-page consistency
 
