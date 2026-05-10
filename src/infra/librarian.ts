@@ -335,7 +335,9 @@ async function teeStreamToFile(stream: ReadableStream<Uint8Array>, path: string)
 
 export type LibrarianPhase = 'draft' | 'review'
 
-type AnomalyEntry = string | { type?: string; text?: string; [k: string]: unknown }
+type AnomalyEntry =
+  | string
+  | { type?: string; severity?: string; page?: string; text?: string; issue?: string; [k: string]: unknown }
 
 export type ConsolidatorPlan = {
   phase: 'draft'
@@ -386,10 +388,19 @@ function consolidatorPaths(dojoRoot: string) {
   }
 }
 
+/** Coerce a structured anomaly into the `string` shape WikiConsolidatedData expects.
+ *  Plan + review skills produce two shapes in the wild:
+ *    {type, text}                 — early shape
+ *    {page, issue, severity, …}   — current review-skill shape
+ *  Plus bare strings. We accept all three and fall back to JSON only when no
+ *  human-readable field is present. */
 function flattenAnomaly(a: AnomalyEntry): string {
   if (typeof a === 'string') return a
-  const text = typeof a.text === 'string' ? a.text : JSON.stringify(a)
-  return a.type ? `${a.type}: ${text}` : text
+  const text = (typeof a.text === 'string' && a.text) || (typeof a.issue === 'string' && a.issue) || JSON.stringify(a)
+  const label = (typeof a.severity === 'string' && a.severity) || (typeof a.type === 'string' && a.type) || ''
+  const pageRef = typeof a.page === 'string' && a.page ? `[${a.page}]` : ''
+  const prefix = [label && `${label}:`, pageRef].filter(Boolean).join(' ')
+  return prefix ? `${prefix} ${text}` : text
 }
 
 /**
