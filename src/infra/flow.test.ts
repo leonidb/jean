@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdirSync, rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
 import type { DeliverMsg, OutboundMsg } from './protocol.ts'
+import { connectAgent } from './test-helpers.ts'
 
 const isDeliver = (m: OutboundMsg): m is DeliverMsg => m.type === 'deliver'
 
@@ -36,34 +37,6 @@ afterAll(() => {
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 
-function connectAgent(
-  name: string,
-  role: string,
-): Promise<{ ws: WebSocket; messages: OutboundMsg[]; baselineCount: number }> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(WS_URL)
-    const messages: OutboundMsg[] = []
-    let resolved = false
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'register', agent: name, role }))
-    }
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(String(e.data)) as OutboundMsg
-      messages.push(msg)
-      if (msg.type === 'registered' && !resolved) {
-        resolved = true
-        if (role === 'sensei') {
-          setTimeout(() => resolve({ ws, messages, baselineCount: messages.length }), 100)
-        } else {
-          resolve({ ws, messages, baselineCount: messages.length })
-        }
-      }
-    }
-    ws.onerror = reject
-    setTimeout(() => reject(new Error('timeout')), 3000)
-  })
-}
-
 function waitForMessage<T extends OutboundMsg>(
   messages: OutboundMsg[],
   predicate: (m: OutboundMsg) => m is T,
@@ -93,8 +66,8 @@ function waitForMessage<T extends OutboundMsg>(
 describe('full lifecycle', () => {
   test('task creation → assignment → work → completion', async () => {
     // 1. Connect sensei and worker
-    const { ws: senseiWs, messages: senseiMsgs } = await connectAgent('flow-sensei', 'sensei')
-    const { ws: workerWs, messages: workerMsgs } = await connectAgent('flow-worker', 'worker')
+    using sensei = await connectAgent(WS_URL, 'flow-sensei', 'sensei')
+    using worker = await connectAgent(WS_URL, 'flow-worker', 'worker')
 
     // 2. Create a task
     const createRes = await fetch(`${BASE}/tasks`, {
@@ -113,14 +86,14 @@ describe('full lifecycle', () => {
     expect(pending.events.some((e) => e.type === 'task-created')).toBe(true)
 
     // 4. Signal sensei idle → nudge arrives (skip connect-time messages)
-    const senseiBaseline = senseiMsgs.length
+    const senseiBaseline = sensei.messages.length
     await fetch(`${BASE}/agent-idle`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: 'flow-sensei' }),
     })
     await Bun.sleep(200)
-    const nudge = senseiMsgs.slice(senseiBaseline).find((m): m is DeliverMsg => isDeliver(m) && m.from === 'infra')
+    const nudge = sensei.messages.slice(senseiBaseline).find((m): m is DeliverMsg => isDeliver(m) && m.from === 'infra')
     expect(nudge).toBeDefined()
     expect(nudge?.text).toContain('Events pending')
 
@@ -151,14 +124,14 @@ describe('full lifecycle', () => {
       body: JSON.stringify({ to: 'flow-worker', from: 'flow-sensei', text: 'Work on this task', taskId: task.id }),
     })
     const delivery = await waitForMessage(
-      workerMsgs,
+      worker.messages,
       (m): m is DeliverMsg => isDeliver(m) && m.text === 'Work on this task',
     )
     expect(delivery.from).toBe('flow-sensei')
     expect(delivery.taskId).toBe(task.id)
 
     // 7. Worker sends reply
-    workerWs.send(JSON.stringify({ type: 'reply', from: 'flow-worker', text: 'Task complete. All good.' }))
+    worker.ws.send(JSON.stringify({ type: 'reply', from: 'flow-worker', text: 'Task complete. All good.' }))
     await Bun.sleep(100)
 
     // 8. Verify reply is queued
@@ -183,14 +156,14 @@ describe('full lifecycle', () => {
 
     // 10. Signal sensei idle → gets nudged again
     // Reset sensei messages to track new nudge
-    const senseiMsgsBefore = senseiMsgs.length
+    const senseiMsgsBefore = sensei.messages.length
     await fetch(`${BASE}/agent-idle`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: 'flow-sensei' }),
     })
     await Bun.sleep(200)
-    const newNudge = senseiMsgs.slice(senseiMsgsBefore).find((m) => m.type === 'deliver' && m.from === 'infra')
+    const newNudge = sensei.messages.slice(senseiMsgsBefore).find((m) => m.type === 'deliver' && m.from === 'infra')
     expect(newNudge).toBeDefined()
 
     // 11. Mark task waiting then done
@@ -226,9 +199,6 @@ describe('full lifecycle', () => {
     const board = (await boardRes.json()) as { tasks: Array<{ id: string; status: string }> }
     const finalTask = board.tasks.find((t) => t.id === task.id)
     expect(finalTask?.status).toBe('done')
-
-    senseiWs.close()
-    workerWs.close()
   })
 })
 
@@ -252,7 +222,7 @@ describe('history', () => {
 
   test('worker reply gets taskId inferred from board', async () => {
     // Create a task, assign agent, make active, then send a reply
-    const { ws } = await connectAgent('infer-worker', 'worker')
+    using agent = await connectAgent(WS_URL, 'infer-worker', 'worker')
 
     const createRes = await fetch(`${BASE}/tasks`, {
       method: 'POST',
@@ -279,7 +249,7 @@ describe('history', () => {
     })
 
     // Worker replies without an explicit taskId — server falls back to inference (legacy path)
-    ws.send(JSON.stringify({ type: 'reply', from: 'infer-worker', text: 'inferred reply' }))
+    agent.ws.send(JSON.stringify({ type: 'reply', from: 'infer-worker', text: 'inferred reply' }))
     await Bun.sleep(200)
 
     const res = await fetch(`${BASE}/events?agent=infer-worker`)
@@ -289,13 +259,11 @@ describe('history', () => {
     const reply = data.events.find((e) => e.type === 'reply' && e.data?.text === 'inferred reply')
     expect(reply).toBeDefined()
     expect(reply?.taskId).toBe(task.id)
-
-    ws.close()
   })
 
   test('worker reply with explicit taskId stamps that task, overriding inference', async () => {
     // Create two in-progress tasks for the SAME worker — this is the scenario where inference goes wrong.
-    const { ws } = await connectAgent('multi-task-worker', 'worker')
+    using agent = await connectAgent(WS_URL, 'multi-task-worker', 'worker')
 
     const createA = await fetch(`${BASE}/tasks`, {
       method: 'POST',
@@ -326,7 +294,7 @@ describe('history', () => {
     }
 
     // Worker replies to task B *explicitly*. Without this fix, inference would stamp task A (first match).
-    ws.send(
+    agent.ws.send(
       JSON.stringify({
         type: 'reply',
         from: 'multi-task-worker',
@@ -345,13 +313,11 @@ describe('history', () => {
       events: Array<{ type: string; data: { text?: string } }>
     }
     expect(histA.events.some((e) => e.type === 'reply' && e.data?.text === 'about task B specifically')).toBe(false)
-
-    ws.close()
   })
 
   test('ack events appear in history', async () => {
-    const { ws } = await connectAgent('ack-hist-worker', 'worker')
-    ws.send(JSON.stringify({ type: 'reply', from: 'ack-hist-worker', text: 'ack me' }))
+    using agent = await connectAgent(WS_URL, 'ack-hist-worker', 'worker')
+    agent.ws.send(JSON.stringify({ type: 'reply', from: 'ack-hist-worker', text: 'ack me' }))
     await Bun.sleep(100)
 
     // Get the event and ack it
@@ -368,8 +334,6 @@ describe('history', () => {
     const data = (await res.json()) as { events: Array<{ type: string; data: Record<string, unknown> }> }
     const ackEvent = data.events.find((e) => e.type === 'ack' && (e.data?.eventIds as number[])?.includes(eventId))
     expect(ackEvent).toBeDefined()
-
-    ws.close()
   })
 
   test('GET /history?last=N returns only last N events', async () => {
@@ -398,13 +362,13 @@ describe('history', () => {
 
 describe('WS send message', () => {
   test('agent sends via ws send → recipient receives and event recorded', async () => {
-    const { ws: senderWs } = await connectAgent('send-from', 'sensei')
-    const { messages: recvMsgs, ws: recvWs } = await connectAgent('send-to', 'worker')
+    using sender = await connectAgent(WS_URL, 'send-from', 'sensei')
+    using recv = await connectAgent(WS_URL, 'send-to', 'worker')
 
-    senderWs.send(JSON.stringify({ type: 'send', from: 'send-from', to: 'send-to', text: 'hello via send tool' }))
+    sender.ws.send(JSON.stringify({ type: 'send', from: 'send-from', to: 'send-to', text: 'hello via send tool' }))
 
     const delivery = await waitForMessage(
-      recvMsgs,
+      recv.messages,
       (m): m is DeliverMsg => isDeliver(m) && m.text === 'hello via send tool',
     )
     expect(delivery.from).toBe('send-from')
@@ -419,9 +383,6 @@ describe('WS send message', () => {
     expect(sendEvent).toBeDefined()
     expect(sendEvent?.data?.from).toBe('send-from')
     expect(sendEvent?.data?.delivered).toBe(true)
-
-    senderWs.close()
-    recvWs.close()
   })
 
   test('ws send ignores payloads without an authenticated sender', async () => {
@@ -440,10 +401,10 @@ describe('WS send message', () => {
   })
 
   test('ws reply from sensei is dropped — no reply or send event recorded', async () => {
-    const { ws } = await connectAgent('reply-drop-sensei', 'sensei')
+    using agent = await connectAgent(WS_URL, 'reply-drop-sensei', 'sensei')
 
     const marker = 'sensei reply that should be black-holed'
-    ws.send(JSON.stringify({ type: 'reply', from: 'reply-drop-sensei', text: marker }))
+    agent.ws.send(JSON.stringify({ type: 'reply', from: 'reply-drop-sensei', text: marker }))
     await Bun.sleep(150)
 
     const hist = (await (await fetch(`${BASE}/history?last=30`)).json()) as {
@@ -451,8 +412,6 @@ describe('WS send message', () => {
     }
     expect(hist.events.some((e) => e.type === 'reply' && e.data?.text === marker)).toBe(false)
     expect(hist.events.some((e) => e.type === 'send' && e.data?.text === marker)).toBe(false)
-
-    ws.close()
   })
 
   test('sensei-authored task-comment records but does NOT nudge sensei', async () => {
@@ -465,12 +424,12 @@ describe('WS send message', () => {
     const task = (await createRes.json()) as { id: string }
 
     // Connect as sensei; note baseline message count after register
-    const { ws, messages } = await connectAgent('comment-origin-sensei', 'sensei')
+    using agent = await connectAgent(WS_URL, 'comment-origin-sensei', 'sensei')
     // Consume the 'You just connected' message so our baseline is stable
     await Bun.sleep(150)
-    const baseline = messages.length
+    const baseline = agent.messages.length
 
-    ws.send(
+    agent.ws.send(
       JSON.stringify({
         type: 'task-comment',
         from: 'comment-origin-sensei',
@@ -491,12 +450,10 @@ describe('WS send message', () => {
     expect(commentEvent?.data.role).toBe('sensei')
 
     // But the sensei did NOT receive a nudge as a result of its own comment
-    const nudge = messages
+    const nudge = agent.messages
       .slice(baseline)
       .find((m): m is DeliverMsg => isDeliver(m) && m.from === 'infra' && m.text.includes('Events pending'))
     expect(nudge).toBeUndefined()
-
-    ws.close()
   })
 })
 
@@ -524,15 +481,13 @@ describe('idle state derivation', () => {
     }
 
     // Now register a new worker session under that name — the task's in `waiting`, so the worker should be idle.
-    const { ws } = await connectAgent('waiting-worker', 'worker')
+    using _agent = await connectAgent(WS_URL, 'waiting-worker', 'worker')
     const data = (await (await fetch(`${BASE}/agents`)).json()) as {
       agents: Array<{ name: string; role: string; idle: boolean }>
     }
     const entry = data.agents.find((a) => a.name === 'waiting-worker')
     expect(entry).toBeDefined()
     expect(entry?.idle).toBe(true)
-
-    ws.close()
   })
 })
 
