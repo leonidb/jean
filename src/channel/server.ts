@@ -250,7 +250,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         isError: true,
       }
     }
-    return callInfraTool('ack', 'POST', '/events/ack', { upToId, agent: AGENT_NAME })
+    return callInfraTool('ack', 'POST', '/events/ack', { upToId })
   }
 
   if (req.params.name === 'infra') {

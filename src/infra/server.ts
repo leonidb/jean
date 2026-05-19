@@ -1629,7 +1629,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         if (eventIds.length > 0) {
           await record('ack', SYSTEM_STREAM, { eventIds } satisfies AckData)
         }
-        return Response.json({ acknowledged: eventIds.length })
+        return Response.json({ acknowledged: eventIds.length, remaining: pendingProjection.state.length })
       })()
     }
 

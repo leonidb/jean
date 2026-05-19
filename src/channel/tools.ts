@@ -202,7 +202,7 @@ export function buildInfraTool(role: AgentRole): Tool {
 export function buildTools(role: AgentRole): Tool[] {
   if (role === 'sensei')
     return [SEND_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, RECENT_MEMORIES_TOOL, ACK_TOOL, buildInfraTool(role)]
-  return [REPLY_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, RECENT_MEMORIES_TOOL, ACK_TOOL, buildInfraTool(role)]
+  return [REPLY_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, RECENT_MEMORIES_TOOL, buildInfraTool(role)]
 }
 
 /** Read a tool argument that should be a non-empty string. Non-string, empty, or whitespace-only values return undefined. */
@@ -256,7 +256,6 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
     `Messages from the orchestrator arrive as <channel source="jean" ...> tags.`,
     `Use the \`reply\` tool for conversation with the orchestrator (including short acks, questions, "still working"). Use the \`comment\` tool when you have something substantive worth recording on a task — findings, blocker resolved, phase done. Comments are curated; replies are chat.`,
     `Use the \`infra\` tool (read-only — GET only) to look up context: \`GET /tasks/<id>?include=comments,messages\` for both the curated comments and the full correspondence on a task you're working on, \`GET /board\` for related tasks, \`GET /agents\` to see who else is connected. State changes are the sensei's job — if you need something written, ask via \`reply\`.`,
-    `After reading a nudge's pending events and deciding about each, call \`ack({upToId: <highest event id you processed>})\` to clear them from your pending queue. Hold-and-acked is a fine verdict; hold-without-ack creates nudge-loops.`,
     `ALWAYS end a turn with \`reply\` — your stdout is invisible to the sensei, and \`agent-idle\` does not wake it. If you finish, hit a blocker, or need to stop, call \`reply\` before stopping. Not doing so means the sensei never learns anything happened.`,
   ].join('\n')
 }

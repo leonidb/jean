@@ -20,15 +20,16 @@ describe('buildTools', () => {
     expect(names).not.toContain('reply')
   })
 
-  test('worker gets reply + comment + memorize + recent_memories + ack + infra (no send)', () => {
+  test('worker gets reply + comment + memorize + recent_memories + infra (no send, no ack)', () => {
     const names = buildTools('worker').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'ack', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'infra'])
     expect(names).not.toContain('send')
+    expect(names).not.toContain('ack')
   })
 
   test('user role matches worker (non-sensei has same toolset)', () => {
     const names = buildTools('user').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'ack', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'infra'])
   })
 })
 
@@ -199,12 +200,11 @@ describe('buildInstructions', () => {
     expect(instr).toContain("sensei's job")
   })
 
-  test('both roles include ack guidance with upToId', () => {
+  test('sensei instructions include ack guidance with upToId; worker does not', () => {
     const sensei = buildInstructions('sensei', 's')
     const worker = buildInstructions('worker', 'w')
     expect(sensei).toContain('ack(')
     expect(sensei).toContain('upToId')
-    expect(worker).toContain('ack(')
-    expect(worker).toContain('upToId')
+    expect(worker).not.toContain('ack(')
   })
 })

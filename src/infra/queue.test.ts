@@ -170,9 +170,10 @@ describe('event queue', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: 'batch-worker', upToId: secondId }),
     })
-    const ackData = (await ackRes.json()) as { acknowledged: number }
+    const ackData = (await ackRes.json()) as { acknowledged: number; remaining: number }
     // register event is earlier than reply[0] so acking up to secondId also clears register.
     expect(ackData.acknowledged).toBe(3)
+    expect(typeof ackData.remaining).toBe('number')
 
     // Third reply should still be there
     const after = await fetch(`${BASE}/events/pending?agent=batch-worker`)
@@ -180,6 +181,37 @@ describe('event queue', () => {
     expect(afterData.events.length).toBe(1)
 
     ws.close()
+  })
+
+  test('POST /events/ack with no agent filter drains other-agent register events (nudge-loop bug)', async () => {
+    // Other agents' register events end up in pending (sensei's inbox) but
+    // none resolve to sensei — ack with `{upToId}` and no agent filter must
+    // still drain them.
+    await clearPendingEvents()
+    const a = await connectAgent('drain-a')
+    const b = await connectAgent('drain-b')
+    await Bun.sleep(100)
+
+    const pending = (await (await fetch(`${BASE}/events`)).json()) as {
+      events: Array<{ id: number; type: string; agent?: string }>
+    }
+    const registers = pending.events.filter(
+      (e) => e.type === 'register' && (e.agent === 'drain-a' || e.agent === 'drain-b'),
+    )
+    expect(registers.length).toBe(2)
+    const maxId = pending.events.at(-1)?.id ?? 0
+
+    const ackRes = await fetch(`${BASE}/events/ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ upToId: maxId }),
+    })
+    const ackData = (await ackRes.json()) as { acknowledged: number; remaining: number }
+    expect(ackData.acknowledged).toBeGreaterThanOrEqual(2)
+    expect(ackData.remaining).toBe(0)
+
+    a.ws.close()
+    b.ws.close()
   })
 
   test('events ordered FIFO', async () => {
