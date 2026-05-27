@@ -90,7 +90,7 @@ A framework for multi-agent execution where autonomous coding agents work in par
 - **Skills**: role-specific capabilities, installed as SKILL.md files
 - **Stop hook**: notifies infrastructure when agent goes idle (back at `>` prompt)
 
-The agent is just Claude with skills. It doesn't have special outbound tools or communication protocols. When the sensei pings ("what happened?"), the agent replies naturally.
+The agent is just a session with skills (Claude today — the reference runtime; see [Runtime Neutrality](runtime-neutrality.md)). It doesn't have special outbound tools or communication protocols. When the sensei pings ("what happened?"), the agent replies naturally.
 
 ---
 
@@ -101,7 +101,7 @@ A unit of work. Has a title, description, queue, optional agent assignment.
 States: `todo → assigned → in-progress ↔ waiting → done`. Simple tasks can go directly `in-progress → done`. The `waiting` state covers tasks paused for external input (human feedback, PR review cycles, dependency on another task). Task descriptions contain the work itself — not agent environment details. The sensei routes tasks by matching agent tags to task requirements.
 
 ### Playbook
-A flow definition that tells sensei how to handle a specific type of work. Not routing (tags handle that), but process: what to do at each lifecycle stage, what to verify, when to ask the human, when to close. Lives in `.jean/playbooks/` as markdown files with SKILL.md-style frontmatter (name, description). Files are input — infrastructure watches the directory, emits events on changes (`playbook-created`, `playbook-updated`, `playbook-removed`), and derives runtime state from events via a projection. Sensei reads playbooks from the API (`GET /playbooks`, `GET /playbooks/:id`). Tasks carry an explicit `playbook` field set at creation time. Playbooks are customizable per project/user — Jean is a framework, the actual flows are project-specific.
+A flow definition that tells sensei how to handle a specific type of work. Not routing (tags handle that), but process: what to do at each lifecycle stage, what to verify, when to ask the human, when to close. Lives in `.jean/playbooks/` as markdown files with SKILL.md-style frontmatter (name, description). Files are input — infrastructure watches the directory, emits events on changes (`playbook-created`, `playbook-updated`, `playbook-removed`), and derives runtime state from events via a projection. Sensei reads playbooks from the API (`GET /playbooks`, `GET /playbooks/:id`). Tasks carry an explicit `playbook` field set at creation time. Playbooks are customizable per project/user — Jean is a framework, the actual flows are project-specific. See [Playbooks](playbooks.md) for the full contract, authoring guidance, and rationale.
 
 ### Event
 All state changes are events, stored in an append-only JSONL log. Event types: `task-created`, `task-status`, `task-updated`, `reply`, `send`, `agent-idle`, `register`, `ack`, `nudge`, `start`, `trigger-created`, `trigger-fired`, `trigger-removed`, `playbook-created`, `playbook-updated`, `playbook-removed`, `permission-request`. Future: `human-interaction` (agent summaries of direct human interaction), `task-feedback` (quality signals). Each event has an ID, stream, type, timestamp, and data payload.

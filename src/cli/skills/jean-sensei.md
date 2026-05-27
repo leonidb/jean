@@ -156,12 +156,13 @@ infra(method="GET", path="/playbooks/<name>")
 ## Typical flow for a new task
 
 1. `infra(method="GET", path="/agents")` — check who's connected
-2. `infra(method="POST", path="/tasks", body={...})` — create the task with `queue` set to the target worker
-3. If agent is idle: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"in-progress"})`, then `send(to="<agent>", text="<task details>", taskId="<id>")`
-4. If agent is busy: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"assigned"})` (queued — dispatch when agent becomes idle)
-5. Ack the task-created event
-6. Wait — you'll be nudged when the worker replies or goes idle
-7. Use `waiting` when a task is paused for external input. Resume to `in-progress` when ready.
+2. `infra(method="GET", path="/playbooks")` — check for a playbook that fits this kind of work (see Playbooks below)
+3. `infra(method="POST", path="/tasks", body={"title": "…", "queue": "<worker>", "playbook": "<name>", "actor": "sensei"})` — create the task. Set `playbook` to the matching one, or omit it if none fits — a conscious choice, not a skipped step. `queue` is the target worker.
+4. If agent is idle: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"in-progress"})`, then `send(to="<agent>", text="<task details>", taskId="<id>")`
+5. If agent is busy: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"assigned"})` (queued — dispatch when agent becomes idle)
+6. Ack the task-created event
+7. Wait — you'll be nudged when the worker replies or goes idle
+8. Use `waiting` when a task is paused for external input. Resume to `in-progress` when ready.
 
 ## Continuing work on an existing task
 
@@ -187,7 +188,7 @@ Playbooks define how you manage specific types of work. Check available playbook
 infra(method="GET", path="/playbooks")
 ```
 
-If a playbook fits the task, set the `playbook` field when creating the task and fetch the full playbook for lifecycle guidance.
+If a playbook fits the task, set the `playbook` field when creating the task and fetch the full playbook for lifecycle guidance. The `playbook` value is the playbook's **id** — its filename without `.md` (e.g. `review`), as listed by `GET /playbooks` — not its title. A value that doesn't match an id creates the task but silently attaches nothing, so confirm it took with `?include=playbook`.
 
 Tasks without a matching playbook are handled with your general judgment.
 

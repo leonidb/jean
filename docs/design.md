@@ -19,7 +19,7 @@ jean peek orchestrator                # talk to the orchestrator
 
 - **Channels**: Agents communicate through Claude Code channels. The orchestrator pushes tasks, checks on idle agents, and interprets results. Validated — channels wake idle sessions.
 - **Orchestrator (sensei)**: An always-running Claude session at the center. Routes work by agent tags, manages the event-sourced board, talks to the human. Stateless per-event — reads the board on every signal.
-- **Agents are just Claude**: Each agent is a Claude session with role-specific skills. No special protocols. When it finishes, it stops. The orchestrator notices and checks in.
+- **Agents are just sessions behind an adapter**: Each agent is a session with role-specific skills. No special protocols. When it finishes, it stops; the orchestrator notices and checks in. Claude Code is the reference runtime, not a built-in assumption — the WS protocol is runtime-neutral and other runtimes (e.g. Codex) can join through their own adapter. See [Runtime Neutrality](runtime-neutrality.md).
 - **Tags over playbooks**: Agents declare capabilities via tags. The orchestrator routes tasks to agents with matching tags. Skills are installed per-agent, not extracted from playbook files.
 - **Event sourcing**: All state changes are events (JSONL). Board and pending-events projections are derived from the event stream. History is queryable and streamable (SSE).
 - **Interactive**: Agents are full sessions you can connect to and talk to. Not fire-and-forget headless processes.
@@ -30,6 +30,8 @@ jean peek orchestrator                # talk to the orchestrator
 | Doc | Status |
 |-----|--------|
 | [Concepts](concepts.md) | Architecture, components, communication patterns |
+| [Playbooks](playbooks.md) | The customization layer — what a playbook is, its contract, author→discover→attach |
+| [Runtime Neutrality](runtime-neutrality.md) | Why agents aren't assumed to be Claude; the adapter boundary |
 | [Decisions](decisions.md) | Why things are the way they are |
 | [Roadmap](roadmap.md) | What's done, what's next |
 | [Research](research.md) | Validated technical findings |
