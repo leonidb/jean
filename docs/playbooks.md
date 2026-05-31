@@ -10,7 +10,7 @@ Same authoring surface as the rest of Jean: markdown + frontmatter, like skills 
 
 The framework is deliberately generic; **playbooks are where all the specificity lives.** The bet is that a single, natural-language-like layer can let one framework cover a very wide span of real use:
 
-- **A personal dojo** — *no Git at all*.
+- **A personal dojo** — a life-OS, *not a codebase* — yet still git-backed (the docs *are* the project; git keeps them versioned and safe). "Not a coding project" ≠ "no repo." See [`library.md`](library.md).
 - **A work dojo** — a team codebase: reviews, bug reproduction, issue triage.
 - **Hands-off** — dispatch work and let agents run automatically, without watching them.
 - **Hands-on** — sit with one worker for a day, iterating on a serious feature.
