@@ -31,6 +31,7 @@ jean peek orchestrator                # talk to the orchestrator
 |-----|--------|
 | [Concepts](concepts.md) | Architecture, components, communication patterns |
 | [Playbooks](playbooks.md) | The customization layer — what a playbook is, its contract, author→discover→attach |
+| [Library](library.md) | The dojo's durable learned knowledge — domain + convention sub-kinds, write paths, raw_context ingest, Karpathy lineage |
 | [Runtime Neutrality](runtime-neutrality.md) | Why agents aren't assumed to be Claude; the adapter boundary |
 | [Decisions](decisions.md) | Why things are the way they are |
 | [Roadmap](roadmap.md) | What's done, what's next |

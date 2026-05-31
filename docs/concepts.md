@@ -116,8 +116,8 @@ A second projection tracking events the sensei needs to act on: replies from age
 Groups tasks by folder/worktree. One queue = one folder = one active agent.
 Multiple queues run in parallel.
 
-### Context
-Live project data at `.jean/context/` — team info, open threads, sprint data, scripts, research, design docs. The sensei reads this for decision-making. Separate from skills (skills = how agents work, context = what they should know about the project).
+### Context / Library
+Live project data at `.jean/context/` — what the dojo has **learned** about its world and how to work in it. Two sub-kinds: domain knowledge (findings) and convention knowledge (preferences, learned procedures). The librarian is the sole writer; agents read for decision-making. Separate from skills (skills = how agents work; library = what the dojo has learned). Optional ingest inbox at `.jean/raw_context/` (immutable to the librarian, Karpathy-style) when the dojo digests external documents. See [Library](library.md) for the full model.
 
 ---
 
