@@ -166,6 +166,13 @@ describe('jean dojo init', () => {
       .trim()
     expect(origin).toBe(src)
 
+    // ...with a fetch refspec set (clone --bare omits it; init repairs it) so
+    // `git fetch origin` / `@{u}` work in worktrees...
+    const fetchSpec = Bun.spawnSync(['git', '-C', bare, 'config', '--get', 'remote.origin.fetch'], { stdout: 'pipe' })
+      .stdout.toString()
+      .trim()
+    expect(fetchSpec).toBe('+refs/heads/*:refs/remotes/origin/*')
+
     // ...with the source content present...
     const tree = Bun.spawnSync(['git', '-C', bare, 'ls-tree', '-r', '--name-only', 'HEAD'], {
       stdout: 'pipe',

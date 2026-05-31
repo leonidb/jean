@@ -48,7 +48,15 @@ import {
   writeConfig,
 } from '../infra/config.ts'
 import { identityFromConfig, loadPeers, type Peer, savePeers } from '../infra/peers.ts'
-import { allocatePort, readRegistry, registryPath, removeDojo, upsertDojo } from '../infra/registry.ts'
+import {
+  allocatePort,
+  pruneStale,
+  readRegistry,
+  registryPath,
+  removeDojo,
+  upsertDojo,
+  writeRegistry,
+} from '../infra/registry.ts'
 import {
   findDojoFrom,
   INFRA_IDENTITY,
@@ -1024,8 +1032,11 @@ async function cmdDojo(args: string[]) {
     case 'register':
       cmdDojoRegister()
       break
+    case 'prune':
+      cmdDojoPrune()
+      break
     default:
-      console.error('Usage: jean dojo <init|move|start|list|register> ...')
+      console.error('Usage: jean dojo <init|move|start|list|register|prune> ...')
       process.exit(1)
   }
 }
@@ -1161,10 +1172,27 @@ function cmdDojoInit(args: string[]) {
     }
     if (gitFrom) {
       // Wrap an existing repo: clone it bare. Preserves branches, history, the default
-      // HEAD, and the `origin` remote — the same shape as existing dojos,
-      // which were wired this way by hand. No initial commit (the repo already has
-      // history) and no HEAD override (keep the source's default branch).
+      // HEAD, and origin.url — the same shape as dojos that were wired this way by hand.
+      // No initial commit (the repo already has history)
+      // and no HEAD override (keep the source's default branch).
       gitCheck(Bun.spawnSync(['git', 'clone', '--bare', gitFrom, bareDir], gitOpts), `clone --bare ${gitFrom}`)
+      // `git clone --bare` sets origin.url but NOT a fetch refspec, so `git fetch
+      // origin` and `@{u}` tracking wouldn't work in the agent worktrees. Set the
+      // refspec and populate refs/remotes/origin/*. The content is already present
+      // from the clone, so a fetch failure (offline / auth) is non-fatal.
+      gitCheck(
+        Bun.spawnSync(
+          ['git', '-C', bareDir, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*'],
+          gitOpts,
+        ),
+        'config remote.origin.fetch',
+      )
+      const fetched = Bun.spawnSync(['git', '-C', bareDir, 'fetch', 'origin', '--quiet'], gitOpts)
+      if (fetched.exitCode !== 0) {
+        console.error(
+          `warning: 'git fetch origin' failed (${fetched.stderr.toString().trim()}); origin.url is set — run 'git fetch' later.`,
+        )
+      }
     } else {
       gitCheck(Bun.spawnSync(['git', 'init', '--bare', bareDir], gitOpts), 'init --bare')
       gitCheck(
@@ -1246,6 +1274,20 @@ function cmdDojoRegister() {
   }
   upsertDojo({ path: dojoRoot, port: cfg.port, identity: cfg.identity })
   console.log(`Registered ${cfg.identity ?? basename(dojoRoot)} (port ${cfg.port}) → ${registryPath()}`)
+}
+
+/** Drop registry entries whose dojo directory no longer exists — the cleanup
+ *  for the "I rm'd the dojo folder" case (you can't `cd` in to deregister). */
+function cmdDojoPrune() {
+  const before = readRegistry()
+  const after = pruneStale(before)
+  writeRegistry(after)
+  const dropped = before.length - after.length
+  console.log(
+    dropped === 0
+      ? 'Registry clean — no stale entries.'
+      : `Pruned ${dropped} stale ${dropped === 1 ? 'entry' : 'entries'} → ${registryPath()}`,
+  )
 }
 
 // ── Dojo move: relocate a dojo on disk ───────────────────────────
@@ -2369,6 +2411,7 @@ Commands:
     --<key> <value>   Any config key (e.g. --slack.channel "#dev")
   jean dojo list                              Show all registered dojos and their ports (~/.jean/dojos.json)
   jean dojo register                          Register the current dojo into ~/.jean/dojos.json
+  jean dojo prune                             Drop registry entries whose dojo folder was deleted
   jean dojo move <new-path>                   Move this dojo to a new location
   jean dojo start [agents...] [--only a,b,c]  Lay out current iTerm tab: infra | sensei | workers
                                               (macOS + iTerm2; current shell becomes the infra pane)
