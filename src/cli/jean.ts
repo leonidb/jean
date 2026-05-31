@@ -1124,9 +1124,11 @@ function cmdDojoInit(args: string[]) {
     i++ // skip value
   }
   // Resolve the port against the machine-global registry (~/.jean/dojos.json):
-  // auto-allocate the next free port when --port is omitted, or validate the
-  // chosen one. Safe because the registry knows down dojos too — they stay
-  // registered, so we never silently steal a stopped dojo's port.
+  // auto-allocate the next free port when --port is omitted, or validate a
+  // chosen one. Collision-safe against every *registered* dojo, up or down (a
+  // down dojo stays registered). Caveat: a dojo that has never registered
+  // (pre-registry and never started, with `jean dojo register` not run) is
+  // invisible here — infra start's bind check is the backstop for that window.
   const portResult = allocatePort(config.port, dojoRoot)
   if ('error' in portResult) {
     console.error(portResult.error)
@@ -1290,19 +1292,22 @@ function cmdDojoMove(args: string[]) {
     process.exit(1)
   }
 
+  // Capture port/identity from the still-present old config before moving, so we
+  // can repoint the registry afterward without re-reading from the moved tree.
+  const movedCfg = readConfig(dataDir)
+
   renameSync(oldRoot, newRoot)
   // Our own cwd may have been inside the old root — now a ghost inode, which
   // makes any posix_spawn fail with ENOENT. Rebase onto the new root before
   // touching worktrees or agent configs.
   if (process.cwd().startsWith(oldRoot)) process.chdir(newRoot)
 
-  // Repoint the machine-global registry at the new location (port/identity unchanged).
-  {
-    const movedConfig = readConfig(resolve(newRoot, '.jean'))
-    if (movedConfig.port !== undefined) {
-      upsertDojo({ path: newRoot, port: movedConfig.port, identity: movedConfig.identity })
-    }
-    removeDojo(oldRoot)
+  // Repoint the machine-global registry at the new location. removeDojo is
+  // required (upsert no longer prunes neighbors); re-add under the new path
+  // when the dojo has a port to track.
+  removeDojo(oldRoot)
+  if (movedCfg.port !== undefined) {
+    upsertDojo({ path: newRoot, port: movedCfg.port, identity: movedCfg.identity })
   }
 
   // Discover agent worktrees by scanning for .jean/.jean-agent.json — we can't

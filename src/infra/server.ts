@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, rmSync, unlinkSync, watch, writeFileSync } from 'node:fs'
-import { basename, dirname, resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { Cron } from 'croner'
 import {
@@ -1004,7 +1004,9 @@ function writeRuntimeFiles() {
   // created before the registry existed, and drift-correction to the bound port.
   // Guarded — the registry is a convenience and must never block infra start.
   try {
-    upsertDojo({ path: dirname(DATA_DIR), port: PORT, identity: config.identity })
+    // DATA_DIR is the dojo's .jean dir; its parent is the dojo root (same idiom
+    // as elsewhere in this file). resolve handles the JEAN_DATA_DIR-unset case.
+    upsertDojo({ path: resolve(DATA_DIR, '..'), port: PORT, identity: config.identity })
   } catch {}
 }
 

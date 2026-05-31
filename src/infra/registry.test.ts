@@ -76,6 +76,25 @@ describe('dojo registry', () => {
     expect(readRegistry().length).toBe(0)
   })
 
+  test('rejects an out-of-range or non-integer preferred port', () => {
+    const a = resolve(tmp, 'a')
+    expect('error' in allocatePort(0, a)).toBe(true)
+    expect('error' in allocatePort(70000, a)).toBe(true)
+    expect('error' in allocatePort(8700.5, a)).toBe(true)
+  })
+
+  test('upsert does not drop a stale neighbor entry (non-destructive write)', () => {
+    const live = resolve(tmp, 'live')
+    const gone = resolve(tmp, 'gone') // never created on disk
+    mkdirSync(live)
+    upsertDojo({ path: gone, port: 8700, identity: 'gone' }) // stale entry
+    upsertDojo({ path: live, port: 8701, identity: 'live' }) // an unrelated write
+    // The stale entry survives the neighbor write (not silently GC'd)...
+    expect(readRegistry().some((e) => e.identity === 'gone')).toBe(true)
+    // ...but allocation still reclaims its port in-memory.
+    expect(allocatePort(8700, resolve(tmp, 'b'))).toEqual({ port: 8700 })
+  })
+
   test('atomic write leaves no .tmp file behind', () => {
     const a = resolve(tmp, 'a')
     mkdirSync(a)

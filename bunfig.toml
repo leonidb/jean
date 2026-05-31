@@ -1,0 +1,5 @@
+[test]
+# Isolate the machine-global dojo registry (~/.jean/dojos.json) for the whole
+# test run so the suite — and any infra server it spawns — never writes the
+# developer's real registry. See src/test-preload.ts.
+preload = ["./src/test-preload.ts"]

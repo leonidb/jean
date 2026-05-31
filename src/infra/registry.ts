@@ -1,11 +1,16 @@
 /**
  * Machine-global dojo registry — `~/.jean/dojos.json`.
  *
- * Records every dojo's {path, port, identity} so port allocation is
- * collision-safe across ALL dojos on the machine — including ones that are
- * currently *down*. A down dojo stays registered, so auto-picking a free port
- * never silently steals a port a stopped dojo will want back. This is what
- * lets `jean dojo init` choose a port for you safely.
+ * Records each dojo's {path, port, identity} so port allocation can avoid
+ * every *registered* dojo — including ones currently *down* (a down dojo stays
+ * registered, so auto-pick never silently steals a stopped dojo's port). A dojo
+ * enters the registry at `jean dojo init`, on `infra start` (self-register), or
+ * via `jean dojo register`; one that has never done any of those is invisible
+ * here, and infra start's bind check remains the backstop.
+ *
+ * Writes are atomic (temp + rename) but unlocked: concurrent writers are
+ * last-write-wins. Fine for a single-user machine; the next `infra start`
+ * re-registers anything a race dropped.
  *
  * Location can be overridden with JEAN_REGISTRY_PATH (used by tests so they
  * never touch the real ~/.jean).
@@ -68,11 +73,14 @@ export function pruneStale(entries: DojoEntry[]): DojoEntry[] {
   return entries.filter((e) => existsSync(e.path))
 }
 
-/** Record (or update) a dojo. Matches existing entries by realpath. */
+/** Record (or update) a dojo. Matches existing entries by realpath. Replaces
+ *  only this dojo's own entry — it does NOT prune neighbors, so a write never
+ *  silently drops a dojo whose volume is briefly unmounted. Stale entries are
+ *  ignored at allocation time and surfaced by `jean dojo list`. */
 export function upsertDojo(entry: DojoEntry): void {
   const norm = normPath(entry.path)
   const stamped: DojoEntry = { ...entry, path: norm, updatedAt: new Date().toISOString() }
-  const rest = pruneStale(readRegistry()).filter((e) => normPath(e.path) !== norm)
+  const rest = readRegistry().filter((e) => normPath(e.path) !== norm)
   writeRegistry([...rest, stamped])
 }
 
@@ -94,6 +102,9 @@ export function allocatePort(preferred: number | undefined, forPath: string): { 
     if (normPath(e.path) !== norm) taken.set(e.port, e)
   }
   if (preferred !== undefined) {
+    if (!Number.isInteger(preferred) || preferred < 1 || preferred > 65535) {
+      return { error: `Port ${preferred} is not a valid TCP port (must be an integer 1–65535).` }
+    }
     const holder = taken.get(preferred)
     if (holder) {
       return {
