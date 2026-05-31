@@ -1074,8 +1074,20 @@ Add more files alongside this one as the project's context grows.
 
 function cmdDojoInit(args: string[]) {
   const useGit = args.includes('--git')
-  // First non-flag arg is the path (skip --git and --key value pairs)
-  const targetPath = args.find((a) => !a.startsWith('--'))
+  const gitFromIdx = args.indexOf('--git-from')
+  const gitFrom = gitFromIdx >= 0 ? args[gitFromIdx + 1] : undefined
+  if (gitFromIdx >= 0 && (!gitFrom || gitFrom.startsWith('--'))) {
+    console.error('--git-from requires a repository URL or path.')
+    process.exit(1)
+  }
+  if (useGit && gitFrom) {
+    console.error('Use either --git (fresh repo) or --git-from <repo> (clone existing), not both.')
+    process.exit(1)
+  }
+  // First non-flag arg is the path (skip --git, --key value pairs, and the --git-from value).
+  // When --git-from is absent, gitFromIdx is -1 — don't let -1+1=0 exclude the path at index 0.
+  const gitFromValueIdx = gitFromIdx >= 0 ? gitFromIdx + 1 : -1
+  const targetPath = args.find((a, idx) => !a.startsWith('--') && idx !== gitFromValueIdx)
   const dojoRoot = resolve(targetPath ?? '.')
   const jeanDir = resolve(dojoRoot, '.jean')
 
@@ -1092,6 +1104,10 @@ function cmdDojoInit(args: string[]) {
     if (!arg?.startsWith('--')) continue
     const key = arg.slice(2)
     if (key === 'git') continue // not a config key
+    if (key === 'git-from') {
+      i++ // takes a value, but the value is the repo (handled above), not a config key
+      continue
+    }
     const raw = args[i + 1]
     if (!raw || raw.startsWith('--')) {
       console.error(`Missing value for --${key}`)
@@ -1123,7 +1139,7 @@ function cmdDojoInit(args: string[]) {
   writeFileSync(resolve(jeanDir, 'context', 'readme.md'), SEED_CONTEXT_README)
 
   // Git repo
-  if (useGit) {
+  if (useGit || gitFrom) {
     const bareDir = resolve(jeanDir, '.bare')
     const gitOpts = { stdout: 'pipe' as const, stderr: 'pipe' as const }
     const gitCheck = (result: { exitCode: number; stderr: { toString(): string } }, label: string) => {
@@ -1132,14 +1148,25 @@ function cmdDojoInit(args: string[]) {
         process.exit(1)
       }
     }
-    gitCheck(Bun.spawnSync(['git', 'init', '--bare', bareDir], gitOpts), 'init --bare')
-    gitCheck(Bun.spawnSync(['git', '-C', bareDir, 'symbolic-ref', 'HEAD', 'refs/heads/main'], gitOpts), 'symbolic-ref')
-    // Initial commit with .gitignore (temp file — worktrees will have it via checkout)
-    writeFileSync(resolve(dojoRoot, '.gitignore'), '.jean/\n')
-    const env = { ...process.env, GIT_DIR: bareDir, GIT_WORK_TREE: dojoRoot }
-    gitCheck(Bun.spawnSync(['git', 'add', '.gitignore'], { ...gitOpts, env }), 'add')
-    gitCheck(Bun.spawnSync(['git', 'commit', '-m', 'Initial commit'], { ...gitOpts, env }), 'commit')
-    unlinkSync(resolve(dojoRoot, '.gitignore'))
+    if (gitFrom) {
+      // Wrap an existing repo: clone it bare. Preserves branches, history, the default
+      // HEAD, and the `origin` remote — the same shape as existing dojos,
+      // which were wired this way by hand. No initial commit (the repo already has
+      // history) and no HEAD override (keep the source's default branch).
+      gitCheck(Bun.spawnSync(['git', 'clone', '--bare', gitFrom, bareDir], gitOpts), `clone --bare ${gitFrom}`)
+    } else {
+      gitCheck(Bun.spawnSync(['git', 'init', '--bare', bareDir], gitOpts), 'init --bare')
+      gitCheck(
+        Bun.spawnSync(['git', '-C', bareDir, 'symbolic-ref', 'HEAD', 'refs/heads/main'], gitOpts),
+        'symbolic-ref',
+      )
+      // Initial commit with .gitignore (temp file — worktrees will have it via checkout)
+      writeFileSync(resolve(dojoRoot, '.gitignore'), '.jean/\n')
+      const env = { ...process.env, GIT_DIR: bareDir, GIT_WORK_TREE: dojoRoot }
+      gitCheck(Bun.spawnSync(['git', 'add', '.gitignore'], { ...gitOpts, env }), 'add')
+      gitCheck(Bun.spawnSync(['git', 'commit', '-m', 'Initial commit'], { ...gitOpts, env }), 'commit')
+      unlinkSync(resolve(dojoRoot, '.gitignore'))
+    }
     // Pre-populate the shared worktree exclude so every future agent worktree starts clean.
     ensureGitExclude(bareDir)
   }
@@ -1154,7 +1181,9 @@ function cmdDojoInit(args: string[]) {
   console.log()
   console.log(`  ${dojoRoot}/`)
   console.log(`    .jean/`)
-  if (useGit) {
+  if (gitFrom) {
+    console.log(`      .bare/           ${DIM}← bare clone of ${gitFrom}${RESET}`)
+  } else if (useGit) {
     console.log(`      .bare/           ${DIM}← git bare repo${RESET}`)
   }
   console.log(`      .claude/skills/  ${DIM}← shared dojo skills${RESET}`)
@@ -2272,9 +2301,10 @@ function printUsage() {
   console.log(`jean — multi-agent orchestration (v0.1.0)
 
 Commands:
-  jean dojo init [path] --port <N> [--git]    Initialize a new dojo
+  jean dojo init [path] --port <N> [--git | --git-from <repo>]    Initialize a new dojo
     --port <N>        Unique TCP port for this dojo's infra (required)
-    --git             Create a bare git repo at .jean/.bare/
+    --git             Create a fresh bare git repo at .jean/.bare/
+    --git-from <repo> Clone an existing repo (URL or local path) as .jean/.bare/ — wrap it
     --<key> <value>   Any config key (e.g. --slack.channel "#dev")
   jean dojo move <new-path>                   Move this dojo to a new location
   jean dojo start [agents...] [--only a,b,c]  Lay out current iTerm tab: infra | sensei | workers

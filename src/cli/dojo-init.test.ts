@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
@@ -112,5 +112,62 @@ describe('jean dojo init', () => {
     expect(stderr).toContain('--port <N> is required')
     // No scaffolding should have been left behind on a failed init.
     expect(existsSync(resolve(dojo, '.jean', 'jean.config.json'))).toBe(false)
+  })
+
+  test('--git-from clones an existing repo into .jean/.bare', () => {
+    // Build a throwaway source repo with one commit.
+    const src = resolve(tmp, 'source-repo')
+    mkdirSync(src, { recursive: true })
+    const git = (...a: string[]) => Bun.spawnSync(['git', '-C', src, ...a], { stdout: 'pipe', stderr: 'pipe' })
+    git('init', '-q')
+    writeFileSync(resolve(src, 'hello.txt'), 'hi\n')
+    git('add', 'hello.txt')
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'seed')
+
+    const dojo = resolve(tmp, 'dojo')
+    const { exitCode } = runInit(dojo, '--git-from', src, '--port', '8700')
+    expect(exitCode).toBe(0)
+
+    const bare = resolve(dojo, '.jean', '.bare')
+    expect(existsSync(bare)).toBe(true)
+
+    // It's a bare repo...
+    const isBare = Bun.spawnSync(['git', '-C', bare, 'rev-parse', '--is-bare-repository'], { stdout: 'pipe' })
+      .stdout.toString()
+      .trim()
+    expect(isBare).toBe('true')
+
+    // ...cloned from the source (origin preserved)...
+    const origin = Bun.spawnSync(['git', '-C', bare, 'remote', 'get-url', 'origin'], { stdout: 'pipe' })
+      .stdout.toString()
+      .trim()
+    expect(origin).toBe(src)
+
+    // ...with the source content present...
+    const tree = Bun.spawnSync(['git', '-C', bare, 'ls-tree', '-r', '--name-only', 'HEAD'], {
+      stdout: 'pipe',
+    }).stdout.toString()
+    expect(tree).toContain('hello.txt')
+
+    // ...and the worktree exclude primed, same as the --git path.
+    const exclude = readFileSync(resolve(bare, 'info', 'exclude'), 'utf8')
+    expect(exclude).toContain('.jean/')
+
+    // No spurious initial-commit .gitignore left in the dojo root.
+    expect(existsSync(resolve(dojo, '.gitignore'))).toBe(false)
+  })
+
+  test('rejects --git together with --git-from', () => {
+    const dojo = resolve(tmp, 'dojo')
+    const { exitCode, stderr } = runInit(dojo, '--git', '--git-from', resolve(tmp, 'src'), '--port', '8700')
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain('Use either --git')
+  })
+
+  test('errors when --git-from has no repository value', () => {
+    const dojo = resolve(tmp, 'dojo')
+    const { exitCode, stderr } = runInit(dojo, '--git-from', '--port', '8700')
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain('--git-from requires a repository')
   })
 })
