@@ -48,6 +48,7 @@ import {
   writeConfig,
 } from '../infra/config.ts'
 import { identityFromConfig, loadPeers, type Peer, savePeers } from '../infra/peers.ts'
+import { allocatePort, readRegistry, registryPath, removeDojo, upsertDojo } from '../infra/registry.ts'
 import {
   findDojoFrom,
   INFRA_IDENTITY,
@@ -1017,8 +1018,14 @@ async function cmdDojo(args: string[]) {
     case 'start':
       cmdDojoStart(args.slice(1))
       break
+    case 'list':
+      cmdDojoList()
+      break
+    case 'register':
+      cmdDojoRegister()
+      break
     default:
-      console.error('Usage: jean dojo <init|move|start> ...')
+      console.error('Usage: jean dojo <init|move|start|list|register> ...')
       process.exit(1)
   }
 }
@@ -1116,15 +1123,17 @@ function cmdDojoInit(args: string[]) {
     applyConfigEntry(config, key, raw)
     i++ // skip value
   }
-  // `port` is required and explicit. An auto-picked port is only correct at init
-  // time — a neighbor dojo that happens to be down during the scan would silently
-  // yield its port to the new dojo and collide when it restarts. Make the user pick.
-  if (config.port === undefined) {
-    console.error('--port <N> is required. Pick a unique TCP port for this dojo.')
-    console.error('Example: jean dojo init <path> --git --port 8700')
-    console.error('Each dojo on this machine must use a different port (8700, 8701, ...).')
+  // Resolve the port against the machine-global registry (~/.jean/dojos.json):
+  // auto-allocate the next free port when --port is omitted, or validate the
+  // chosen one. Safe because the registry knows down dojos too — they stay
+  // registered, so we never silently steal a stopped dojo's port.
+  const portResult = allocatePort(config.port, dojoRoot)
+  if ('error' in portResult) {
+    console.error(portResult.error)
     process.exit(1)
   }
+  const port = portResult.port
+  config.port = port
 
   // Core directories
   mkdirSync(resolve(jeanDir, 'playbooks'), { recursive: true })
@@ -1177,7 +1186,10 @@ function cmdDojoInit(args: string[]) {
 
   writeConfig(jeanDir, config)
 
-  console.log(`${GREEN}Dojo initialized at ${dojoRoot}${RESET}`)
+  // Record in the machine-global registry so future `jean dojo init` calls avoid this port.
+  upsertDojo({ path: dojoRoot, port, identity: config.identity })
+
+  console.log(`${GREEN}Dojo initialized at ${dojoRoot}${RESET} ${DIM}(port ${port})${RESET}`)
   console.log()
   console.log(`  ${dojoRoot}/`)
   console.log(`    .jean/`)
@@ -1197,6 +1209,41 @@ function cmdDojoInit(args: string[]) {
   console.log(`  jean satori            ${DIM}← guided setup (recommended)${RESET}`)
   console.log(`  jean agent add <name>  ${DIM}← or add agents manually${RESET}`)
   console.log(`  jean infra start       ${DIM}← then start infrastructure${RESET}`)
+}
+
+// ── jean dojo list / register (machine-global registry) ──────────
+
+function cmdDojoList() {
+  const entries = readRegistry()
+  console.log(`${DIM}registry: ${registryPath()}${RESET}`)
+  if (entries.length === 0) {
+    console.log('No dojos registered. Run `jean dojo register` in a dojo, or `jean infra start` (auto-registers).')
+    return
+  }
+  for (const e of [...entries].sort((a, b) => a.port - b.port)) {
+    const flags: string[] = []
+    if (!existsSync(e.path)) {
+      flags.push('STALE: path missing')
+    } else {
+      const cfg = readConfig(resolve(e.path, '.jean'))
+      if (cfg.port !== undefined && cfg.port !== e.port) flags.push(`DRIFT: config port is ${cfg.port}`)
+    }
+    const note = flags.length ? `  ${DIM}(${flags.join('; ')})${RESET}` : ''
+    console.log(`  ${e.port}  ${e.identity ?? '?'}  ${DIM}${e.path}${RESET}${note}`)
+  }
+}
+
+function cmdDojoRegister() {
+  const dojoRoot = findDojoRoot()
+  const cfg = readConfig(resolve(dojoRoot, '.jean'))
+  if (cfg.port === undefined) {
+    console.error(
+      `No port set in ${resolve(dojoRoot, '.jean', 'jean.config.json')}. Set one with: jean config set port <N>`,
+    )
+    process.exit(1)
+  }
+  upsertDojo({ path: dojoRoot, port: cfg.port, identity: cfg.identity })
+  console.log(`Registered ${cfg.identity ?? basename(dojoRoot)} (port ${cfg.port}) → ${registryPath()}`)
 }
 
 // ── Dojo move: relocate a dojo on disk ───────────────────────────
@@ -1248,6 +1295,15 @@ function cmdDojoMove(args: string[]) {
   // makes any posix_spawn fail with ENOENT. Rebase onto the new root before
   // touching worktrees or agent configs.
   if (process.cwd().startsWith(oldRoot)) process.chdir(newRoot)
+
+  // Repoint the machine-global registry at the new location (port/identity unchanged).
+  {
+    const movedConfig = readConfig(resolve(newRoot, '.jean'))
+    if (movedConfig.port !== undefined) {
+      upsertDojo({ path: newRoot, port: movedConfig.port, identity: movedConfig.identity })
+    }
+    removeDojo(oldRoot)
+  }
 
   // Discover agent worktrees by scanning for .jean/.jean-agent.json — we can't
   // use discoverAgents() yet because it calls `git worktree list`, which reads
@@ -2301,11 +2357,13 @@ function printUsage() {
   console.log(`jean — multi-agent orchestration (v0.1.0)
 
 Commands:
-  jean dojo init [path] --port <N> [--git | --git-from <repo>]    Initialize a new dojo
-    --port <N>        Unique TCP port for this dojo's infra (required)
+  jean dojo init [path] [--port <N>] [--git | --git-from <repo>]    Initialize a new dojo
+    --port <N>        TCP port for this dojo's infra (optional; auto-allocated from ~/.jean/dojos.json if omitted)
     --git             Create a fresh bare git repo at .jean/.bare/
     --git-from <repo> Clone an existing repo (URL or local path) as .jean/.bare/ — wrap it
     --<key> <value>   Any config key (e.g. --slack.channel "#dev")
+  jean dojo list                              Show all registered dojos and their ports (~/.jean/dojos.json)
+  jean dojo register                          Register the current dojo into ~/.jean/dojos.json
   jean dojo move <new-path>                   Move this dojo to a new location
   jean dojo start [agents...] [--only a,b,c]  Lay out current iTerm tab: infra | sensei | workers
                                               (macOS + iTerm2; current shell becomes the infra pane)

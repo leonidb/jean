@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, rmSync, unlinkSync, watch, writeFileSync } from 'node:fs'
-import { basename, resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { Cron } from 'croner'
 import {
@@ -92,6 +92,7 @@ import {
   triggerReducer,
   type WikiConsolidatedData,
 } from './reducers.ts'
+import { upsertDojo } from './registry.ts'
 import { shouldCatchUp } from './trigger-catchup.ts'
 
 const DATA_DIR = resolve(process.env.JEAN_DATA_DIR ?? '.')
@@ -999,6 +1000,12 @@ async function enforceSingleInstance(): Promise<void> {
 function writeRuntimeFiles() {
   writeFileSync(PORT_FILE, String(PORT))
   writeFileSync(PID_FILE, String(process.pid))
+  // Self-register into the machine-global dojo registry: lazy retrofit for dojos
+  // created before the registry existed, and drift-correction to the bound port.
+  // Guarded — the registry is a convenience and must never block infra start.
+  try {
+    upsertDojo({ path: dirname(DATA_DIR), port: PORT, identity: config.identity })
+  } catch {}
 }
 
 function cleanupRuntimeFiles() {

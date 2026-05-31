@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
+import { readRegistry } from '../infra/registry.ts'
 
 const CLI = resolve(import.meta.dir, 'jean.ts')
 
@@ -9,6 +10,10 @@ function runInit(target: string, ...args: string[]): { exitCode: number; stdout:
   const result = Bun.spawnSync(['bun', 'run', CLI, 'dojo', 'init', target, ...args], {
     stdout: 'pipe',
     stderr: 'pipe',
+    // Pass env explicitly so the child inherits the runtime-set JEAN_REGISTRY_PATH
+    // (Bun.spawnSync's default env does not pick up our beforeEach mutation) — keeps
+    // tests off the real ~/.jean/dojos.json.
+    env: { ...process.env },
   })
   const out = {
     exitCode: result.exitCode ?? -1,
@@ -24,12 +29,20 @@ function runInit(target: string, ...args: string[]): { exitCode: number; stdout:
 
 describe('jean dojo init', () => {
   let tmp: string
+  let prevReg: string | undefined
 
   beforeEach(() => {
     tmp = mkdtempSync(resolve(tmpdir(), 'jean-init-test-'))
+    // Point the machine-global registry at a throwaway file so init's port
+    // allocation never touches the real ~/.jean/dojos.json. The spawned CLI
+    // inherits this via process.env.
+    prevReg = process.env.JEAN_REGISTRY_PATH
+    process.env.JEAN_REGISTRY_PATH = resolve(tmp, 'dojos.json')
   })
 
   afterEach(() => {
+    if (prevReg === undefined) delete process.env.JEAN_REGISTRY_PATH
+    else process.env.JEAN_REGISTRY_PATH = prevReg
     rmSync(tmp, { recursive: true, force: true })
   })
 
@@ -105,13 +118,23 @@ describe('jean dojo init', () => {
     expect(existsSync(resolve(dojo, '.jean', '.bare'))).toBe(false)
   })
 
-  test('errors cleanly when --port is missing', () => {
+  test('auto-allocates a port when --port is omitted and records it in the registry', () => {
     const dojo = resolve(tmp, 'dojo')
-    const { exitCode, stderr } = runInit(dojo, '--git')
-    expect(exitCode).toBe(1)
-    expect(stderr).toContain('--port <N> is required')
-    // No scaffolding should have been left behind on a failed init.
-    expect(existsSync(resolve(dojo, '.jean', 'jean.config.json'))).toBe(false)
+    const { exitCode } = runInit(dojo, '--git')
+    expect(exitCode).toBe(0)
+    // Empty per-test registry → first free port.
+    const cfg = JSON.parse(readFileSync(resolve(dojo, '.jean', 'jean.config.json'), 'utf8'))
+    expect(cfg.port).toBe(8700)
+    expect(readRegistry().some((e) => e.port === 8700)).toBe(true)
+  })
+
+  test('rejects a --port already held by another registered dojo', () => {
+    const a = resolve(tmp, 'a')
+    const b = resolve(tmp, 'b')
+    expect(runInit(a, '--port', '8700').exitCode).toBe(0)
+    const second = runInit(b, '--port', '8700')
+    expect(second.exitCode).toBe(1)
+    expect(second.stderr).toContain('already registered')
   })
 
   test('--git-from clones an existing repo into .jean/.bare', () => {
