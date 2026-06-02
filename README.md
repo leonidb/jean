@@ -48,26 +48,19 @@ JEAN_BOARD=/path/to/your/dojo/.jean/board.json bun run src/infra/server.ts
 ```
 
 ### Connect an agent
-In the agent's worktree, create `.mcp.json`:
-```json
-{
-  "mcpServers": {
-    "jean": {
-      "command": "bun",
-      "args": ["run", "--cwd", "/path/to/jean/src/channel", "--shell=bun", "--silent", "start"],
-      "env": {
-        "JEAN_AGENT": "scratch",
-        "JEAN_INFRA_URL": "ws://127.0.0.1:8700/ws"
-      }
-    }
-  }
-}
-```
-
-Then start Claude with the channel:
+Register the Jean channel **once per machine** (writes a user-scope MCP server to `~/.claude.json`):
 ```bash
+jean setup
+```
+The channel server self-identifies per session from the agent worktree's `.jean-agent.json` (and walks up to the dojo root), so there's no per-worktree `.mcp.json` and no per-agent env to maintain.
+
+Then start an agent (this passes the channel flag + dir scoping for you):
+```bash
+jean agent start <name>
+# or manually:
 cd /path/to/worktree && claude --dangerously-load-development-channels server:jean
 ```
+> The `--dangerously-load-development-channels server:jean` flag is required while custom channels are a research preview — it tells Claude Code to load the `jean` channel that `jean setup` registered. New Claude Code (2.1.x) resolves it only from auto-discovered config (`~/.claude.json` user scope or a project `.mcp.json` in the launch cwd), **not** from `--mcp-config`.
 
 ### Send a message to an agent
 ```bash

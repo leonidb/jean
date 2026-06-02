@@ -159,17 +159,14 @@ work-dojo/                        ← dojo root
       projects/                   ← project context
   .bare/                          ← bare git clone (optional, for worktree agents)
   scratch/                        ← worker agent (git worktree)
-    .jean-agent.json              ← agent identity: name, role, tags
-    .mcp.json                     ← channel plugin config
+    .jean-agent.json              ← agent identity: name, role, tags (channel self-identifies from this)
     .claude/settings.local.json   ← permissions, stop hook
   review/                         ← worker agent (git worktree)
     .jean-agent.json
-    .mcp.json
     .claude/skills/review/        ← role-specific skill
     .claude/settings.local.json
   sensei/                         ← orchestrator (plain directory)
     .jean-agent.json
-    .mcp.json
     .claude/skills/jean-sensei/   ← orchestrator skill
     .claude/skills/context/       ← project context gateway skill
     .claude/settings.local.json
@@ -225,10 +222,12 @@ Discovery scans all subdirectories of the dojo root for `.jean-agent.json`. If `
 ### Starting an agent
 
 ```bash
+jean agent start scratch
+# or manually:
 cd scratch && claude --dangerously-load-development-channels server:jean
 ```
 
-The channel plugin reads `.jean-agent.json` and registers with the infrastructure service, including tags. Skills and stop hook load from `.claude/`.
+The channel server is registered once per machine in user scope (`~/.claude.json`, via `jean setup`); the `--dangerously-load-development-channels server:jean` flag tells Claude Code to load it (new CC resolves the channel only from auto-discovered config, not `--mcp-config`). On start the channel reads the worktree's `.jean-agent.json` for its identity (name, role, tags), walks up to the dojo root via the `.jean/jean.config.json` marker, and registers with that dojo's infrastructure service. Skills and stop hook load from `.claude/`.
 
 ### Two modes
 

@@ -36,6 +36,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, dirname, relative, resolve, sep } from 'node:path'
 import {
   CONFIG_SCHEMA,
@@ -58,7 +59,7 @@ import {
   writeRegistry,
 } from '../infra/registry.ts'
 import {
-  findDojoFrom,
+  findDojoRootFrom,
   INFRA_IDENTITY,
   isLocalInfraAlive,
   isProcessAlive,
@@ -81,7 +82,7 @@ const command = args[0]
  * Both now fail loudly.
  */
 function discoverInfraUrl(): string {
-  const root = findDojoFrom(process.cwd())
+  const root = findDojoRootFrom(process.cwd())
   if (!root) {
     console.error('Not inside a Jean dojo. cd into one first.')
     process.exit(1)
@@ -166,9 +167,55 @@ async function main() {
     case 'librarian':
       cmdLibrarian(args.slice(1))
       break
+    case 'setup':
+      cmdSetup()
+      break
     default:
       printUsage()
   }
+}
+
+// ── Setup ─────────────────────────────────────────────────────────
+//
+// One-time, machine-level: register the Jean channel as a user-scope MCP server
+// in ~/.claude.json. Channels are only resolvable by --dangerously-load-
+// development-channels from auto-discovered config (user/project), not from
+// --mcp-config — so this single global registration lets every dojo's agents
+// load the channel with no per-worktree .mcp.json. The server self-identifies
+// per session from the worktree's .jean-agent.json (no baked env), so one
+// registration serves all agents in all dojos.
+
+/** True if the Jean channel is registered as a user-scope MCP server in
+ *  ~/.claude.json (i.e. `jean setup` has been run on this machine). Agents
+ *  can only load `server:jean` when this is present. */
+function isChannelRegistered(): boolean {
+  try {
+    const cfg = JSON.parse(readFileSync(resolve(homedir(), '.claude.json'), 'utf8'))
+    return Boolean(cfg?.mcpServers?.jean)
+  } catch {
+    return false
+  }
+}
+
+function cmdSetup() {
+  const server = resolve(channelDir(), 'server.ts')
+  console.log(`Registering the Jean channel as a user-scope MCP server (~/.claude.json)...`)
+  // Idempotent: drop any prior registration first (ignore "not found").
+  Bun.spawnSync(['claude', 'mcp', 'remove', 'jean', '--scope', 'user'], { stdout: 'ignore', stderr: 'ignore' })
+  const r = Bun.spawnSync(['claude', 'mcp', 'add', 'jean', '--scope', 'user', '--', 'bun', server], {
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+  if (r.exitCode !== 0) {
+    console.error('Failed to register the channel server (claude mcp add).')
+    process.exit(1)
+  }
+  console.log(`\n${GREEN}Jean channel registered (user scope).${RESET}`)
+  console.log(`  server: bun ${server}`)
+  console.log(
+    `  ${DIM}Agents started via 'jean agent start' enable it with --dangerously-load-development-channels server:jean;`,
+  )
+  console.log(`  identity is derived per session from the worktree's .jean-agent.json — no per-agent config.${RESET}`)
 }
 
 // ── Librarian ─────────────────────────────────────────────────────
@@ -292,7 +339,7 @@ async function cmdPeek(args: string[]) {
   }
 
   // --since-last needs a caller dojo to store the cursor in.
-  const callerDojo = findDojoFrom(process.cwd())
+  const callerDojo = findDojoRootFrom(process.cwd())
   if (sinceLast && !callerDojo) {
     console.error('--since-last requires running from inside a dojo (cursor is stored there).')
     console.error('Either cd into a dojo, or use --since <id> with an explicit event id.')
@@ -1236,6 +1283,7 @@ function cmdDojoInit(args: string[]) {
   console.log(`      jean.config.json ${DIM}← configuration${RESET}`)
   console.log()
   console.log(`Next steps:`)
+  console.log(`  jean setup             ${DIM}← register the channel (once per machine)${RESET}`)
   console.log(`  jean satori            ${DIM}← guided setup (recommended)${RESET}`)
   console.log(`  jean agent add <name>  ${DIM}← or add agents manually${RESET}`)
   console.log(`  jean infra start       ${DIM}← then start infrastructure${RESET}`)
@@ -1293,10 +1341,11 @@ function cmdDojoPrune() {
 // ── Dojo move: relocate a dojo on disk ───────────────────────────
 
 /**
- * Move the current dojo to a new path, repairing git worktrees and rewriting
- * the only absolute path Jean bakes into agent config (JEAN_DOJO in
- * .jean/.mcp.json). Intended to keep a dojo move down to a single command —
- * critical-path for organizing command-center dojo layouts.
+ * Move the current dojo to a new path, repairing git worktrees. Jean bakes no
+ * absolute path into agent config (the channel server is user-scoped and agents
+ * self-identify from cwd), so a move is just relocate + `git worktree repair`.
+ * Intended to keep a dojo move down to a single command — critical-path for
+ * organizing command-center dojo layouts.
  */
 function cmdDojoMove(args: string[]) {
   const oldRoot = realpathSync(findDojoRoot())
@@ -1380,32 +1429,14 @@ function cmdDojoMove(args: string[]) {
     }
   }
 
-  // Rewrite JEAN_DOJO in every agent's .jean/.mcp.json — the only absolute path
-  // Jean bakes into agent config. Everything else (hook paths in
-  // settings.local.json, --add-dir args) is relative and survives the move.
-  const agents = discoverAgents(newRoot)
-  let rewrote = 0
-  for (const agent of agents) {
-    const mcpPath = resolve(agent.path, '.jean', '.mcp.json')
-    try {
-      const cfg = JSON.parse(readFileSync(mcpPath, 'utf8'))
-      const env = cfg?.mcpServers?.jean?.env
-      if (env && 'JEAN_DOJO' in env) {
-        env.JEAN_DOJO = newRoot
-        writeFileSync(mcpPath, `${JSON.stringify(cfg, null, 2)}\n`)
-        rewrote++
-      }
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code
-      if (code === 'ENOENT') continue
-      console.error(`Warning: failed to rewrite ${mcpPath}: ${(e as Error).message}`)
-    }
-  }
+  // No agent config to rewrite — Jean bakes no absolute path into a worktree.
+  // Each agent self-identifies from its .jean-agent.json (cwd-derived) and walks
+  // up to the dojo root; hook paths in settings.local.json and --add-dir args are
+  // all relative and survive the move.
 
   console.log(`${GREEN}Dojo moved${RESET}`)
   console.log(`  From: ${oldRoot}`)
   console.log(`  To:   ${newRoot}`)
-  console.log(`  Rewrote JEAN_DOJO in ${rewrote} agent config(s)`)
   if (process.cwd().startsWith(oldRoot)) {
     console.log()
     console.log(`${DIM}Your shell is still on the old path — cd to the new location.${RESET}`)
@@ -1727,7 +1758,7 @@ type AgentMeta = { name: string; tags: string[]; role: AgentRole }
 type AgentInfo = AgentMeta & { path: string; branch?: string }
 
 function findDojoRoot(): string {
-  const root = findDojoFrom(process.cwd())
+  const root = findDojoRootFrom(process.cwd())
   if (root) return root
   console.error('Not a Jean dojo. No .jean/ directory found.')
   console.error('Run this command from within a dojo tree.')
@@ -1822,14 +1853,18 @@ function channelDir(): string {
   return resolve(cliDir(), '..', 'channel')
 }
 
-/** Compute --add-dir and --mcp-config flags for agent launch */
+/** Compute --add-dir flags for agent launch. The channel's MCP server is
+ *  auto-discovered from the user-scope registration in ~/.claude.json (added
+ *  once per machine by `jean setup`), so the new CC's
+ *  --dangerously-load-development-channels can resolve `server:jean`; no
+ *  --mcp-config and no per-worktree .mcp.json needed. */
 function agentLaunchFlags(agentDir: string): string {
   const dojoRoot = findDojoRoot()
   const jeanDir = resolve(dojoRoot, '.jean')
   const relJean = relative(agentDir, jeanDir)
   const meta = readAgentMeta(agentDir)
   const role = meta?.role ?? 'worker'
-  return `--add-dir .jean --add-dir ${relJean} --add-dir ${relJean}/roles/${role} --mcp-config .jean/.mcp.json`
+  return `--add-dir .jean --add-dir ${relJean} --add-dir ${relJean}/roles/${role}`
 }
 
 function isWorktreeDirty(path: string): boolean {
@@ -1987,32 +2022,11 @@ function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
 function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: string[], dojoRoot: string) {
   writeAgentMeta(agentDir, { name, tags, role })
 
-  // .mcp.json → agentDir/.jean/ (loaded via --mcp-config flag, not auto-discovery)
-  const mcpPath = resolve(agentDir, '.jean', '.mcp.json')
-  if (!existsSync(mcpPath)) {
-    writeFileSync(
-      mcpPath,
-      `${JSON.stringify(
-        {
-          mcpServers: {
-            jean: {
-              command: 'bun',
-              args: ['run', '--cwd', channelDir(), '--shell=bun', '--silent', 'start'],
-              env: {
-                JEAN_AGENT: name,
-                JEAN_ROLE: role,
-                JEAN_DOJO: dojoRoot,
-              },
-            },
-          },
-        },
-        null,
-        2,
-      )}\n`,
-    )
-  } else {
-    console.log(`  ${DIM}Skipping .jean/.mcp.json (already exists)${RESET}`)
-  }
+  // No per-worktree .mcp.json. The channel server is registered ONCE per machine
+  // in user scope (~/.claude.json) via `jean setup`; the new CC's
+  // --dangerously-load-development-channels resolves `server:jean` from that
+  // auto-discovered config. The server self-identifies per session from this
+  // worktree's .jean-agent.json (written above) — no per-agent env, no path baked in.
 
   // settings.local.json → agentDir/.claude/ (Claude Code discovers from cwd)
   const relJean = relative(agentDir, resolve(dojoRoot, '.jean'))
@@ -2377,6 +2391,16 @@ function cmdAgentStart(name?: string) {
     return
   }
 
+  // Refuse to launch if the channel isn't registered for this machine — the
+  // `--dangerously-load-development-channels server:jean` flag below would
+  // resolve nothing and the agent would come up with no channel (no reply /
+  // memorize / register), silently. `jean setup` is a once-per-machine step.
+  if (!isChannelRegistered()) {
+    console.error('The Jean channel is not registered on this machine.')
+    console.error('Run it once per machine first: jean setup')
+    process.exit(1)
+  }
+
   // Refuse to spawn an agent into a dojo with no running infra. The channel
   // plugin would silently retry-loop while the agent's tools fail one by one
   // — confusing and easy to miss. The plugin's retry loop is for transient
@@ -2389,8 +2413,21 @@ function cmdAgentStart(name?: string) {
 
   console.log(`Starting agent "${name}" in ${agent.path}...`)
   const flags = agentLaunchFlags(agent.path).split(' ')
+  // Belt-and-suspenders identity: the channel server is registered globally with
+  // no per-agent env, so it self-identifies from the worktree's .jean-agent.json
+  // (cwd-derived). We ALSO pass identity explicitly here — Claude Code propagates
+  // its process env to the stdio MCP servers it spawns, and the channel reads
+  // these with priority over the file. So identity no longer hinges solely on the
+  // spawned server's cwd matching the worktree (an unguaranteed CC internal).
   const result = Bun.spawnSync(['claude', ...flags, '--dangerously-load-development-channels', 'server:jean'], {
     cwd: agent.path,
+    env: {
+      ...process.env,
+      JEAN_AGENT: name,
+      JEAN_ROLE: agent.role,
+      JEAN_DOJO: dojoRoot,
+      JEAN_AGENT_DIR: resolve(agent.path, '.jean'),
+    },
     stdin: 'inherit',
     stdout: 'inherit',
     stderr: 'inherit',

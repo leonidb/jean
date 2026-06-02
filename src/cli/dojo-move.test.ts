@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
@@ -32,7 +32,7 @@ describe('jean dojo move', () => {
     rmSync(tmp, { recursive: true, force: true })
   })
 
-  test('relocates the dojo, repairs worktrees, and rewrites JEAN_DOJO', () => {
+  test('relocates the dojo and repairs worktrees', () => {
     const oldRoot = resolve(tmp, 'old-dojo')
     expect(runJean(tmp, 'dojo', 'init', oldRoot, '--git', '--port', '8700').exitCode).toBe(0)
     expect(runJean(oldRoot, 'agent', 'add', 'worker1').exitCode).toBe(0)
@@ -45,9 +45,13 @@ describe('jean dojo move', () => {
     expect(existsSync(resolve(newRoot, '.jean'))).toBe(true)
     expect(existsSync(resolve(newRoot, 'worker1'))).toBe(true)
 
-    // JEAN_DOJO rewritten in agent MCP config (via realpath — `/var` → `/private/var` on macOS)
-    const mcp = JSON.parse(readFileSync(resolve(newRoot, 'worker1', '.jean', '.mcp.json'), 'utf8'))
-    expect(mcp.mcpServers.jean.env.JEAN_DOJO).toBe(realpathSync(newRoot))
+    // Agent identity survives the move — it lives in the worktree's .jean-agent.json
+    // (cwd-derived, no baked path), not in any MCP config. No .mcp.json is written:
+    // the old per-worktree config lived at <worktree>/.jean/.mcp.json, so guard THAT
+    // path (checking the worktree root would be vacuously true — it was never there).
+    expect(existsSync(resolve(newRoot, 'worker1', '.jean', '.mcp.json'))).toBe(false)
+    const meta = JSON.parse(readFileSync(resolve(newRoot, 'worker1', '.jean', '.jean-agent.json'), 'utf8'))
+    expect(meta.name).toBe('worker1')
 
     // Worktree gitdir repaired — `git status` from inside should work
     const status = Bun.spawnSync(['git', 'status'], {

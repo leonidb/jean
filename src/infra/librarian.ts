@@ -162,7 +162,9 @@ export function recoverWikiLayout(dojoRoot: string): { recovered: 'staging' | 'o
  *   <dojoRoot>/.jean/                          — dojo data
  *   <dojoRoot>/.jean/roles/<role>/             — working directory
  *   <dojoRoot>/.jean/roles/<role>/.claude/     — settings.local.json + skills/
- *   <dojoRoot>/.jean/.mcp.json                 — Jean MCP config (optional)
+ *
+ * (No .mcp.json — the headless librarian uses native Read/Edit/Write + Bash(curl),
+ * not the channel; no MCP server is loaded.)
  *
  * `--add-dir` is set for the dojo's `.jean/` (relative path from cwd) so
  * Claude can read the event log, peers, and other dojo state.

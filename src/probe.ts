@@ -51,11 +51,17 @@ export function isLocalInfraAlive(dataDir: string): boolean {
   return pid !== null && port !== null && isProcessAlive(pid)
 }
 
-/** Walk up from a starting directory looking for a dojo (a `.jean/` directory). */
-export function findDojoFrom(startDir: string): string | null {
-  let dir = startDir
+/**
+ * Walk up from a starting directory to the dojo root — the ancestor whose
+ * `.jean/` holds `jean.config.json`. Agent worktrees also have a `.jean/` (with
+ * `.jean-agent.json`, not `jean.config.json`), so a plain "first `.jean/`" walk
+ * would stop at the worktree; keying on the dojo config file skips worktrees.
+ * Shared by the CLI and the channel server so both resolve the root identically.
+ */
+export function findDojoRootFrom(startDir: string): string | null {
+  let dir = resolve(startDir)
   while (dir !== dirname(dir)) {
-    if (existsSync(resolve(dir, '.jean'))) return dir
+    if (existsSync(resolve(dir, '.jean', 'jean.config.json'))) return dir
     dir = dirname(dir)
   }
   return null

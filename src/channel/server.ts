@@ -18,23 +18,51 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { type AgentRole, type DeliverMsg, type ErrorMsg, isAgentRole, type RegisteredMsg } from '../infra/protocol.ts'
-import { findDojoFrom, readRuntimeFiles } from '../probe.ts'
+import { findDojoRootFrom, readRuntimeFiles } from '../probe.ts'
 import { buildInstructions, buildTools, formatInfraResponse, optionalString, resolveReplyTaskId } from './tools.ts'
 
-const AGENT_NAME = process.env.JEAN_AGENT ?? 'unnamed'
+/**
+ * Identity is delivered either by env (set per-launch by `jean agent start`) or,
+ * when the channel server is registered globally (one ~/.claude.json entry for all
+ * dojos), derived from the session: read `.jean-agent.json` from the worktree and
+ * walk up to the dojo root. Env wins per-field; the file fills the gaps — so both
+ * the per-launch-env and global-registration setups work from the same code.
+ */
+function sessionDir(): string {
+  return process.env.CLAUDE_PROJECT_DIR || process.cwd()
+}
+
+const FILE_META: { name?: string; role?: string; tags: string[] } = (() => {
+  const candidates = [process.env.JEAN_AGENT_DIR, resolve(sessionDir(), '.jean')].filter(Boolean) as string[]
+  for (const dir of candidates) {
+    try {
+      const file = resolve(dir, '.jean-agent.json')
+      if (existsSync(file)) {
+        const d = JSON.parse(readFileSync(file, 'utf8'))
+        return { name: d.name, role: d.role, tags: d.tags ?? [] }
+      }
+    } catch {}
+  }
+  return { tags: [] }
+})()
+
+const AGENT_NAME = process.env.JEAN_AGENT ?? FILE_META.name ?? 'unnamed'
 const AGENT_ROLE: AgentRole = ((): AgentRole => {
-  const raw = process.env.JEAN_ROLE ?? 'worker'
+  const raw = process.env.JEAN_ROLE ?? FILE_META.role ?? 'worker'
   if (isAgentRole(raw)) return raw
-  process.stderr.write(`[jean] JEAN_ROLE="${raw}" is not a known role — falling back to worker\n`)
+  process.stderr.write(`[jean] role "${raw}" is not a known role — falling back to worker\n`)
   return 'worker'
 })()
 
-/** Locate dojo root: JEAN_DOJO env var (validated) > walk up from cwd. */
+/** Locate dojo root: JEAN_DOJO env (validated against the same `jean.config.json`
+ *  marker the walk uses) > walk up from the session dir. The two branches must
+ *  agree on what a dojo root is, else a stale JEAN_DOJO pointing at a worktree
+ *  (which has a `.jean/` but no `jean.config.json`) would be wrongly accepted. */
 function discoverDojoRoot(): string | null {
-  if (process.env.JEAN_DOJO && existsSync(resolve(process.env.JEAN_DOJO, '.jean'))) {
+  if (process.env.JEAN_DOJO && existsSync(resolve(process.env.JEAN_DOJO, '.jean', 'jean.config.json'))) {
     return process.env.JEAN_DOJO
   }
-  return findDojoFrom(process.cwd())
+  return findDojoRootFrom(sessionDir())
 }
 
 const DOJO_ROOT = discoverDojoRoot()
@@ -76,19 +104,8 @@ async function writeSessionFile() {
   }
 }
 
-// Read tags from .jean/.jean-agent.json
-const AGENT_TAGS: string[] = (() => {
-  const candidates = [process.env.JEAN_AGENT_DIR, resolve(process.cwd(), '.jean')].filter(Boolean) as string[]
-  for (const dir of candidates) {
-    try {
-      const file = resolve(dir, '.jean-agent.json')
-      if (existsSync(file)) {
-        return JSON.parse(readFileSync(file, 'utf8')).tags ?? []
-      }
-    } catch {}
-  }
-  return []
-})()
+// Tags come from the same .jean-agent.json read as name/role (see FILE_META).
+const AGENT_TAGS: string[] = FILE_META.tags
 
 // ── MCP Server ─────────────────────────────────────────────────────
 
@@ -325,11 +342,20 @@ function connectToInfra() {
   try {
     const url = discoverInfraWsUrl()
     if (url === null) {
-      // No infra running for this dojo (or no dojo found). Don't fall back to
-      // a default port — that's how phantom cross-dojo registrations happen.
-      // Stay alive but not connected; retry when infra comes up.
+      if (!DOJO_ROOT) {
+        // No dojo for this session at all. With the channel registered
+        // machine-wide (user scope), this server is spawned in EVERY Claude
+        // session, including ones started outside any dojo. There's nothing to
+        // wait for here, so stay idle — do NOT enter the 2s reconnect loop
+        // (that would spin forever in every unrelated session on the machine).
+        process.stderr.write('[jean] no dojo for this session — channel idle, not connecting.\n')
+        return
+      }
+      // Dojo found but its infra isn't up yet. Don't fall back to a default
+      // port — that's how phantom cross-dojo registrations happen. Stay alive
+      // and retry; this is transient (infra will come up).
       process.stderr.write(
-        `[jean] no infra port for dojo ${DOJO_ROOT ?? '<unknown>'} — not connecting. Will retry; start infra with 'jean infra start'.\n`,
+        `[jean] no infra port for dojo ${DOJO_ROOT} — not connecting. Will retry; start infra with 'jean infra start'.\n`,
       )
       scheduleReconnect()
       return

@@ -14,6 +14,7 @@ Channels push events into a running Claude Code session from external sources. A
 - **Reply is unprompted**: The `reply` tool can be called by Claude at any time, not just in response to a channel message.
 - **`--channels` flag required**: No settings file equivalent. Must be passed at CLI launch. Hidden from `--help` (research preview).
 - **Custom channels**: Use `--dangerously-load-development-channels server:<name>` during research preview.
+- **(v2.1.160, 2026-06-02) Channels resolve only from auto-discovered MCP config**: `--dangerously-load-development-channels server:<name>` resolves the server from `~/.claude.json` (user scope) or a project `.mcp.json` in the launch cwd — **NOT** from a server injected via `--mcp-config`. Jean registers its channel once per machine in user scope (`jean setup` → `claude mcp add jean --scope user`) and the server self-identifies per session from the worktree's `.jean-agent.json`. (Earlier builds resolved `--mcp-config`-injected servers; the change silently broke every fresh agent start until the user-scope registration was adopted.)
 - **Auth**: Works on claude.ai Max plan. API key auth untested.
 
 ### How to test
@@ -76,17 +77,19 @@ Bun.serve({
 ```
 
 ### MCP configuration
-Channel plugins need an `.mcp.json` for Claude to know how to spawn them:
+Claude needs the channel registered as an MCP server in **auto-discovered** config (see the v2.1.160 note above — `--mcp-config` no longer works for channel resolution). Jean does this once per machine in user scope via `jean setup`:
+```bash
+claude mcp add jean --scope user -- bun /path/to/jean/src/channel/server.ts
+```
+which writes to `~/.claude.json`:
 ```json
 {
   "mcpServers": {
-    "jean": {
-      "command": "bun",
-      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
-    }
+    "jean": { "command": "bun", "args": ["/path/to/jean/src/channel/server.ts"] }
   }
 }
 ```
+No per-worktree `.mcp.json` and no per-agent env: the server self-identifies from the launch cwd's `.jean-agent.json` and finds the dojo by walking up to `.jean/jean.config.json`.
 
 ## Claude Code Stop Hook
 

@@ -202,9 +202,11 @@ describe('peek CLI integration', () => {
   })
 
   test('--since-last advances the cursor and subsequent peek is empty', () => {
-    // Set up caller as a dojo so cursor can persist
+    // Set up caller as a dojo so cursor can persist (the dojo root is the
+    // ancestor whose .jean/ holds jean.config.json — see findDojoRootFrom).
     const caller = resolve(tmp, 'caller')
     mkdirSync(resolve(caller, '.jean'), { recursive: true })
+    writeFileSync(resolve(caller, '.jean', 'jean.config.json'), '{}')
 
     const events = [
       ev(1, 'task-001', 'task-created', { title: 'T', description: '', queue: 'w' }),
