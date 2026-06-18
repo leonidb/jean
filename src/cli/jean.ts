@@ -213,9 +213,11 @@ function cmdSetup() {
   console.log(`\n${GREEN}Jean channel registered (user scope).${RESET}`)
   console.log(`  server: bun ${server}`)
   console.log(
-    `  ${DIM}Agents started via 'jean agent start' enable it with --dangerously-load-development-channels server:jean;`,
+    `  ${DIM}'jean agent start' loads it with --dangerously-load-development-channels server:jean and sets JEAN_AGENT;`,
   )
-  console.log(`  identity is derived per session from the worktree's .jean-agent.json — no per-agent config.${RESET}`)
+  console.log(
+    `  only launched agents (JEAN_AGENT set) register — role/tags come from the worktree's .jean-agent.json.${RESET}`,
+  )
 }
 
 // ── Librarian ─────────────────────────────────────────────────────
@@ -1982,7 +1984,7 @@ function addNew(name: string, role: AgentRole, tags: string[], useWorktree: bool
   console.log(`\nTo start:`)
   console.log(`  jean agent start ${name}`)
   console.log(
-    `\n${DIM}Or manually: cd ${name} && claude ${agentLaunchFlags(agentDir)} --dangerously-load-development-channels server:jean${RESET}`,
+    `\n${DIM}Or manually: cd ${name} && JEAN_AGENT=${name} claude ${agentLaunchFlags(agentDir)} --dangerously-load-development-channels server:jean${RESET}`,
   )
 }
 
@@ -2015,7 +2017,7 @@ function addExisting(targetPath: string, role: AgentRole, tags: string[]) {
   console.log(`\nTo start:`)
   console.log(`  jean agent start ${name}`)
   console.log(
-    `\n${DIM}Or manually: cd ${targetPath} && claude ${agentLaunchFlags(targetPath)} --dangerously-load-development-channels server:jean${RESET}`,
+    `\n${DIM}Or manually: cd ${targetPath} && JEAN_AGENT=${name} claude ${agentLaunchFlags(targetPath)} --dangerously-load-development-channels server:jean${RESET}`,
   )
 }
 
@@ -2413,12 +2415,15 @@ function cmdAgentStart(name?: string) {
 
   console.log(`Starting agent "${name}" in ${agent.path}...`)
   const flags = agentLaunchFlags(agent.path).split(' ')
-  // Belt-and-suspenders identity: the channel server is registered globally with
-  // no per-agent env, so it self-identifies from the worktree's .jean-agent.json
-  // (cwd-derived). We ALSO pass identity explicitly here — Claude Code propagates
-  // its process env to the stdio MCP servers it spawns, and the channel reads
-  // these with priority over the file. So identity no longer hinges solely on the
-  // spawned server's cwd matching the worktree (an unguaranteed CC internal).
+  // Identity via env is REQUIRED, not redundant: the channel registers a session
+  // into the dojo ONLY when JEAN_AGENT is set (see IS_LAUNCHED_AGENT in
+  // src/channel/server.ts). A `.jean-agent.json` file in the worktree is
+  // deliberately NOT sufficient — the channel is registered machine-wide, so any
+  // stray `claude`/`claude -p` whose cwd is this worktree would otherwise read the
+  // file and register as this agent, colliding with the real one. CC propagates
+  // this process env to the stdio MCP servers it spawns; the channel reads
+  // JEAN_AGENT/JEAN_ROLE/JEAN_DOJO from it (role/tags still fall back to the file).
+  // Do NOT drop JEAN_AGENT — without it the agent loads the channel but never registers.
   const result = Bun.spawnSync(['claude', ...flags, '--dangerously-load-development-channels', 'server:jean'], {
     cwd: agent.path,
     env: {

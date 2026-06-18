@@ -163,8 +163,14 @@ export function recoverWikiLayout(dojoRoot: string): { recovered: 'staging' | 'o
  *   <dojoRoot>/.jean/roles/<role>/             — working directory
  *   <dojoRoot>/.jean/roles/<role>/.claude/     — settings.local.json + skills/
  *
- * (No .mcp.json — the headless librarian uses native Read/Edit/Write + Bash(curl),
- * not the channel; no MCP server is loaded.)
+ * Headless runs are MCP-free BY DESIGN — for every role, not just the librarian.
+ * They use native Read/Edit/Write + Bash(curl) and talk to the dojo over HTTP,
+ * never via channel/MCP tools. We force `--strict-mcp-config` (with no
+ * `--mcp-config`) so NO MCP server loads; otherwise the globally-registered jean
+ * channel server (in ~/.claude.json, from `jean setup`) would load on every
+ * `claude` invocation and register this run into the dojo as an anonymous
+ * "unnamed" worker, producing hourly register/disconnect nudge noise. A headless
+ * trigger that needs dojo state reads/writes it with curl, not MCP tools.
  *
  * `--add-dir` is set for the dojo's `.jean/` (relative path from cwd) so
  * Claude can read the event log, peers, and other dojo state.
@@ -186,6 +192,11 @@ export function buildHeadlessCommand(opts: SpawnHeadlessOpts): string[] {
     // settings.local.json deny rules are still enforced; this flag only
     // bypasses the "ask the user" step, not the OS-level access controls.
     '--dangerously-skip-permissions',
+    // Headless = no MCP, by design, for ALL roles (not librarian-specific).
+    // --strict-mcp-config with no --mcp-config loads zero servers, so the global
+    // jean channel never loads and this run never registers as an "unnamed"
+    // worker (see the header comment above).
+    '--strict-mcp-config',
     ...(opts.model ? ['--model', opts.model] : []),
     // Claude Code requires --verbose alongside --output-format stream-json
     // when running with -p; without it the CLI rejects the combination.

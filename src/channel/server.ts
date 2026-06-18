@@ -47,6 +47,21 @@ const FILE_META: { name?: string; role?: string; tags: string[] } = (() => {
 })()
 
 const AGENT_NAME = process.env.JEAN_AGENT ?? FILE_META.name ?? 'unnamed'
+/** Register into a dojo ONLY when this session was deliberately launched as an
+ *  agent — signalled by the `JEAN_AGENT` env var, which only `jean agent start`
+ *  sets. A `.jean-agent.json` file in the cwd is deliberately NOT sufficient:
+ *  the channel is registered machine-wide (user scope), so it loads into EVERY
+ *  Claude process — and any stray `claude`/`claude -p` whose cwd happens to be
+ *  an agent worktree (an unrelated plugin's summariser, a manual shell, the
+ *  desktop app) would otherwise read that file, self-identify as the agent, and
+ *  flap duplicate-registration attempts against the real one. Requiring the env
+ *  var is the one enforceable signal that distinguishes an intended agent from
+ *  ambient context; we don't trust a file sitting in a folder. (FILE_META still
+ *  supplies role/tags for a launched agent; `--strict-mcp-config` on a caller's
+ *  side helps but can't be relied on — not every `claude -p` author passes it.)
+ *  Trade-off: an env-less manual `cd <worktree> && claude … server:jean` launch
+ *  no longer auto-registers — set `JEAN_AGENT` or use `jean agent start`. */
+const IS_LAUNCHED_AGENT = Boolean(process.env.JEAN_AGENT)
 const AGENT_ROLE: AgentRole = ((): AgentRole => {
   const raw = process.env.JEAN_ROLE ?? FILE_META.role ?? 'worker'
   if (isAgentRole(raw)) return raw
@@ -339,15 +354,24 @@ function sendToInfra(msg: object) {
 }
 
 function connectToInfra() {
+  // Not deliberately launched as an agent (no JEAN_AGENT env) → stay fully idle:
+  // never connect, never retry. Load-bearing guard for machine-wide registration:
+  // the channel loads into EVERY Claude process, so without this any stray
+  // `claude`/`claude -p` whose cwd is an agent worktree (an unrelated plugin's
+  // summariser, the desktop app, a manual shell) would read the worktree's
+  // `.jean-agent.json`, self-identify as that agent, and flap duplicate-register
+  // attempts against the real one. Only `jean agent start`-launched agents (which
+  // set JEAN_AGENT) proceed. A file in the folder is not enough — see IS_LAUNCHED_AGENT.
+  if (!IS_LAUNCHED_AGENT) {
+    process.stderr.write('[jean] not a launched agent (no JEAN_AGENT) — channel idle, not connecting.\n')
+    return
+  }
   try {
     const url = discoverInfraWsUrl()
     if (url === null) {
       if (!DOJO_ROOT) {
-        // No dojo for this session at all. With the channel registered
-        // machine-wide (user scope), this server is spawned in EVERY Claude
-        // session, including ones started outside any dojo. There's nothing to
-        // wait for here, so stay idle — do NOT enter the 2s reconnect loop
-        // (that would spin forever in every unrelated session on the machine).
+        // Named agent, but no dojo resolved (stale config). Nothing to wait
+        // for — stay idle rather than spin the 2s reconnect loop forever.
         process.stderr.write('[jean] no dojo for this session — channel idle, not connecting.\n')
         return
       }

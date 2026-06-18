@@ -21,7 +21,7 @@ function writeScript(path: string, body: string): string {
 }
 
 describe('buildHeadlessCommand', () => {
-  test('emits claude -p <prompt> with --add-dir and --mcp-config relative to role dir', () => {
+  test('emits claude -p <prompt> with --add-dir and no MCP (--strict-mcp-config) relative to role dir', () => {
     const argv = buildHeadlessCommand({
       dojoRoot: '/dojo',
       role: 'librarian',
@@ -35,8 +35,11 @@ describe('buildHeadlessCommand', () => {
     const addDirIdx = argv.indexOf('--add-dir')
     expect(argv[addDirIdx + 1]).toBe('../..')
     // Headless runs intentionally do NOT load MCP; the librarian uses
-    // native Read/Edit/Write/Bash. No --mcp-config in argv.
+    // native Read/Edit/Write/Bash. No --mcp-config in argv, and
+    // --strict-mcp-config forces zero MCP servers (ignoring the global
+    // jean channel registration) so the run never registers as a worker.
     expect(argv).not.toContain('--mcp-config')
+    expect(argv).toContain('--strict-mcp-config')
     // Permission UI bypassed — headless can't answer prompts, would stall.
     expect(argv).toContain('--dangerously-skip-permissions')
   })
