@@ -90,6 +90,21 @@ What **varies** per dojo (via playbook or project skill):
 
 A dojo can also use the library for purposes Jean didn't anticipate (a decisions log, an interviews library, lessons-from-incidents). Infra doesn't enforce; it surfaces.
 
+## Built-in provisioning — the librarian as infra
+
+The consolidation trigger is **infrastructure, not user content**, and must be provisioned and owned by Jean — never hand-authored by the sensei. Evidence: on 2026-06-02 a sensei asked to "make consolidation run" improvised a trigger with `kind: agent` instead of `kind: headless`; it fired into a void (no headless librarian was ever spawned — the librarian is headless/on-demand by design), and 13 sound memorize events sat unconsolidated. Anything an agent must *guess* at, it eventually gets wrong.
+
+The shape (sharpening the "Framework-default triggers" backlog item with that live failure — the fix is not "print a better command" but to take the trigger away from the agent entirely):
+
+- **`FRAMEWORK_TRIGGERS` registry** (analogous to `FRAMEWORK_SKILLS`) declares the infra triggers every wiki-having dojo needs, each with its *correct kind baked in*: `consolidate-wiki` (`kind: headless`, agent `librarian`, daily, model `sonnet`) and `wiki-sweep` (`kind: agent`, sensei, weekly).
+- **Config override** — a `librarian` block in `jean.config.json` (`enabled` / `cron` / `model`) overrides the defaults; the managed trigger is *regenerated from config*, never hand-edited. This is what makes it a configurable, built-in named trigger rather than a guess. (The flat `CONFIG_SCHEMA` in `config.ts` needs a small extension for nested/boolean keys.)
+- **Provision at `init`, reconcile on `infra start`** — init seeds the managed triggers; every `infra start` reconciles them against config (create missing, update drift, remove disabled). Zero-ceremony retrofit: existing dojos — and a dojo's currently-broken hand-made trigger — self-heal on next start, mirroring the dojo-registry's self-register pattern.
+- **`jean library consolidate`** — one-off headless consolidation on demand (clean surface over the headless spawn). **`jean trigger sync-defaults`** — explicit repair, like `sync-skills` / `sync-permissions`.
+- **Guardrails** — managed ids are reserved; `trigger remove` of a managed trigger redirects to `enabled:false`; `trigger list` marks `(managed)`. Validate `librarian.model` against the known set (reuse the headless-trigger model check).
+- **Sensei skill** — *remove* any "create the consolidation trigger" instruction; the sensei just knows consolidation is scheduled (config knob) and can `jean library consolidate` on demand. Retire `jean librarian setup` (which only *prints* the command) into `sync-defaults`.
+
+Different reliability profiles to respect: the headless `consolidate-wiki` spawns on demand so it never misses; the `kind: agent` `wiki-sweep` to an intermittently-running sensei inherits the missed-trigger-while-offline problem (see the "Missed-trigger replay" backlog item). Same mechanism, two profiles.
+
 ## Open
 
 - **Convention sub-kind in the librarian skill.** The current `consolidate-wiki` skill doesn't separately treat convention entries from domain entries. Whether it should (a schema hint, a separate index section) is open — the librarian may not need to know; the sensei skill alone may be enough.
