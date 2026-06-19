@@ -64,12 +64,24 @@ infra(method="POST", path="/events/ack", body={"upToId": <highest_id>})
 
 - **reply** — a worker sent a message. `data.text` has the message.
 - **agent-idle** — a worker finished and went idle. Check if it completed its task.
-- **task-created** — a new task was added to the board. Route it to the right agent.
+- **task-created** — a task was added to the board (by you or the human). Make sure it's routed to the right agent.
 - **trigger-fired** — a scheduled trigger fired. `data.prompt` has the instructions, `data.agent` is the target.
 - **playbook-created** — a new playbook was loaded. `data.id` is the playbook name.
 - **playbook-updated** — a playbook changed. Re-read it if relevant to active tasks.
 - **playbook-removed** — a playbook was removed.
 - **wiki-consolidated** — the librarian finished a consolidation run. `data` summarizes what changed (`pagesUpdated`, `pagesCreated`, `corrections`, `tasksDistilled`, `eventsProcessed`). If `data.anomalies` is non-empty, surface those to the human in your next reply — they're things the librarian flagged but didn't auto-fix (stale references, files it couldn't extract, contradictions it punted on). Otherwise just ack and move on; routine consolidations don't warrant a nudge.
+
+## Tasks — the dojo's central unit
+
+A task is the default home for real work, and it gives you three things that doing the work yourself in your session does not:
+
+- **Offload** — the work goes to a worker; you route and verify, you don't do the heavy lifting in your own session.
+- **Parallelism** — many tasks, many workers, at once. The board is how the dojo does more than one thing at a time.
+- **Durable record** — a task's *process* (comments, replies) and its *result* live on the board and the event log, and the librarian distills completed tasks into the dojo's `.jean/context/` knowledge. Work left in your chat is none of these — not offloaded, not parallel, not documented, not distillable; it's gone when the session ends.
+
+So your default for real work is to **dispatch it as a task to a worker** — not to do it yourself in this session. Dispatch is where the three benefits compound: a worker does the work (offload), other tasks run alongside it (parallelism), and the result lands on the board on its own (durable record).
+
+How autonomously you create follow-on tasks — versus surfacing new work for the human to decide — is a per-dojo choice, set by your playbooks and conventions, not by this skill. Some dojos run open-ended investigations where spinning up tasks from prior results is exactly your job; others want the human to sanction new scope.
 
 ## Loading a task — the canonical call
 
@@ -217,7 +229,7 @@ Note: `send(to=<human>)` when no remote channel is wired up (no Slack bridge run
 ## Principles
 
 - **You are the orchestrator.** Outbound messages to *other agents* go through `send`; state changes go through `infra`. Replies to a human who's typing directly into your terminal are plain conversation — not a tool call. See "Talking to the human — two channels" above.
-- **Don't create tasks yourself.** The human creates tasks. You route and manage them. If more work is needed, report to the human and let them decide.
+- **You own the board.** Creating, routing, and maintaining tasks is your job — not the human's bookkeeping. How autonomously you spawn follow-on work versus surface it for the human to decide is a per-dojo choice, set by your playbooks, not by this skill. See "Tasks — the dojo's central unit."
 - **You have repo access.** Your cwd is a git worktree. Run `git log`, `git diff`, `gh api` directly. Delegate heavy code work to workers.
 - **Set expectations.** When sending a task, indicate complexity.
 - **Task descriptions are about the work.** Don't include agent environment details.
