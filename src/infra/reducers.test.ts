@@ -28,6 +28,7 @@ import {
   taskStream,
   toApiEvent,
   triggerReducer,
+  type WikiConsolidatedData,
 } from './reducers.ts'
 
 function makeEvent(id: number, type: string, stream: string, data: unknown): StoredEvent {
@@ -282,6 +283,45 @@ describe('pendingReducer', () => {
     const state = pendingReducer([], e)
     expect(state.length).toBe(1)
     expect(state[0]?.type).toBe('trigger-fired')
+  })
+
+  test('headless trigger-fired does NOT add to pending (librarian runs are not sensei-actionable)', () => {
+    const e = makeEvent(1, 'trigger-fired', TRIGGERS_STREAM, {
+      triggerId: 'consolidate-wiki',
+      agent: 'librarian',
+      prompt: 'consolidate',
+      kind: 'headless',
+    } satisfies TriggerFiredData)
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(0)
+  })
+
+  test('wiki-consolidated with real work adds to pending (sensei should know it happened)', () => {
+    const e = makeEvent(1, 'wiki-consolidated', SYSTEM_STREAM, {
+      pagesUpdated: 2,
+      eventsProcessed: 5,
+    } satisfies WikiConsolidatedData)
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(1)
+    expect(state[0]?.type).toBe('wiki-consolidated')
+  })
+
+  test('wiki-consolidated with anomalies adds to pending', () => {
+    const e = makeEvent(1, 'wiki-consolidated', SYSTEM_STREAM, {
+      anomalies: ['stale reference on team-style.md'],
+    } satisfies WikiConsolidatedData)
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(1)
+  })
+
+  test('no-op wiki-consolidated does NOT add to pending (nothing changed, stay silent)', () => {
+    const e = makeEvent(1, 'wiki-consolidated', SYSTEM_STREAM, {
+      eventsProcessed: 3,
+      pagesCreated: 0,
+      pagesUpdated: 0,
+    } satisfies WikiConsolidatedData)
+    const state = pendingReducer([], e)
+    expect(state.length).toBe(0)
   })
 
   test('ignores unrelated events', () => {

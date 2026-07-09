@@ -382,11 +382,38 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
   switch (event.type) {
     case 'reply':
     case 'task-created':
-    case 'trigger-fired':
     case 'playbook-created':
     case 'playbook-updated':
     case 'playbook-removed':
       return [...state, event]
+
+    case 'trigger-fired': {
+      // Headless triggers (the librarian's consolidate-wiki run) are autonomous —
+      // fireTrigger delivers NOTHING to the sensei for them; the run handles itself.
+      // Their audit event must therefore NOT enter pending, or every scheduled firing
+      // nudges the sensei ("Events pending" → it checks the board → "nothing
+      // actionable"), pure noise. A non-headless trigger DOES deliver a prompt to an
+      // agent, so the sensei should stay aware of it — keep it in pending.
+      const d = event.data as TriggerFiredData
+      if (d.kind === 'headless') return state
+      return [...state, event]
+    }
+
+    case 'wiki-consolidated': {
+      // The librarian trigger is addressed to the librarian, so its FIRING never
+      // nudges the sensei (headless trigger-fired is dropped above). But a
+      // consolidation that actually DID something — changed pages, distilled tasks,
+      // applied corrections, or flagged anomalies — is worth the sensei knowing.
+      // A no-op run (processed events but changed nothing) stays silent.
+      const d = event.data as WikiConsolidatedData
+      const didWork =
+        (d.pagesCreated ?? 0) > 0 ||
+        (d.pagesUpdated ?? 0) > 0 ||
+        (d.corrections ?? 0) > 0 ||
+        (d.tasksDistilled ?? 0) > 0 ||
+        (d.anomalies?.length ?? 0) > 0
+      return didWork ? [...state, event] : state
+    }
 
     case 'task-comment': {
       const d = event.data as TaskCommentData

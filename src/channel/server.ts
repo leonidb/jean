@@ -143,6 +143,23 @@ type ToolResponse = {
   isError?: true
 }
 
+/** Error response for an outbound message that couldn't be delivered because the
+ *  infra socket is down. The channel auto-reconnects (see scheduleReconnect), so
+ *  a retry shortly may succeed; if it persists the agent must be reconnected.
+ *  This is what stops a disconnected agent from being told "Sent" when nothing
+ *  left the process. */
+function undelivered(kind: string): ToolResponse {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: `${kind} NOT delivered — the channel is not connected to infra (it may be reconnecting). Nothing was sent. Retry in a few seconds; if it keeps failing, this agent needs to be reconnected.`,
+      },
+    ],
+    isError: true,
+  }
+}
+
 async function callInfraTool(toolName: string, method: string, path: string, body?: unknown): Promise<ToolResponse> {
   const base = discoverInfraHttpBase()
   if (base === null) {
@@ -201,7 +218,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
     const taskId = resolveReplyTaskId(args, lastDeliverTaskId)
 
-    sendToInfra({ type: 'reply', from: AGENT_NAME, text: text.trim(), ...(taskId && { taskId }) })
+    if (!sendToInfra({ type: 'reply', from: AGENT_NAME, text: text.trim(), ...(taskId && { taskId }) })) {
+      return undelivered('Reply')
+    }
 
     return {
       content: [{ type: 'text' as const, text: `Sent to orchestrator${taskId ? ` (task ${taskId})` : ''}.` }],
@@ -217,7 +236,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         isError: true,
       }
     }
-    sendToInfra({ type: 'task-comment', from: AGENT_NAME, taskId, text })
+    if (!sendToInfra({ type: 'task-comment', from: AGENT_NAME, taskId, text })) {
+      return undelivered('Comment')
+    }
     return {
       content: [{ type: 'text' as const, text: `Comment recorded on task ${taskId}.` }],
     }
@@ -233,7 +254,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         isError: true,
       }
     }
-    sendToInfra({ type: 'send', from: AGENT_NAME, to, text, ...(taskId && { taskId }) })
+    if (!sendToInfra({ type: 'send', from: AGENT_NAME, to, text, ...(taskId && { taskId }) })) {
+      return undelivered('Message')
+    }
     return {
       content: [{ type: 'text' as const, text: `Sent to ${to}${taskId ? ` (task ${taskId})` : ''}.` }],
     }
@@ -345,12 +368,18 @@ function deliver(from: string, text: string, meta: Record<string, string> = {}) 
   })
 }
 
-function sendToInfra(msg: object) {
+/** Returns true if the message was put on the wire, false if it was dropped
+ *  because the infra socket isn't open. Callers that need the agent to know
+ *  whether its message actually went out (reply/comment/send) MUST check this —
+ *  otherwise a disconnected agent gets a false "sent" while the message is
+ *  silently dropped, and the orchestrator never hears from it. */
+function sendToInfra(msg: object): boolean {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg))
-  } else {
-    process.stderr.write(`[jean] not connected to infra, message dropped\n`)
+    return true
   }
+  process.stderr.write(`[jean] not connected to infra, message dropped\n`)
+  return false
 }
 
 function connectToInfra() {
