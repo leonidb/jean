@@ -23,14 +23,19 @@ import type { JeanConfig } from './config.ts'
  *  minus the wire `type` tag the bridge doesn't care about. */
 export type BridgeOutbound = { from: string; text: string }
 
-/** The two operations a bridge needs from the infra. The bridge calls these
- *  once it has resolved the surface's human-facing name (channel name / chat
- *  title) and is ready to carry traffic. */
+/** The operations a bridge needs from the infra. The bridge calls these once it
+ *  has resolved the surface's human-facing name (channel name / chat title) and
+ *  is ready to carry traffic. Persistence stays on the infra side — the bridge
+ *  owns the wire, not the dojo's filesystem. */
 export type BridgeHost = {
   /** Register the surface as a user-role agent whose deliver() is `send`. */
   register: (name: string, send: (msg: BridgeOutbound) => boolean) => void
   /** Record an inbound surface message as a `reply` on `name`'s stream. */
   onInbound: (name: string, text: string) => void
+  /** Persist an inbound binary attachment under the dojo; returns its absolute
+   *  path so the bridge can point the sensei at a file it can open (Claude Code
+   *  can Read images/PDFs/text). */
+  saveAttachment: (data: Uint8Array, filename: string) => string
 }
 
 export type Bridge = {
@@ -64,8 +69,11 @@ export function selectBridge(config: JeanConfig): Bridge | null {
 //
 // Bot API over plain fetch — no dependency, no public URL. Inbound arrives via
 // long-polling (`getUpdates` held open ~50s at a time); outbound is a POST to
-// `sendMessage`. The bot never receives its own messages back through
-// getUpdates, so there's no echo to filter beyond a defensive is_bot check.
+// `sendMessage`. Text goes straight through; photos and documents are pulled
+// down (getFile + download) and handed to the sensei as a saved file path it
+// can open — Claude Code can Read images, so screenshots/photos-of-text work.
+// The bot never receives its own messages back through getUpdates, so there's
+// no echo to filter beyond a defensive is_bot check.
 //
 // Setup: talk to @BotFather once (`/newbot`) for a token — seconds, no scopes,
 // no app manifest, no install — then message the bot / add it to a group and
@@ -76,6 +84,17 @@ export function selectBridge(config: JeanConfig): Bridge | null {
 // second concurrent poll gets 409 Conflict — so dojos can't share a token the
 // way they could a webhook. That's fine: a bot is far cheaper to mint than a
 // Slack app. A stray 409 (someone reused a token) surfaces in the log below.
+
+type TelegramMessage = {
+  chat?: { id?: number | string }
+  from?: { is_bot?: boolean }
+  text?: string
+  caption?: string
+  /** Compressed photo — multiple sizes, ascending; the last is the largest. */
+  photo?: Array<{ file_id: string }>
+  /** File sent uncompressed (image-as-file, PDF, …). */
+  document?: { file_id: string; file_name?: string }
+}
 
 function createTelegramBridge(botToken: string, chatId: string): Bridge {
   // Tracks the outcome of the most recent getUpdates so /status.bridge.connected
@@ -97,6 +116,20 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
       signal: AbortSignal.timeout(timeoutMs),
     })
     return (await res.json()) as { ok?: boolean; result?: unknown; description?: string }
+  }
+
+  // Download a Telegram file (photo/document) by file_id: getFile resolves a
+  // temporary file_path, then a plain GET fetches the bytes. Returns null if
+  // either step fails. The Bot API caps downloads at 20MB (fine for snaps).
+  const fetchFile = async (fileId: string): Promise<{ bytes: Uint8Array; name: string } | null> => {
+    const info = await call('getFile', { file_id: fileId }, 15_000)
+    const filePath = (info.result as { file_path?: string } | undefined)?.file_path
+    if (!info.ok || !filePath) return null
+    const res = await fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`, {
+      signal: AbortSignal.timeout(30_000),
+    })
+    if (!res.ok) return null
+    return { bytes: new Uint8Array(await res.arrayBuffer()), name: filePath.split('/').pop() ?? 'file' }
   }
 
   return {
@@ -132,6 +165,33 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
       })
 
       process.stderr.write(`[jean] telegram bridge started: ${name} (${chatId})\n`)
+
+      // Turn one inbound message into a reply for the sensei. Text passes
+      // straight through; a photo or document is downloaded, persisted under the
+      // dojo, and forwarded as a path the sensei can open. Anything else (voice,
+      // sticker, location) isn't forwarded yet — surface a caption if present so
+      // it doesn't vanish without a trace.
+      const deliverInbound = async (m: TelegramMessage) => {
+        if (m.text) {
+          host.onInbound(name, m.text)
+          return
+        }
+        const photo = m.photo?.[m.photo.length - 1]
+        const media = photo ?? m.document
+        if (media) {
+          const caption = m.caption ? ` — ${m.caption}` : ''
+          const file = await fetchFile(media.file_id)
+          if (!file) {
+            host.onInbound(name, `[attachment received but could not be downloaded]${caption}`)
+            return
+          }
+          const path = host.saveAttachment(file.bytes, m.document?.file_name ?? file.name)
+          host.onInbound(name, `[${photo ? 'image' : 'file'}] ${path}${caption}`)
+          return
+        }
+        if (m.caption) host.onInbound(name, m.caption)
+        else process.stderr.write('[jean] telegram: ignored unsupported message type\n')
+      }
 
       // Long-poll for inbound until the process exits. Runs off the startup path
       // (not awaited) so a bad token can't hang `jean infra start`.
@@ -179,16 +239,13 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
               continue
             }
             setHealth(true)
-            const updates = (res.result ?? []) as Array<{
-              update_id: number
-              message?: { chat?: { id?: number | string }; text?: string; from?: { is_bot?: boolean } }
-            }>
+            const updates = (res.result ?? []) as Array<{ update_id: number; message?: TelegramMessage }>
             for (const u of updates) {
               offset = u.update_id + 1
               const m = u.message
-              if (!m?.text || m.from?.is_bot) continue
+              if (!m || m.from?.is_bot) continue
               if (String(m.chat?.id) !== String(chatId)) continue
-              host.onInbound(name, m.text)
+              await deliverInbound(m)
             }
           } catch (e) {
             // Network blip or fetch timeout — back off briefly, then keep polling.

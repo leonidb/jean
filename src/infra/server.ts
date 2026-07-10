@@ -870,9 +870,13 @@ function watchPlaybooks() {
 
 // ── Chat bridge (Telegram / Slack, optional) ──────────────────────
 //
-// The bridge is a transport; the infra owns the two operations it needs — turn
-// an inbound surface message into a `reply` event, and register the surface as
-// a user-role agent it can deliver to. See src/infra/bridge.ts.
+// The bridge is a transport; the infra owns the operations it needs — turn an
+// inbound surface message into a `reply` event, register the surface as a
+// user-role agent it can deliver to, and persist inbound attachments under the
+// dojo so the bridge can point the sensei at a file it can open. See
+// src/infra/bridge.ts.
+
+const INBOX_DIR = resolve(DATA_DIR, 'inbox')
 
 async function initBridge() {
   if (!bridge) return
@@ -892,6 +896,13 @@ async function initBridge() {
     },
     onInbound: (name, text) => {
       void record('reply', agentStream(name), { agent: name, text } satisfies ReplyData)
+    },
+    saveAttachment: (data, filename) => {
+      mkdirSync(INBOX_DIR, { recursive: true })
+      const safe = filename.replace(/[^\w.-]/g, '_')
+      const dest = resolve(INBOX_DIR, `${Date.now()}-${safe}`)
+      writeFileSync(dest, data)
+      return dest
     },
   })
 }
