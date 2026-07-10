@@ -11,6 +11,11 @@ import { resolve } from 'node:path'
 export const CONFIG_SCHEMA: Record<string, 'string' | 'number'> = {
   port: 'number',
   identity: 'string',
+  // Telegram is the default chat bridge. Each dojo needs its own botToken
+  // (Telegram permits one getUpdates poller per token); chatId picks the chat.
+  'telegram.botToken': 'string',
+  'telegram.chatId': 'string',
+  // Slack (legacy) — needs its own app per dojo (Socket Mode can't be shared).
   'slack.appToken': 'string',
   'slack.botToken': 'string',
   'slack.channel': 'string',
@@ -22,6 +27,13 @@ export type JeanConfig = {
    *  peer messages and as the key under which other dojos register us. Set at
    *  `jean dojo init` (defaults to basename of dojo root) and rarely changed. */
   identity?: string
+  /** Telegram chat bridge (default). Each dojo runs its own bot — Telegram
+   *  permits one getUpdates poller per token, so tokens aren't shared. */
+  telegram?: {
+    botToken?: string
+    chatId?: string
+  }
+  /** Slack chat bridge (legacy — one app per dojo). */
   slack?: {
     appToken?: string
     botToken?: string
@@ -103,6 +115,11 @@ export function resolveConfig(dataDir: string): JeanConfig {
   if (process.env.JEAN_PORT) {
     const p = Number(process.env.JEAN_PORT)
     if (!Number.isNaN(p)) config.port = p
+  }
+  if (process.env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_CHAT_ID) {
+    config.telegram ??= {}
+    if (process.env.TELEGRAM_BOT_TOKEN) config.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN
+    if (process.env.TELEGRAM_CHAT_ID) config.telegram.chatId = process.env.TELEGRAM_CHAT_ID
   }
   if (process.env.SLACK_APP_TOKEN || process.env.SLACK_BOT_TOKEN || process.env.SLACK_CHANNEL) {
     config.slack ??= {}

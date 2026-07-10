@@ -4,6 +4,8 @@ import { parseConfigValue, validateConfigKey } from './config.ts'
 describe('CONFIG_SCHEMA', () => {
   test('validateConfigKey accepts known keys', () => {
     expect(validateConfigKey('port')).toBeNull()
+    expect(validateConfigKey('telegram.botToken')).toBeNull()
+    expect(validateConfigKey('telegram.chatId')).toBeNull()
     expect(validateConfigKey('slack.appToken')).toBeNull()
   })
 

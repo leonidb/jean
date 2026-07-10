@@ -2450,7 +2450,7 @@ Commands:
     --port <N>        TCP port for this dojo's infra (optional; auto-allocated from ~/.jean/dojos.json if omitted)
     --git             Create a fresh bare git repo at .jean/.bare/
     --git-from <repo> Clone an existing repo (URL or local path) as .jean/.bare/ — wrap it
-    --<key> <value>   Any config key (e.g. --slack.channel "#dev")
+    --<key> <value>   Any config key (e.g. --telegram.chatId "12345678")
   jean dojo list                              Show all registered dojos and their ports (~/.jean/dojos.json)
   jean dojo register                          Register the current dojo into ~/.jean/dojos.json
   jean dojo prune                             Drop registry entries whose dojo folder was deleted

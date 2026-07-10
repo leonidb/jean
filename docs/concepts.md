@@ -14,10 +14,10 @@ A framework for multi-agent execution where autonomous coding agents work in par
 
 ```
 ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-│ Agent A  │     │ Agent B  │     │ Agent C  │     │  Slack   │
+│ Agent A  │     │ Agent B  │     │ Agent C  │     │ Telegram │
 │ (scratch)│     │ (review) │     │(research)│     │ (user)   │
 │          │     │          │     │          │     │          │
-│ Jean     │     │ Jean     │     │ Jean     │     │ Bolt SDK │
+│ Jean     │     │ Jean     │     │ Jean     │     │ Bot API  │
 │ plugin   │     │ plugin   │     │ plugin   │     │          │
 └────┬─────┘     └────┬─────┘     └────┬─────┘     └────┬─────┘
      │                │                │                  │
@@ -53,7 +53,7 @@ A framework for multi-agent execution where autonomous coding agents work in par
               │    pending)    │
               │ - stop hook rx │
               │ - SSE stream   │
-              │ - Slack bridge │
+              │ - chat bridge  │
               └────────────────┘
 ```
 
@@ -82,7 +82,7 @@ A framework for multi-agent execution where autonomous coding agents work in par
 - Projections: board (task state) and pending (events for sensei to act on), derived from event stream
 - Stop hook receiver: agents' stop hooks signal here, forwarded to sensei
 - SSE endpoint: `GET /stream` for real-time event broadcast
-- Slack bridge: optional, registers Slack channel as a `user` role agent
+- Chat bridge: optional, registers an external surface as a `user` role agent. Transport-agnostic (`src/infra/bridge.ts`) — **Telegram is the default** (its own bot per dojo, since Telegram allows one `getUpdates` poller per token — but a bot is a seconds-long BotFather step, no app/scopes/URL), **Slack** is retained as a legacy option (one app per dojo — Socket Mode can't be shared, and far more setup)
 - No LLM — fast, reliable plumbing
 
 **Jean plugin** — installed per agent via `jean agent add`. Three things:
@@ -130,7 +130,7 @@ Channel push notification. Task descriptions, follow-up questions ("what's your 
 Passive. Agent works until it stops. Stop hook notifies infrastructure → infrastructure creates `agent-idle` event → sensei gets nudged → sensei pings agent via channel → agent replies naturally. The sensei is always the active party.
 
 ### Human → Sensei
-Slack messages (bridged as `user` role agent), CLI commands (`jean board`, `jean send`), or direct interaction (`jean peek sensei`).
+Chat-bridge messages (Telegram/Slack, bridged as `user` role agent), CLI commands (`jean board`, `jean send`), or direct interaction (`jean peek sensei`).
 
 ### Human → Agent
 Connect directly (`jean peek`) and interact. It's just a Claude session.
@@ -237,7 +237,7 @@ The channel server is registered once per machine in user scope (`~/.claude.json
 
 ### Task flow
 ```
-Human kicks task (via Slack or board)
+Human kicks task (via chat bridge or board)
   → Task added to board (inbox)
   → Orchestrator picks agent based on tags
   → Orchestrator pushes task to agent via channel
@@ -292,7 +292,7 @@ $ jean peek orchestrator
 | Agent start | User runs Claude with `--channels` flag. Skills/hook load from `.claude/`. |
 | Task routing | Sensei routes by agent tags, not by name or queue. |
 | State storage | Event-sourced (JSONL). Board and pending are projections. Snapshots for fast startup. |
-| External comms | Slack bridge: channel registered as `user` role agent. Optional. |
+| External comms | Chat bridge (Telegram default, Slack legacy): surface registered as `user` role agent. Optional. |
 | Project context | `.jean/context/` — live project data. Sensei reads, separate from skills. |
 | Dojo root | Identified by `.jean/` directory. `.bare/` optional (for worktree agents). |
 | UI | Building blocks: `jean peek`, `jean board`. Optional `jean ui` preset. |

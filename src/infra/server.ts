@@ -27,6 +27,7 @@ import {
 } from '../es/index.ts'
 import { INFRA_IDENTITY, type InfraInfo, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Board, canTransition, type TaskStatus } from './board.ts'
+import { type Bridge, selectBridge } from './bridge.ts'
 import { resolveConfig } from './config.ts'
 import {
   commitConsolidation,
@@ -100,10 +101,9 @@ const config = resolveConfig(DATA_DIR)
 const HISTORY_PATH = resolve(DATA_DIR, 'history.jsonl')
 const SNAPSHOT_DIR = DATA_DIR
 
-// Slack config (optional)
-const SLACK_APP_TOKEN = config.slack?.appToken
-const SLACK_BOT_TOKEN = config.slack?.botToken
-const SLACK_CHANNEL = config.slack?.channel
+// Chat bridge (Telegram / Slack, optional) — selected from config, wired at
+// startup by initBridge(). Null when no surface is configured.
+const bridge: Bridge | null = selectBridge(config)
 
 // ── Event store & projections ────────────────────────────────────
 
@@ -868,67 +868,32 @@ function watchPlaybooks() {
   process.stderr.write(`[jean] watching ${PLAYBOOKS_DIR} for changes\n`)
 }
 
-// ── Slack integration (optional) ─────────────────────────────────
+// ── Chat bridge (Telegram / Slack, optional) ──────────────────────
+//
+// The bridge is a transport; the infra owns the two operations it needs — turn
+// an inbound surface message into a `reply` event, and register the surface as
+// a user-role agent it can deliver to. See src/infra/bridge.ts.
 
-let slackConnected = false
-
-async function initSlack() {
-  if (!SLACK_APP_TOKEN || !SLACK_BOT_TOKEN || !SLACK_CHANNEL) return
-  // Capture into const so narrowed type survives across closures.
-  const channelId = SLACK_CHANNEL
-
-  const { App } = await import('@slack/bolt')
-  const app = new App({
-    token: SLACK_BOT_TOKEN,
-    appToken: SLACK_APP_TOKEN,
-    socketMode: true,
-  })
-
-  // Derive channel name for agent registry
-  let channelName = channelId
-  try {
-    const info = await app.client.conversations.info({ channel: channelId })
-    channelName = (info.channel as { name?: string })?.name ?? channelId
-  } catch {
-    /* use channel ID as fallback */
-  }
-
-  // Register Slack channel as an agent
-  agents.set(channelName, {
-    role: 'user',
-    idle: true,
-    tags: [],
-    deliver: (msg) => {
-      void app.client.chat.postMessage({
-        channel: channelId,
-        text: `*${msg.from}*: ${msg.text}`,
+async function initBridge() {
+  if (!bridge) return
+  await bridge.start({
+    register: (name, send) => {
+      agents.set(name, {
+        role: 'user',
+        idle: true,
+        tags: [],
+        deliver: (msg) => send({ from: msg.from, text: msg.text }),
       })
-      return true
+      void record('register', agentStream(name), {
+        agent: name,
+        role: 'user',
+        idle: true,
+      } satisfies RegisterData)
+    },
+    onInbound: (name, text) => {
+      void record('reply', agentStream(name), { agent: name, text } satisfies ReplyData)
     },
   })
-
-  // Listen for messages in the channel
-  app.message(async ({ message }) => {
-    const m = message as { channel?: string; text?: string; bot_id?: string; subtype?: string }
-    // Ignore bot messages (our own) and non-matching channels
-    if (m.bot_id || m.subtype) return
-    if (m.channel !== SLACK_CHANNEL) return
-    if (!m.text) return
-
-    void record('reply', agentStream(channelName), {
-      agent: channelName,
-      text: m.text,
-    } satisfies ReplyData)
-  })
-
-  await app.start()
-  slackConnected = true
-  process.stderr.write(`[jean] slack connected: #${channelName} (${SLACK_CHANNEL})\n`)
-  void record('register', agentStream(channelName), {
-    agent: channelName,
-    role: 'user',
-    idle: true,
-  } satisfies RegisterData)
 }
 
 // ── Port + single-instance enforcement ───────────────────────────
@@ -1724,8 +1689,8 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
         sensei: sensei ? { connected: true, idle: sensei.idle } : { connected: false },
         pendingEvents: pendingProjection.state.length,
         activeTriggers: triggerProjection.state.triggers.filter((t) => t.status === 'active').length,
-        slack: SLACK_APP_TOKEN
-          ? { configured: true, connected: slackConnected, channel: SLACK_CHANNEL }
+        bridge: bridge
+          ? { configured: true, kind: bridge.kind, connected: bridge.connected(), target: bridge.target }
           : { configured: false },
       })
     }
@@ -1911,7 +1876,7 @@ writeRuntimeFiles()
 process.stderr.write(`[jean] listening on port ${PORT} (data: ${DATA_DIR})\n`)
 
 void record('start', SYSTEM_STREAM, { port: PORT } satisfies StartData)
-await initSlack()
+await initBridge()
 
 // Start scheduled trigger jobs from projection state
 syncTriggerJobs()
