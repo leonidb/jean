@@ -29,6 +29,9 @@ import { INFRA_IDENTITY, type InfraInfo, probeInfra, readRuntimeFiles } from '..
 import { type Board, canTransition, type TaskStatus } from './board.ts'
 import { type Bridge, selectBridge } from './bridge.ts'
 import { resolveConfig } from './config.ts'
+import { resolveConnectors } from './connectors/config.ts'
+import { SourceQueue } from './connectors/queue.ts'
+import { createSourceConnector, sourceContext } from './connectors/source.ts'
 import {
   commitConsolidation,
   type LibrarianPhase,
@@ -913,6 +916,33 @@ async function initBridge() {
       return dest
     },
   })
+}
+
+// ── Source connectors (email/… → work queue, read-only) ───────────
+//
+// Read-only connectors whose inbound items land in a per-instance queue the
+// sensei triages on its own cadence (a dojo playbook decides what to do with
+// them — that's not the framework's job). Inert until a `role: source`
+// connector is configured. See src/infra/connectors/ and docs/connectors.md.
+
+async function initSources() {
+  for (const cfg of resolveConnectors(config).filter((c) => c.role === 'source')) {
+    const connector = createSourceConnector(cfg)
+    if (!connector) {
+      process.stderr.write(`[jean] source "${cfg.instance}" (${cfg.kind}): no implementation yet — skipped\n`)
+      continue
+    }
+    const queue = new SourceQueue(DATA_DIR, cfg.instance)
+    const attachDir = resolve(DATA_DIR, 'sources', cfg.instance, 'attachments')
+    const saveAttachment = (data: Uint8Array, name: string): string => {
+      mkdirSync(attachDir, { recursive: true })
+      const dest = resolve(attachDir, `${Date.now()}-${name.replace(/[^\w.-]/g, '_')}`)
+      writeFileSync(dest, data)
+      return dest
+    }
+    void connector.start(sourceContext(queue, saveAttachment))
+    process.stderr.write(`[jean] source started: ${cfg.instance} (${cfg.kind})\n`)
+  }
 }
 
 // ── Port + single-instance enforcement ───────────────────────────
@@ -1899,6 +1929,7 @@ process.stderr.write(`[jean] listening on port ${PORT} (data: ${DATA_DIR})\n`)
 
 void record('start', SYSTEM_STREAM, { port: PORT } satisfies StartData)
 await initBridge()
+await initSources()
 
 // Start scheduled trigger jobs from projection state
 syncTriggerJobs()
