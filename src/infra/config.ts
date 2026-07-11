@@ -39,7 +39,18 @@ export type JeanConfig = {
     botToken?: string
     channel?: string
   }
+  /** Per-instance connectors (email/slack/… into a dojo). Instance name is the
+   *  key; `kind` + `role` select the transport and its product role; the rest
+   *  are kind-specific settings. Parsed by `resolveConnectors`
+   *  (src/infra/connectors/config.ts). The flat `telegram`/`slack` keys above
+   *  are read as legacy bridge connectors for back-compat. See
+   *  docs/connectors.md. */
+  connectors?: Record<string, ConnectorEntry>
 }
+
+/** A raw connector entry as it appears in jean.config.json. `kind`/`role` are
+ *  loose here; `resolveConnectors` validates them against the known enums. */
+export type ConnectorEntry = { kind: string; role: string; [setting: string]: unknown }
 
 // ── Read/Write ──────────────────────────────────────────────────
 
