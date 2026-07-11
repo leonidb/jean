@@ -49,7 +49,8 @@ export const SEND_TOOL: Tool = {
   name: 'send',
   description:
     'Send a message to another agent or channel in the Jean system. ' +
-    'Use this for all agent-to-agent and agent-to-channel messaging, including replying to the human via the Slack channel. ' +
+    'Use this for all agent-to-agent and agent-to-channel messaging, including replying to the human via the chat bridge (Telegram/Slack). ' +
+    'To send files (screenshots, audio briefings, PDFs) to a chat surface, pass their absolute local paths in `attachments` — Telegram uploads them as photos/audio/documents by type; text-only surfaces ignore them. ' +
     'The `from` field is always set to your own agent name — you cannot spoof it.',
   inputSchema: {
     type: 'object',
@@ -57,6 +58,11 @@ export const SEND_TOOL: Tool = {
       to: { type: 'string', description: 'Target agent or channel name' },
       text: { type: 'string', description: 'Message body' },
       taskId: { type: 'string', description: 'Optional task ID to scope the message to a task' },
+      attachments: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Optional absolute local file paths to upload alongside the text (media surfaces only)',
+      },
     },
     required: ['to', 'text'],
   },

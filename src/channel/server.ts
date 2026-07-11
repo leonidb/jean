@@ -248,17 +248,30 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const to = optionalString(args, 'to')
     const text = optionalString(args, 'text')
     const taskId = optionalString(args, 'taskId')
+    const attachments = Array.isArray(args.attachments)
+      ? (args.attachments.filter((a) => typeof a === 'string' && a.length > 0) as string[])
+      : undefined
     if (!to || !text) {
       return {
         content: [{ type: 'text' as const, text: 'send requires non-empty `to` and `text`.' }],
         isError: true,
       }
     }
-    if (!sendToInfra({ type: 'send', from: AGENT_NAME, to, text, ...(taskId && { taskId }) })) {
+    if (
+      !sendToInfra({
+        type: 'send',
+        from: AGENT_NAME,
+        to,
+        text,
+        ...(taskId && { taskId }),
+        ...(attachments?.length && { attachments }),
+      })
+    ) {
       return undelivered('Message')
     }
+    const attachNote = attachments?.length ? ` with ${attachments.length} attachment(s)` : ''
     return {
-      content: [{ type: 'text' as const, text: `Sent to ${to}${taskId ? ` (task ${taskId})` : ''}.` }],
+      content: [{ type: 'text' as const, text: `Sent to ${to}${taskId ? ` (task ${taskId})` : ''}${attachNote}.` }],
     }
   }
 

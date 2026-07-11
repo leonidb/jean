@@ -54,6 +54,9 @@ export type SendMsg = {
   to: string
   text: string
   taskId?: string
+  /** Absolute local file paths to deliver alongside the text. Surfaces that
+   *  support media (Telegram) upload them; text-only surfaces ignore them. */
+  attachments?: string[]
 }
 
 // ── Infrastructure → Channel plugin ───────────────────────────────
@@ -64,6 +67,9 @@ export type DeliverMsg = {
   from: string
   text: string
   taskId?: string
+  /** Absolute local file paths to deliver alongside the text (media surfaces
+   *  upload them; the Claude-session transport ignores them). */
+  attachments?: string[]
 }
 
 /** Ack registration */
@@ -90,6 +96,7 @@ export type SendRequest = {
   from: string
   text: string
   taskId?: string
+  attachments?: string[]
 }
 
 /** POST /agent-idle — stop hook notification */

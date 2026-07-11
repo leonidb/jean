@@ -247,12 +247,19 @@ function deliverToAgent(agentName: string, msg: DeliverMsg): boolean {
 }
 
 /** Route a message to an agent: deliver, mark busy, record 'send' event. Shared by HTTP /send and WS 'send'. */
-async function routeSend(args: { from: string; to: string; text: string; taskId?: string }): Promise<boolean> {
+async function routeSend(args: {
+  from: string
+  to: string
+  text: string
+  taskId?: string
+  attachments?: string[]
+}): Promise<boolean> {
   const delivered = deliverToAgent(args.to, {
     type: 'deliver',
     from: args.from,
     text: args.text,
     taskId: args.taskId,
+    attachments: args.attachments,
   })
   if (delivered) {
     const entry = agents.get(args.to)
@@ -268,6 +275,7 @@ async function routeSend(args: { from: string; to: string; text: string; taskId?
     from: args.from,
     text: args.text,
     delivered,
+    ...(args.attachments?.length && { attachments: args.attachments }),
     ...(senderPeer && { senderRole: 'peer' as const, peerDescription: senderPeer.description }),
   } satisfies SendData)
   return delivered
@@ -886,7 +894,7 @@ async function initBridge() {
         role: 'user',
         idle: true,
         tags: [],
-        deliver: (msg) => send({ from: msg.from, text: msg.text }),
+        deliver: (msg) => send({ from: msg.from, text: msg.text, attachments: msg.attachments }),
       })
       void record('register', agentStream(name), {
         agent: name,
@@ -1263,6 +1271,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
           to: body.to,
           text: body.text,
           taskId: body.taskId,
+          attachments: body.attachments,
         })
         return Response.json({ delivered })
       })()
@@ -1855,9 +1864,11 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             // `from` comes from the WS session, never the wire — prevents spoofing.
             const from = ws.data.agent
             if (!from || !msg.to || !msg.text) break
-            routeSend({ from, to: msg.to, text: msg.text, taskId: msg.taskId }).catch((err) => {
-              process.stderr.write(`[jean] ws send from ${from} → ${msg.to} failed: ${err}\n`)
-            })
+            routeSend({ from, to: msg.to, text: msg.text, taskId: msg.taskId, attachments: msg.attachments }).catch(
+              (err) => {
+                process.stderr.write(`[jean] ws send from ${from} → ${msg.to} failed: ${err}\n`)
+              },
+            )
             break
           }
 

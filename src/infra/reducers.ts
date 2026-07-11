@@ -62,6 +62,8 @@ export type SendData = {
   from: string
   text: string
   delivered: boolean
+  /** Absolute local file paths delivered alongside the text (media surfaces). */
+  attachments?: string[]
   /** Present when the sender is a registered peer (another dojo's sensei).
    *  Recorded so sensei's skill can frame the message appropriately. */
   senderRole?: Extract<AgentRole, 'peer'>

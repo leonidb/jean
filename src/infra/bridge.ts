@@ -20,8 +20,10 @@
 import type { JeanConfig } from './config.ts'
 
 /** An outbound message headed for the surface. Mirrors the infra's DeliverMsg
- *  minus the wire `type` tag the bridge doesn't care about. */
-export type BridgeOutbound = { from: string; text: string }
+ *  minus the wire `type` tag the bridge doesn't care about. `attachments` are
+ *  absolute local file paths a media surface uploads; text-only surfaces
+ *  (Slack, for now) ignore them. */
+export type BridgeOutbound = { from: string; text: string; attachments?: string[] }
 
 /** The operations a bridge needs from the infra. The bridge calls these once it
  *  has resolved the surface's human-facing name (channel name / chat title) and
@@ -132,6 +134,47 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
     return { bytes: new Uint8Array(await res.arrayBuffer()), name: filePath.split('/').pop() ?? 'file' }
   }
 
+  // Pick the Telegram upload method + form field by extension. Only route to a
+  // specialized endpoint for formats Telegram actually accepts there — sendAudio
+  // wants MP3/M4A, sendVideo wants MP4, sendPhoto wants JPEG/PNG, GIFs go through
+  // sendAnimation. Everything else (wav, flac, mov, webm, pdf, …) falls to
+  // sendDocument, which accepts any file: it renders as a downloadable file
+  // rather than being bounced for a format mismatch. Guaranteed delivery beats
+  // inline rendering.
+  const uploadMethod = (path: string): { method: string; field: string } => {
+    const ext = (path.split('.').pop() ?? '').toLowerCase()
+    if (['jpg', 'jpeg', 'png'].includes(ext)) return { method: 'sendPhoto', field: 'photo' }
+    if (ext === 'gif') return { method: 'sendAnimation', field: 'animation' }
+    if (['mp3', 'm4a'].includes(ext)) return { method: 'sendAudio', field: 'audio' }
+    if (ext === 'mp4') return { method: 'sendVideo', field: 'video' }
+    return { method: 'sendDocument', field: 'document' }
+  }
+
+  // Upload one local file as multipart/form-data. Bun.file() streams the bytes
+  // without slurping the whole thing into memory. Returns Telegram's ack shape.
+  //
+  // SECURITY: `path` is whatever the sender named — there's no allowlist, so any
+  // caller that can reach the send path (a dojo agent, or a local process via the
+  // unauthenticated loopback POST /send) can upload any file the infra can read.
+  // That's acceptable ONLY because the destination is the owner's own private
+  // chat: it's not a new exfil primitive (a local caller already has the owner's
+  // file access). If this bridge is ever pointed at a SHARED/GROUP chat, this
+  // becomes a real local-file → third-party channel and needs a path allowlist.
+  const sendFile = async (path: string): Promise<{ ok?: boolean; description?: string }> => {
+    const file = Bun.file(path)
+    if (!(await file.exists())) return { ok: false, description: `file not found: ${path}` }
+    const { method, field } = uploadMethod(path)
+    const form = new FormData()
+    form.append('chat_id', chatId)
+    form.append(field, file, path.split('/').pop() ?? 'file')
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(60_000),
+    })
+    return (await res.json()) as { ok?: boolean; description?: string }
+  }
+
   return {
     kind: 'telegram',
     target: chatId,
@@ -150,17 +193,33 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
       }
 
       host.register(name, (msg) => {
-        // Plain text — deliberately no parse_mode. Sensei messages carry
-        // arbitrary characters (code, underscores, asterisks); Markdown parsing
-        // would reject unbalanced entities with a 400 and silently drop the
-        // message while we still report it sent. Reliability over cosmetics.
-        // Fire-and-forget (deliver() is synchronous), but a rejected POST is
-        // logged rather than lost without trace.
-        void call('sendMessage', { chat_id: chatId, text: `${msg.from}: ${msg.text}` }, 15_000)
-          .then((r) => {
+        // deliver() is synchronous, so the actual sends are fire-and-forget —
+        // but sequenced in an async IIFE so text lands before its attachments
+        // (the sensei composes "here's X" then the file). Failures are surfaced
+        // to the chat AND logged, never dropped silently.
+        void (async () => {
+          if (msg.text) {
+            // Plain text — deliberately no parse_mode. Sensei messages carry
+            // arbitrary characters (code, underscores, asterisks); Markdown
+            // parsing would 400 on unbalanced entities and silently drop it.
+            const r = await call('sendMessage', { chat_id: chatId, text: `${msg.from}: ${msg.text}` }, 15_000)
             if (!r.ok) process.stderr.write(`[jean] telegram send failed: ${r.description ?? 'unknown'}\n`)
-          })
-          .catch((e) => process.stderr.write(`[jean] telegram send error: ${e}\n`))
+          }
+          for (const path of msg.attachments ?? []) {
+            const r = await sendFile(path)
+            if (!r.ok) {
+              const base = path.split('/').pop() ?? path
+              process.stderr.write(`[jean] telegram upload failed (${path}): ${r.description ?? 'unknown'}\n`)
+              // Tell the human something went wrong rather than a file just not
+              // appearing — the same don't-lie-about-delivery principle.
+              void call(
+                'sendMessage',
+                { chat_id: chatId, text: `[couldn't send ${base}: ${r.description ?? 'error'}]` },
+                15_000,
+              )
+            }
+          }
+        })().catch((e) => process.stderr.write(`[jean] telegram outbound error: ${e}\n`))
         return true
       })
 
