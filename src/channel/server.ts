@@ -257,17 +257,41 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         isError: true,
       }
     }
-    if (
-      !sendToInfra({
-        type: 'send',
-        from: AGENT_NAME,
-        to,
-        text,
-        ...(taskId && { taskId }),
-        ...(attachments?.length && { attachments }),
+    // Send over HTTP (not the fire-and-forget WS) so we get the infra's
+    // `delivered` result back and can FAIL when the target doesn't exist — a
+    // hallucinated address must not read as a successful send.
+    const base = discoverInfraHttpBase()
+    if (base === null) return undelivered('Message')
+    let delivered = false
+    try {
+      const res = await fetch(`${base}/send`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          from: AGENT_NAME,
+          to,
+          text,
+          ...(taskId && { taskId }),
+          ...(attachments?.length && { attachments }),
+        }),
       })
-    ) {
-      return undelivered('Message')
+      delivered = ((await res.json()) as { delivered?: boolean }).delivered ?? false
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `send failed — request to infra errored: ${err}` }],
+        isError: true,
+      }
+    }
+    if (!delivered) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `NOT delivered to "${to}" — no agent or peer by that name is registered in this dojo (or it's offline). Nothing was sent. Check the name against \`GET /agents\` / \`jean peer list\` — "${to}" may be an address that doesn't exist.`,
+          },
+        ],
+        isError: true,
+      }
     }
     const attachNote = attachments?.length ? ` with ${attachments.length} attachment(s)` : ''
     return {
