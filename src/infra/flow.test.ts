@@ -512,3 +512,23 @@ describe('board persistence', () => {
     expect(board.tasks.some((t) => t.id === task.id && t.title === 'Persist me')).toBe(true)
   })
 })
+
+describe('undelivered notice', () => {
+  test('sending to an unknown target notifies the sender it was not delivered', async () => {
+    using sensei = await connectAgent(WS_URL, 'undeliv-sensei', 'sensei')
+
+    const res = await fetch(`${BASE}/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'nobody-here', from: 'undeliv-sensei', text: 'anyone home?' }),
+    })
+    expect(((await res.json()) as { delivered: boolean }).delivered).toBe(false)
+
+    // The sender's session gets an infra notice — not silence + a false "sent".
+    const notice = await waitForMessage(
+      sensei.messages,
+      (m): m is DeliverMsg => isDeliver(m) && m.from === 'infra' && m.text.includes('NOT delivered'),
+    )
+    expect(notice.text).toContain('nobody-here')
+  })
+})

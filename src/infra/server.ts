@@ -219,16 +219,17 @@ const peers = new Map<string, Peer>()
   const loaded = loadPeers(DATA_DIR)
   for (const [identity, peer] of Object.entries(loaded.peers)) {
     peers.set(identity, peer)
+    const peerDeliver = createPeerDeliver({
+      peer,
+      myIdentity: MY_IDENTITY,
+      peerName: identity,
+      onUndelivered: (sender, reason) => notifyUndelivered(sender, identity, reason),
+    })
     agents.set(identity, {
       role: 'peer',
       idle: true,
       tags: [],
-      deliver: (msg) =>
-        createPeerDeliver({ peer, myIdentity: MY_IDENTITY })({
-          from: msg.from,
-          text: msg.text,
-          taskId: msg.taskId,
-        }),
+      deliver: (msg) => peerDeliver({ from: msg.from, text: msg.text, taskId: msg.taskId }),
     })
   }
   if (peers.size > 0) {
@@ -247,6 +248,21 @@ function deliverToAgent(agentName: string, msg: DeliverMsg): boolean {
   const entry = agents.get(agentName)
   if (!entry) return false
   return entry.deliver(msg)
+}
+
+/** Push a delivery-failure notice back to the sender's session, so a silent drop
+ *  (unregistered/offline target, or a failed peer hop) is visible instead of the
+ *  sender believing the message was sent. Bypasses routeSend so a failed notice
+ *  can't recurse; no-ops when the sender isn't a locally-deliverable agent
+ *  (cli/api/unknown). */
+function notifyUndelivered(sender: string, target: string, reason: string): void {
+  const entry = agents.get(sender)
+  if (!entry) return
+  entry.deliver({
+    type: 'deliver',
+    from: 'infra',
+    text: `⚠️ Your message to "${target}" was NOT delivered — ${reason}. Nothing was sent. Check the name (jean agent list / jean peer list); the target's infra may be down.`,
+  })
 }
 
 /** Route a message to an agent: deliver, mark busy, record 'send' event. Shared by HTTP /send and WS 'send'. */
@@ -281,6 +297,12 @@ async function routeSend(args: {
     ...(args.attachments?.length && { attachments: args.attachments }),
     ...(senderPeer && { senderRole: 'peer' as const, peerDescription: senderPeer.description }),
   } satisfies SendData)
+  // Tell the sender when nothing was delivered — a missing/offline target must
+  // not look like a successful send (the peer HTTP hop reports its own async
+  // failures via createPeerDeliver's onUndelivered).
+  if (!delivered) {
+    notifyUndelivered(args.from, args.to, 'no agent or peer by that name is registered here, or it is offline')
+  }
   return delivered
 }
 

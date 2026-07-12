@@ -117,18 +117,25 @@ export function clearLivenessCache(key?: string): void {
 const PEER_TARGET_AGENT = 'sensei'
 
 /**
- * Returns a deliver function for AgentEntry.deliver. Fire-and-forget: returns
- * true once the POST is queued, false if we can't even find the peer's port
- * (peer clearly offline). Matches wsDeliver's sync-return contract — failures
- * mid-flight surface via the recorded send event's `delivered` flag, which
- * is a known limitation (see BACKLOG "Proper peer management" for the
- * WS-connection-bound upgrade that fixes this).
+ * Returns a deliver function for AgentEntry.deliver. Matches wsDeliver's
+ * sync-return contract: returns true once the POST is queued, false if we can't
+ * even find the peer's port (peer clearly offline). The POST itself is async, so
+ * a mid-flight failure (peer's infra up but /send errors, or the port is stale)
+ * can't flip that synchronous boolean — instead it's surfaced via `onUndelivered`,
+ * which lets the infra push a failure notice back to the *sender* so a peer hop
+ * that silently drops is visible rather than reported as sent.
  */
 export function createPeerDeliver(args: {
   peer: Peer
   myIdentity: string
+  /** The peer's identity — used only in the failure message. */
+  peerName?: string
+  /** Called (with the original sender + a reason) when the async POST fails, so
+   *  the infra can tell the sender their message didn't get through. */
+  onUndelivered?: (sender: string, reason: string) => void
 }): (msg: { from: string; text: string; taskId?: string }) => boolean {
-  const { peer, myIdentity } = args
+  const { peer, myIdentity, peerName, onUndelivered } = args
+  const label = peerName ?? 'the peer'
   return (msg) => {
     if (peer.origin.type !== 'local-path') return false
     const { port } = readRuntimeFiles(resolve(peer.origin.path, '.jean'))
@@ -142,7 +149,11 @@ export function createPeerDeliver(args: {
         text: msg.text,
         taskId: msg.taskId,
       }),
-    }).catch(() => {})
+    })
+      .then((res) => {
+        if (!res.ok) onUndelivered?.(msg.from, `${label}'s infra returned HTTP ${res.status}`)
+      })
+      .catch((e) => onUndelivered?.(msg.from, `couldn't reach ${label} (${e})`))
     return true
   }
 }
