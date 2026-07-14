@@ -927,8 +927,13 @@ async function initBridge() {
         idle: true,
       } satisfies RegisterData)
     },
-    onInbound: (name, text) => {
-      void record('reply', agentStream(name), { agent: name, text } satisfies ReplyData)
+    onInbound: (name, text, meta) => {
+      void record('reply', agentStream(name), {
+        agent: name,
+        text,
+        ...(meta?.sentAt && { sentAt: meta.sentAt }),
+        ...(meta?.sourceId && { sourceId: meta.sourceId }),
+      } satisfies ReplyData)
     },
     saveAttachment: (data, filename) => {
       mkdirSync(INBOX_DIR, { recursive: true })

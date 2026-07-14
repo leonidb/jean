@@ -43,6 +43,13 @@ export type TaskUpdatedData = {
 export type ReplyData = {
   agent: string
   text: string
+  /** When the HUMAN actually sent it (epoch ms) — distinct from the event's own
+   *  record-time. A burst arriving in one poll batch would otherwise collapse
+   *  onto a single record-time and lose its order. */
+  sentAt?: number
+  /** The source surface's own monotonic id (e.g. Telegram message_id), so
+   *  sequence survives delivery. */
+  sourceId?: string
 }
 
 /** Substantive comment on a task. Distinct from reply — curated, deliberate, surfaced via ?include=comments. Emitted by workers or by the sensei. */

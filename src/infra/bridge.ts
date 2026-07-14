@@ -29,11 +29,18 @@ export type BridgeOutbound = { from: string; text: string; attachments?: string[
  *  has resolved the surface's human-facing name (channel name / chat title) and
  *  is ready to carry traffic. Persistence stays on the infra side — the bridge
  *  owns the wire, not the dojo's filesystem. */
+/** Provenance for an inbound message. Without this, batched messages all collapse
+ *  onto the infra's record-time and their order is lost — a human writing a
+ *  sequence ("I'm at Apple" / "apple" / "the store I mean") arrives as an
+ *  undifferentiated pile. `sentAt` is when the *human* sent it; `sourceId` is the
+ *  surface's own monotonic id, so sequence survives delivery. */
+export type InboundMeta = { sentAt?: number; sourceId?: string }
+
 export type BridgeHost = {
   /** Register the surface as a user-role agent whose deliver() is `send`. */
   register: (name: string, send: (msg: BridgeOutbound) => boolean) => void
   /** Record an inbound surface message as a `reply` on `name`'s stream. */
-  onInbound: (name: string, text: string) => void
+  onInbound: (name: string, text: string, meta?: InboundMeta) => void
   /** Persist an inbound binary attachment under the dojo; returns its absolute
    *  path so the bridge can point the sensei at a file it can open (Claude Code
    *  can Read images/PDFs/text). */
@@ -90,6 +97,10 @@ export function selectBridge(config: JeanConfig): Bridge | null {
 type TelegramMessage = {
   chat?: { id?: number | string }
   from?: { is_bot?: boolean }
+  /** Telegram's own monotonic per-chat id — preserves order across a batch. */
+  message_id?: number
+  /** When the HUMAN sent it (epoch seconds), not when we recorded it. */
+  date?: number
   text?: string
   caption?: string
   /** Compressed photo — multiple sizes, ascending; the last is the largest. */
@@ -225,31 +236,27 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
 
       process.stderr.write(`[jean] telegram bridge started: ${name} (${chatId})\n`)
 
-      // Turn one inbound message into a reply for the sensei. Text passes
-      // straight through; a photo or document is downloaded, persisted under the
-      // dojo, and forwarded as a path the sensei can open. Anything else (voice,
+      // Resolve a message to the text the sensei will see — performing any (slow)
+      // attachment download. Deliberately does NOT emit: the caller decides when,
+      // so downloads can run in parallel while emission stays in arrival order.
+      // Text passes straight through; a photo/document is downloaded, persisted,
+      // and forwarded as a path the sensei can open. Anything else (voice,
       // sticker, location) isn't forwarded yet — surface a caption if present so
       // it doesn't vanish without a trace.
-      const deliverInbound = async (m: TelegramMessage) => {
-        if (m.text) {
-          host.onInbound(name, m.text)
-          return
-        }
+      const prepareInbound = async (m: TelegramMessage): Promise<string | null> => {
+        if (m.text) return m.text
         const photo = m.photo?.[m.photo.length - 1]
         const media = photo ?? m.document
         if (media) {
           const caption = m.caption ? ` — ${m.caption}` : ''
           const file = await fetchFile(media.file_id)
-          if (!file) {
-            host.onInbound(name, `[attachment received but could not be downloaded]${caption}`)
-            return
-          }
+          if (!file) return `[attachment received but could not be downloaded]${caption}`
           const path = host.saveAttachment(file.bytes, m.document?.file_name ?? file.name)
-          host.onInbound(name, `[${photo ? 'image' : 'file'}] ${path}${caption}`)
-          return
+          return `[${photo ? 'image' : 'file'}] ${path}${caption}`
         }
-        if (m.caption) host.onInbound(name, m.caption)
-        else process.stderr.write('[jean] telegram: ignored unsupported message type\n')
+        if (m.caption) return m.caption
+        process.stderr.write('[jean] telegram: ignored unsupported message type\n')
+        return null
       }
 
       // Long-poll for inbound until the process exits. Runs off the startup path
@@ -258,6 +265,12 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
         let offset = 0
         let primed = false // have we skipped the offline backlog yet?
         let wasHealthy: boolean | null = null
+        // Emission chain. Attachment downloads are started as each update arrives
+        // (so they run in PARALLEL and never stall the poll loop — a slow image
+        // used to block every message queued behind it), but items are emitted
+        // strictly in ARRIVAL ORDER, so a text can't overtake an image sent
+        // before it. Order must survive delivery; latency must not serialize.
+        let emit: Promise<void> = Promise.resolve()
         const setHealth = (ok: boolean, why?: string) => {
           healthy = ok
           if (ok === wasHealthy) return
@@ -304,7 +317,26 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
               const m = u.message
               if (!m || m.from?.is_bot) continue
               if (String(m.chat?.id) !== String(chatId)) continue
-              await deliverInbound(m)
+
+              // Start the (possibly slow) attachment fetch NOW — it runs while we
+              // keep polling. Failures resolve to null rather than rejecting, so a
+              // bad download can't poison the chain.
+              const prepared = prepareInbound(m).catch((e) => {
+                process.stderr.write(`[jean] telegram inbound prepare failed: ${e}\n`)
+                return null
+              })
+              // Provenance: the human's real send time + Telegram's monotonic id,
+              // so a burst of messages keeps its sequence instead of collapsing
+              // onto one record-time.
+              const meta = {
+                ...(typeof m.date === 'number' && { sentAt: m.date * 1000 }),
+                ...(m.message_id != null && { sourceId: String(m.message_id) }),
+              }
+              // Emit in arrival order, but don't block the poll loop on it.
+              emit = emit.then(async () => {
+                const text = await prepared
+                if (text !== null) host.onInbound(name, text, meta)
+              })
             }
           } catch (e) {
             // Network blip or fetch timeout — back off briefly, then keep polling.
