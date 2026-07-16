@@ -93,6 +93,8 @@ export type RegisterData = {
 
 export type NudgeData = {
   pendingCount: number
+  /** True when fired by the stall watchdog (bypassing the idle gate) rather than the normal idle-gated path. */
+  forced?: boolean
 }
 
 export type PermissionRequestData = {

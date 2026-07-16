@@ -354,6 +354,10 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
 
   broadcastSSE(event)
 
+  // Stall-watchdog clock: starts when pending becomes non-empty, clears when drained.
+  if (pendingProjection.state.length === 0) pendingSince = null
+  else pendingSince ??= Date.now()
+
   if (pendingProjection.state.length > sizeBefore) {
     nudgeSenseiIfIdle()
   }
@@ -403,11 +407,16 @@ function pendingByAgent(): Record<string, number> {
 
 // ── Sensei nudge ──────────────────────────────────────────────────
 
+// Stall-watchdog clock: when pending last went non-empty, or when the last
+// nudge (either kind) fired — whichever is later. Null while pending is empty.
+let pendingSince: number | null = pendingProjection.state.length > 0 ? Date.now() : null
+
 function nudgeSenseiIfIdle() {
   const sensei = findSensei()
   if (!sensei?.idle) return
   if (pendingProjection.state.length === 0) return
 
+  pendingSince = Date.now()
   sensei.idle = false
   sensei.deliver({
     type: 'deliver',
@@ -416,6 +425,43 @@ function nudgeSenseiIfIdle() {
   })
   void record('nudge', SYSTEM_STREAM, { pendingCount: pendingProjection.state.length } satisfies NudgeData)
 }
+
+// ── Stall watchdog ────────────────────────────────────────────────
+// A missed Stop hook leaves the sensei stuck at idle:false, which suppresses
+// every nudge above: pending grows and the dojo silently stalls (recurring on
+// live dojos — worst observed: a 3-hour stall behind five queued messages).
+// Stopgap until delivery is ungated from idle (BACKLOG: attention-management
+// redesign): when pending has sat non-empty for STALL_NUDGE_AFTER_MS with no
+// nudge fired, force one that ignores the idle flag. Quiet when healthy —
+// fires only while events are actually undrained, then re-arms for a full
+// window, so a wedged sensei gets one reminder per window, not a flood.
+
+const stallEnv = Number(process.env.JEAN_STALL_NUDGE_MS)
+const STALL_NUDGE_AFTER_MS = Number.isFinite(stallEnv) && stallEnv > 0 ? stallEnv : 10 * 60_000
+
+function fireStallWatchdog() {
+  const sensei = findSensei()
+  if (!sensei) return // nobody to wake; clock stays armed for when one connects
+  pendingSince = Date.now()
+  sensei.idle = false
+  const minutes = Math.max(1, Math.round(STALL_NUDGE_AFTER_MS / 60_000))
+  sensei.deliver({
+    type: 'deliver',
+    from: 'infra',
+    text: `Watchdog: events pending for over ${minutes} min. Check the board. (Sent regardless of your idle state — your Stop hook may have misfired.)`,
+  })
+  void record('nudge', SYSTEM_STREAM, {
+    pendingCount: pendingProjection.state.length,
+    forced: true,
+  } satisfies NudgeData)
+}
+
+setInterval(
+  () => {
+    if (pendingSince !== null && Date.now() - pendingSince >= STALL_NUDGE_AFTER_MS) fireStallWatchdog()
+  },
+  Math.min(STALL_NUDGE_AFTER_MS, 60_000),
+)
 
 // ── Trigger scheduler ───────────────────────────────────────────
 
