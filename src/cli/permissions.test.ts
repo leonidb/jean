@@ -47,6 +47,25 @@ describe('defaultPermissions', () => {
     }
   })
 
+  test('workspace asymmetry: sensei gets scoped Edit/Write allow, others get deny', () => {
+    const ws = resolve(DOJO, '.jean', 'workspace')
+
+    // Sensei is the workspace's only writer — scoped allow, no deny.
+    const sensei = defaultPermissions('sensei', DOJO)
+    expect(sensei.allow).toContain(`Edit(${ws}/**)`)
+    expect(sensei.allow).toContain(`Write(${ws}/**)`)
+    for (const rule of sensei.deny) {
+      expect(rule).not.toContain('workspace')
+    }
+
+    // Everyone else reads but never writes (workers, users, librarian).
+    for (const role of ['worker', 'user', 'librarian'] as const) {
+      const { deny } = defaultPermissions(role, DOJO)
+      expect(deny).toContain(`Edit(${ws}/**)`)
+      expect(deny).toContain(`Write(${ws}/**)`)
+    }
+  })
+
   test('librarian: gets Edit/Write allow, no deny on context (it IS the writer)', () => {
     const { allow, deny } = defaultPermissions('librarian', DOJO)
 

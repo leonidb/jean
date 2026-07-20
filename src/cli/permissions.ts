@@ -6,9 +6,10 @@
  * No Bash(curl:*) — agents should use the MCP tools, not raw curl.
  *
  * Returns both `allow` and `deny`. The deny list is path-aware (needs the dojo
- * root) and is the load-bearing rule for the wiki's read-write asymmetry: no
- * non-librarian agent may Edit/Write inside `.jean/context/**`. Reads are open;
- * direct writes go through memorize, not the file system.
+ * root) and is the load-bearing rule for two read-write asymmetries: the wiki
+ * (`.jean/context/**` — librarian writes, everyone else memorizes) and the
+ * workspace (`.jean/workspace/**` — sensei writes, everyone else reads). Reads
+ * are open everywhere.
  */
 
 import { resolve } from 'node:path'
@@ -30,6 +31,7 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
     // human-curated source material; librarian reads but never modifies
     // (Karpathy's immutability rule, Adaptation 9).
     const rawCtx = resolve(dojoRoot, '.jean', 'raw_context')
+    const librarianWs = resolve(dojoRoot, '.jean', 'workspace')
     return {
       allow: [
         'Read',
@@ -50,7 +52,10 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
         'Bash(ls:*)',
         'Bash(find:*)',
       ],
-      deny: [`Edit(${rawCtx}/**)`, `Write(${rawCtx}/**)`],
+      // raw_context/: human-curated source material, read-but-never-modify.
+      // workspace/: the librarian ignores it entirely (not read as authority,
+      // not rewritten) — the deny enforces the "ignores" half it could violate.
+      deny: [`Edit(${rawCtx}/**)`, `Write(${rawCtx}/**)`, `Edit(${librarianWs}/**)`, `Write(${librarianWs}/**)`],
     }
   }
 
@@ -58,7 +63,12 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
   // (headless Claude on the consolidate-wiki trigger) may write. Direct
   // edits would create state that can't be reproduced from the event log.
   // See docs/llm-wiki-design.md (Adaptation 5: read-write asymmetry).
+  // Workspace is sensei-managed: same asymmetry, different writer — the
+  // sensei gets a scoped Edit/Write allow (it otherwise has none, so
+  // workspace curation would prompt), everyone else gets a deny.
+  // See the context skill ("Where data lives").
   const ctx = resolve(dojoRoot, '.jean', 'context')
+  const ws = resolve(dojoRoot, '.jean', 'workspace')
   return {
     // mcp__jean__* covers all current + future Jean MCP tools (send, reply,
     // infra, memorize, recent_memories, ack, …). The channel plugin gates
@@ -68,9 +78,12 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string): Permissio
     // the server already exposes to this role's session.
     allow:
       role === 'sensei'
-        ? ['mcp__jean__*', 'Read', 'Glob', 'Grep', 'Bash(git:*)']
+        ? ['mcp__jean__*', 'Read', 'Glob', 'Grep', 'Bash(git:*)', `Edit(${ws}/**)`, `Write(${ws}/**)`]
         : ['mcp__jean__*', 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git:*)'],
-    deny: [`Edit(${ctx}/**)`, `Write(${ctx}/**)`],
+    deny:
+      role === 'sensei'
+        ? [`Edit(${ctx}/**)`, `Write(${ctx}/**)`]
+        : [`Edit(${ctx}/**)`, `Write(${ctx}/**)`, `Edit(${ws}/**)`, `Write(${ws}/**)`],
   }
 }
 

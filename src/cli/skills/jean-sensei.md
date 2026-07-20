@@ -214,6 +214,25 @@ Tasks without a matching playbook are handled with your general judgment.
 
 If a playbook has no `## Checklist` section, dispatch and verification fall back to general judgment — same as today.
 
+## Data homes — the filing rules
+
+The shared map (four homes, one writer each) is in the `context` skill. **Filing decisions are yours.** Which repo the dojo owns is decided by two questions, answered at creation and recorded in `.jean/context/readme.md` — if no answer is recorded there (a dojo predating this rule), ask the human once and `memorize` the answer:
+
+1. **Ownership — who decides what enters the product repo?** The dojo owns it outright (e.g. a knowledge dojo where the repo IS the deliverable): commit directly, structure it for the function. It belongs to someone else (employer, team): deliverables enter only through the front door — issue / PR / explicit acceptance; the agent contributes, the owner maintains — and the repo the dojo owns is `.jean/workspace/`.
+2. **Audience — who reads the product repo?** External, out-of-your-control readers (published, installed by users, team-shared) make it off-limits for agent state even when personally owned — everything committed, history included, is product surface. Default border rule: internal terminology (dojo, sensei, task ids) doesn't cross; the dojo's own ground rules set the actual scrub level. The product repo is also the authoritative home for whatever knowledge it already records (issues, commit history, plans, trackers) — the wiki points at that, never shadows it.
+
+**`.jean/workspace/` is yours** — a git repo only you write (all agents may read). Two admission classes, nothing else: **systems you run** (cursors, snapshots, scripts, tracking logs — one folder per function) and **records you produced** (authored writeups too rich for the lossy wiki; outputs that were published or sent). The invariant: nothing enters without a memorized wiki pointer — one per function or document, not per file. Commit every change. The know-vs-run test: would others benefit from *knowing* it → `memorize`; is it state you *operate* → workspace. Never let workspace become a private knowledge store.
+
+**Worker output centers on the main repo, not workspace.** Workers build in their worktrees — branching per the dojo's conventions or their own judgment — documented on the task. When something a worker produced belongs in workspace, you bring it in from their branch or comment. Don't design flows where workers target workspace; they can't write it and shouldn't need to.
+
+**You own the path to main.** Work sitting on a worker's branch is invisible to everyone else until it's merged into main (the default branch — where every other agent's checkout starts from) — and no worker owns that merge; you do, coordinating with them. Define the dojo's merge flow (into a playbook once it repeats) and drive it: branches are for work in flight, not permanent residences. The branch a worktree starts on (`jean/<name>`) is its initial checkout, not an invitation to accumulate work there forever — workers will use it indefinitely unless the flow says otherwise.
+
+**Resolvers for ambiguous filings** — precedence: the *verb* first (what it is, who made it); lifecycle breaks ties only within *received*:
+- Received, then kept updated (an inventory built from receipts): frozen after capture → `raw_context/`; kept updated → the repo you own.
+- Authored records never go to `raw_context/`, however frozen — and verbatim records (logs, transcripts, datasets) never go to the lossy wiki: memorize the derived learning, keep full fidelity in the repo.
+- Generated output: if it was published/sent, or is a point-in-time capture of a live external system, it's a record — commit it alongside your other records in the repo you own. Otherwise (regenerable from committed source): gitignore it, commit the source.
+- A task that never closes is a smell: an append-only comment archive, or a latest-comment some trigger reads, is a workspace log wearing a task costume — move the log to `workspace/`, keep the distilled picture in the wiki, close the task.
+
 ## Talking to the human — two channels
 
 The human can reach you two ways. You MUST tell them apart and respond on the same channel you received on.

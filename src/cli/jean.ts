@@ -1139,6 +1139,63 @@ Agents read everything in this directory when orienting.
 Add more files alongside this one as the project's context grows.
 `
 
+const WORKSPACE_README = `# Workspace — the sensei's own repo
+
+Sensei-only writes; all agents may read. Two admission classes, nothing else:
+- Systems the sensei runs (cursors, snapshots, scripts) — one folder per function.
+- Records the sensei wrote (writeups too rich for the lossy wiki).
+
+Nothing lives here without a memorized wiki pointer. Commit every change.
+See the \`context\` skill ("Where data lives") for the full model.
+`
+
+/** Create `.jean/workspace/` as a git repo of its own (sensei-only writes; see
+ *  the context skill's data-homes model). No-ops when `workspace/.git` already
+ *  exists; does not repair a partially-created workspace beyond that. All git
+ *  failures are non-fatal (the folder still works as a home; history is what's
+ *  lost) but warned loudly — a silent historyless workspace would recreate the
+ *  exact fragility the model exists to prevent. */
+function ensureWorkspace(jeanDir: string): void {
+  const workspaceDir = resolve(jeanDir, 'workspace')
+  mkdirSync(workspaceDir, { recursive: true })
+  if (existsSync(resolve(workspaceDir, '.git'))) return
+  const gitOpts = { stdout: 'pipe' as const, stderr: 'pipe' as const }
+  const warn = (label: string, result: { stderr: { toString(): string } }) =>
+    console.error(`warning: workspace git ${label} failed (${result.stderr.toString().trim()})`)
+  const init = Bun.spawnSync(['git', 'init', '--initial-branch=main', workspaceDir], gitOpts)
+  if (init.exitCode !== 0) {
+    warn('init', init)
+    return
+  }
+  if (!existsSync(resolve(workspaceDir, 'README.md'))) {
+    writeFileSync(resolve(workspaceDir, 'README.md'), WORKSPACE_README)
+  }
+  // -A: a pre-existing (bare-folder) workspace gets its files into history too,
+  // not just the README. Inline identity so the commit never depends on global
+  // git config (a fresh machine without user.email would silently fail here).
+  const add = Bun.spawnSync(['git', '-C', workspaceDir, 'add', '-A'], gitOpts)
+  if (add.exitCode !== 0) {
+    warn('add', add)
+    return
+  }
+  const commit = Bun.spawnSync(
+    [
+      'git',
+      '-C',
+      workspaceDir,
+      '-c',
+      'user.name=jean',
+      '-c',
+      'user.email=jean@localhost',
+      'commit',
+      '-m',
+      'workspace: initial commit',
+    ],
+    gitOpts,
+  )
+  if (commit.exitCode !== 0) warn('commit', commit)
+}
+
 function cmdDojoInit(args: string[]) {
   const useGit = args.includes('--git')
   const gitFromIdx = args.indexOf('--git-from')
@@ -1208,6 +1265,10 @@ function cmdDojoInit(args: string[]) {
 
   // Seed context so agents have a starting document to read and extend.
   writeFileSync(resolve(jeanDir, 'context', 'readme.md'), SEED_CONTEXT_README)
+
+  // Sensei's workspace (own git repo) — the maintained-state home beyond
+  // wiki/raw_context. See the context skill ("Where data lives").
+  ensureWorkspace(jeanDir)
 
   // Git repo
   if (useGit || gitFrom) {
@@ -1281,6 +1342,7 @@ function cmdDojoInit(args: string[]) {
   console.log(`      roles/           ${DIM}← role-specific skills${RESET}`)
   console.log(`      playbooks/       ${DIM}← flow definitions${RESET}`)
   console.log(`      context/         ${DIM}← shared project context${RESET}`)
+  console.log(`      workspace/       ${DIM}← sensei's own repo (state + records)${RESET}`)
   console.log(`      sessions/        ${DIM}← agent session handles${RESET}`)
   console.log(`      jean.config.json ${DIM}← configuration${RESET}`)
   console.log()

@@ -1,36 +1,36 @@
 ---
 name: context
 description: >
-  How to use this dojo's persistent knowledge layer at `.jean/context/`. Read
-  it on session start; navigate via `index.md`; record durable knowledge by
-  emitting `memorize` events; never edit the wiki directly. Loaded by sensei
-  and workers.
+  The reading map of where data lives in a dojo — four homes (raw_context /
+  wiki / the repo the dojo owns / the task), one writer each — and how to use
+  the persistent knowledge wiki at `.jean/context/`. Read on session start;
+  navigate via `index.md`; record durable knowledge via `memorize`; never
+  edit the wiki directly. Loaded by sensei and workers.
 ---
 
-# Wiki — `.jean/context/`
+# Where data lives — and the wiki
 
 This dojo has a persistent knowledge wiki at `.jean/context/`. It accumulates across sessions: lessons learned, conventions, decisions, durable context that future agents (and you) need.
 
 You **read** it freely. You **never edit it directly** — `Edit` and `Write` on `.jean/context/**` are denied at the permission layer. New knowledge enters via `memorize` events; corrections enter via `memorize` events; the librarian (a separate headless process on a nightly trigger) does the actual writing during consolidation.
 
-## Wiki vs Repo — what goes where
+The wiki is one of **four homes** data lives in. Here is the whole map:
 
-This is the question to ask first when you have something to record.
+## The reading map — four homes
 
-| Goes in repo (committed code/docs) | Goes in wiki (`.jean/context/`) |
-|---|---|
-| Code, configs, schemas, package.json | Process notes, decisions, learnings |
-| README, public-facing docs, ADRs | "We tried X, it didn't work because Y" |
-| Issues / roadmap items others read | "Tomorrow check whether Z is still relevant" |
-| Stable design decisions affecting public API | Decisions about *how we work* (priorities, postponements) |
+| home | what it holds | written by |
+|---|---|---|
+| `.jean/raw_context/` | Frozen captures — received documents, self-captured raw. Immutable once captured; the librarian's input; the dojo's evidence-of-record. | nobody (frozen) — anyone may add new captures |
+| wiki (`.jean/context/`) | Distilled durable knowledge — learnings, conventions, decisions, pointers. Lossy by design: the librarian summarizes. | librarian only — everyone contributes via `memorize` |
+| the repo the dojo owns | Full-fidelity durable material — systems run on a rhythm, records too rich for the lossy wiki. In some dojos this is the product repo itself (the repo the dojo works on); in others it's `.jean/workspace/`, the sensei's own git repo. `.jean/context/readme.md` says which. | workspace: sensei only · product repo: everyone, via git |
+| the task | Working material for the current dispatch — comments, branch work. Ephemeral (with `/tmp`): dies with the task; anything durable must be promoted to a durable home before it closes, or it's lost. | the dispatched worker (comments), the sensei (state) |
 
-**Default to wiki** for working/process notes. **Promote to repo** only when content is stable, polished, and relevant to people outside this dojo (contributors, users, future maintainers).
+Everything is readable by everyone; each home has one writer. Two universal rules:
 
-**Edge cases:**
-- **Knowledge dojos** (e.g. life-OS, planning, research): no real "repo" exists. The wiki *is* the deliverable. Don't invent a repo/wiki split where there isn't one.
-- **Code dojos** with active development: repo holds artifacts; wiki holds the *process* of building them — including dead ends, considered alternatives, why current choices were made.
-- **Sensei strategy** (orchestration, what worked, agent feedback): always wiki.
-- **Anything ephemeral or task-scoped**: not the wiki — use `task-comment` on the task itself.
+- **No floating data.** Every artifact has exactly one home — an arbitrary path in the tree is never a home. (Credentials live outside all homes by design — don't "fix" that. And an empty home is not a wrong home.)
+- **A worktree is a checkout of a branch, not a private folder.** Uncommitted work is invisible to every other agent. Reference files by repo-relative path from the git root (`food/inventory.md`), never by worktree path (`sensei/food/inventory.md`) — and memorize the pointer, never the payload.
+
+**Filing decisions are the sensei's.** Workers: your output lives as commits on a branch plus the task record (your skill has the details); when you're unsure where something belongs, say so in your `reply` — don't invent a spot. Sensei: your filing rules are in your skill's "Data homes" section.
 
 ## Reading the wiki — index-first
 
@@ -153,4 +153,5 @@ You don't invoke the librarian directly. It runs on a schedule (default nightly)
 - Record knowledge: `memorize` (cross-task, durable)
 - Record task progress: `task-comment` (task-scoped)
 - Fix stale wiki content: memorize a `CORRECTION:` note; never edit directly
-- Repo vs wiki: ships → repo, process → wiki, default to wiki when in doubt
+- The four homes: `raw_context/` (frozen captures) · wiki (distilled knowledge) · the repo the dojo owns (full-fidelity durable) · the task (ephemeral)
+- Unsure where something belongs? Filing is the sensei's call — workers say so in a `reply`, senseis apply the filing rules in their skill

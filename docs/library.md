@@ -57,19 +57,25 @@ Two properties:
 
 The librarian today reads text files (`.md`, `.txt`) directly and *references* binaries (PDFs, XLSX, images) from a library page — a future *raw-extract* capability is noted in the skill but not built.
 
-## Workspace — the escape hatch (`.jean/workspace/`)
+## Workspace — the sensei's own repo (`.jean/workspace/`)
 
-A **deliberately under-specified** folder for custom, dojo-managed solutions that fit none of the structured layers — neither distilled knowledge (library), nor the live board, nor the project repo.
+*(Reframed 2026-07-16 after interviewing three live dojos. The original "residual escape hatch, reached rarely" framing was calibrated for Jean-owned repos and undersold the slot; the shipped model lives in the `context` skill — the shared reading map — and the `jean-sensei` skill's "Data homes — the filing rules".)*
 
-Defined *negatively and by mechanism*, not by a positive rule. We have one real case today, not twenty; mining a sharp criterion from n=1 would overfit. What's firm is structural, not semantic:
+A **git repository of its own** under `.jean/`, created at dojo init, written by the **sensei alone** (all agents read; workers hand artifacts up for promotion). Own git repo because historyless state re-creates the exact fragility the model exists to prevent: uncommitted = no history = invisible.
+
+Two admission classes, nothing else:
+
+- **Systems the sensei runs** — state updated on a rhythm, procedures, machinery fed by data: trigger cursors, iteration snapshots, management scripts, tracking logs. One folder per function.
+- **Records the sensei wrote** — authored durable documents too detailed for the lossy wiki: research writeups, design explorations, rejected-variants appendices. (Empirically the *largest* category in code dojos — bigger than machinery.)
+
+Structural rules, unchanged from the original design:
 
 - **The librarian ignores it.** Not read as authority, not rewritten, not compacted. (Contrast: librarian *writes* `context/`, *reads* `raw_context/`.)
-- **The wiki points at it, per purpose.** Each time the sensei decides to use the workspace for something, it **memorises a functional pointer** — "for `<functionality>`, the solution lives in `workspace/<x>/`; here's how it works." The folder may hold several unrelated solutions; each gets its own pointer, so the *why* of every folder is always reconstructable from the wiki — the agent's default source. The librarian decides where those pointers live; no page is prescribed.
-- **It's the dojo's space**, distinct from the project repo. Use it only for what isn't the product (so not the repo) and isn't observed knowledge (so not the wiki).
+- **The wiki points at it, per purpose.** Every system gets a **memorised functional pointer** — "for `<functionality>`, the solution lives in `workspace/<x>/`; here's how it works"; every record gets its distilled learning memorised plus a pointer to the full document. The *why* of every folder is always reconstructable from the wiki. This doubles as the admission test: if there's nothing to memorise about it, it doesn't belong.
 
-**Default first: decompose.** Most "where does this state go?" resolves into wiki + board + git repo. The workspace is the *residual* catch-all, reached for rarely. Reaching for it often is a signal the decomposition is wrong.
+**How central the slot is depends on the dojo's repo.** In a dojo that owns its repo outright, maintained state lives in the repo itself and workspace stays nearly empty. In a dojo whose product repo has an *audience* — an employer's codebase, a published plugin whose git history ships to users — the product repo is off-limits for agent state, and workspace is the **primary** maintained-state home, not a residual. The unifying rule is one sentence: *maintained state goes to the repo you own*; the dojo's creation-time answers (ownership, audience — satori asks) decide which repo that is.
 
-**The one case today.** work-dojo's iteration management — scripts that pull the team's PR/issue state from GitHub, plus curated iteration snapshots — lands here. It can't grow from the wiki (the dojo never *observes* that external work, so there are no events to distil) and doesn't belong in the work-dojo product repo. It's the lone example, flagged as *the case that exists* — not the boundary of what's allowed. The slot stays under-specified pending more cases; if patterns emerge across dojos, promote them into something sharper (or into the structured layers).
+**The cases that proved it:** a team dojo's iteration management (scripts pulling team PR/issue state + per-iteration snapshots — can't grow from the wiki, mustn't enter the employer's repo); a plugin dojo's launch assets (7 weeks homeless, squatting untracked in the product worktree because no legitimate home existed) and its outreach archive (an append-only log wearing a task costume, whose latest comment was load-bearing trigger state — a workspace log + machine-readable cursor file, misfiled).
 
 ## Implementation today
 

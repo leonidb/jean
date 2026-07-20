@@ -82,6 +82,15 @@ describe('jean dojo init', () => {
     const readmePath = resolve(dojo, '.jean', 'context', 'readme.md')
     expect(existsSync(readmePath)).toBe(true)
     expect(readFileSync(readmePath, 'utf8')).toContain('Dojo context')
+
+    // Workspace is its own git repo with an initial commit (sensei-owned home;
+    // historyless workspace would recreate the uncommitted-artifact fragility).
+    const workspace = resolve(dojo, '.jean', 'workspace')
+    expect(existsSync(resolve(workspace, '.git'))).toBe(true)
+    expect(readFileSync(resolve(workspace, 'README.md'), 'utf8')).toContain('Sensei-only writes')
+    const wsLog = Bun.spawnSync(['git', '-C', workspace, 'log', '--oneline'], { stdout: 'pipe', stderr: 'pipe' })
+    expect(wsLog.exitCode).toBe(0)
+    expect(wsLog.stdout.toString()).toContain('workspace: initial commit')
   })
 
   test('persists the port value passed via --port', () => {
@@ -116,6 +125,10 @@ describe('jean dojo init', () => {
 
     // But the git bits are absent
     expect(existsSync(resolve(dojo, '.jean', '.bare'))).toBe(false)
+
+    // Workspace is created regardless of --git (the workspace repo is its
+    // own, independent of the dojo's bare repo).
+    expect(existsSync(resolve(dojo, '.jean', 'workspace', '.git'))).toBe(true)
   })
 
   test('auto-allocates a port when --port is omitted and records it in the registry', () => {

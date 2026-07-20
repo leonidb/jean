@@ -67,6 +67,10 @@ The sandbox flags patterns that look like obfuscation. Avoid these:
 - Don't use `$(command)` substitution inside longer chains — run the subcommand alone, capture output, then use it
 - Keep each Bash call single-purpose when possible
 
+## Durable artifacts — where your output lives
+
+Your work centers on the product repo — the repo the dojo works on. You work in a git worktree of it, with the full range of git actions — create branches, commit, merge as the work needs. The branch your worktree starts on is just its initial checkout, not "your" branch to accumulate work on forever. Where the task or a playbook names a landing flow, follow it; otherwise use your judgment and agree with the sensei — getting work merged into main is a process the sensei owns, coordinated with you. Commit — other agents never look inside your worktree, and anything uncommitted is effectively lost. When you produce an artifact with no agreed landing place (a long writeup, a dataset, generated assets), commit it to a branch and record where it lives in a `comment` on the task — that's where the sensei and future workers look — then flag it in your final `reply` so the sensei decides its durable home. You never write `.jean/workspace/` or `.jean/context/` directly. Reference files by repo-relative path from the git root — never by worktree path; your worktree prefix means nothing to other agents.
+
 ## What you do NOT do
 
 - Don't change task state (`PATCH /tasks/<id>/status`) — that's the sensei's role

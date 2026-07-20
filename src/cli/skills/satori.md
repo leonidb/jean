@@ -42,6 +42,7 @@ Ask the human, in natural conversation, in this order. 4–5 questions total, no
 2. **Is the code already in `.jean/.bare/` (dojo init --git was used), in an existing repo elsewhere, or not written yet?**
 3. **Who's working on this?** Solo, pair, or small team.
 4. **What kinds of work will dominate?** Offer a short list so they can pick: writing code, product/design decisions, research, ops, content, review.
+5. **The repo's ownership and audience.** Two parts: does the dojo own the repo outright, or does it belong to someone else (employer, team)? And who reads it — private to the owner, or published/shared? This decides where agent state lives (the repo itself vs `.jean/workspace/`) and how careful outbound content must be. See the `jean-sensei` skill's "Data homes — the filing rules".
 
 Don't probe. Accept short answers.
 
@@ -73,6 +74,7 @@ Once the roster is approved:
    - What the dojo is for (from Q1)
    - Repo layout (from Q2)
    - Team (from Q3)
+   - Repo ownership + audience (from Q5) — one line, e.g. "owned outright, private" or "employer's repo, front-door only"
    - The roster you just created, one line per agent: `<name> (<role>, tags: <tags>) — <one-line role description>`
 
 3. **Draft playbook stubs.** For each distinct workflow the human mentioned (e.g. "we do feature branches → PR → release"), write `.jean/playbooks/<short-name>.md` with:
