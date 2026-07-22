@@ -5,6 +5,12 @@ import { defaultPermissions, mergePermissions } from './permissions.ts'
 
 const DOJO = '/tmp/test-dojo'
 
+// A framework file rule, as defaultPermissions now emits them: filesystem-
+// absolute paths need a DOUBLE leading slash (a single `/` anchors at the
+// settings source, not `/`), and only `Edit(...)` is matched (it gates Write +
+// NotebookEdit too), so there are no `Write(...)` rules.
+const R = (abs: string, glob = '/**') => `Edit(//${abs.replace(/^\/+/, '')}${glob})`
+
 describe('defaultPermissions', () => {
   test('every channel-loading role allows all Jean MCP tools via wildcard', () => {
     for (const role of ['sensei', 'worker', 'user'] as const) {
@@ -18,12 +24,20 @@ describe('defaultPermissions', () => {
     expect(allow).not.toContain('Bash(curl:*)')
   })
 
+  test('no role emits an inert Write(path) rule (only Edit() is matched by CC)', () => {
+    for (const role of ['sensei', 'worker', 'user', 'librarian'] as const) {
+      const { allow, deny } = defaultPermissions(role, DOJO, { worktree: resolve(DOJO, 'w') })
+      for (const rule of [...allow, ...deny]) {
+        expect(rule.startsWith('Write(')).toBe(false)
+      }
+    }
+  })
+
   test('worker write is FENCED to its worktree (no bare Edit/Write escape)', () => {
     const wt = resolve(DOJO, 'builder')
     const { allow } = defaultPermissions('worker', DOJO, { worktree: wt })
-    // Scoped to the worktree — the whole point of the fence.
-    expect(allow).toContain(`Edit(${wt}/**)`)
-    expect(allow).toContain(`Write(${wt}/**)`)
+    // Scoped to the worktree — the whole point of the fence (default mode).
+    expect(allow).toContain(R(wt))
     // A bare grant would auto-approve writes ANYWHERE — must be absent.
     expect(allow).not.toContain('Edit')
     expect(allow).not.toContain('Write')
@@ -47,7 +61,7 @@ describe('defaultPermissions', () => {
   test('sensei stays workspace-only by default (no bare Edit/Write, no outbound)', () => {
     const { allow } = defaultPermissions('sensei', DOJO)
     const ws = resolve(DOJO, '.jean', 'workspace')
-    expect(allow).toContain(`Edit(${ws}/**)`)
+    expect(allow).toContain(R(ws))
     expect(allow).not.toContain('Edit')
     expect(allow).not.toContain('Write')
     // Nothing outside the workspace is writable until a path is configured.
@@ -59,10 +73,9 @@ describe('defaultPermissions', () => {
     const { allow } = defaultPermissions('sensei', DOJO, {
       senseiWritePaths: ['/abs/drop', '~/iCloud/out', 'rel/dir'],
     })
-    expect(allow).toContain('Edit(/abs/drop/**)')
-    expect(allow).toContain('Write(/abs/drop/**)')
-    expect(allow).toContain(`Edit(${resolve(home, 'iCloud/out')}/**)`)
-    expect(allow).toContain(`Edit(${resolve(DOJO, 'rel/dir')}/**)`)
+    expect(allow).toContain(R('/abs/drop'))
+    expect(allow).toContain(R(resolve(home, 'iCloud/out')))
+    expect(allow).toContain(R(resolve(DOJO, 'rel/dir')))
   })
 
   test('senseiWritePaths rejects over-broad / malformed entries', () => {
@@ -71,9 +84,9 @@ describe('defaultPermissions', () => {
     const { allow } = defaultPermissions('sensei', DOJO, {
       senseiWritePaths: ['', '  ', '..', '/legit/out'],
     })
-    expect(allow).toContain('Edit(/legit/out/**)') // the good one survives
-    expect(allow).not.toContain(`Edit(${DOJO}/**)`) // "" did not grant the dojo
-    expect(allow).not.toContain(`Edit(${resolve(DOJO, '..')}/**)`) // ".." did not grant the parent
+    expect(allow).toContain(R('/legit/out')) // the good one survives
+    expect(allow).not.toContain(R(DOJO)) // "" did not grant the dojo
+    expect(allow).not.toContain(R(resolve(DOJO, '..'))) // ".." did not grant the parent
     // A non-array (hand-edited config) is ignored, not thrown.
     expect(() => defaultPermissions('sensei', DOJO, { senseiWritePaths: 'oops' as unknown as string[] })).not.toThrow()
   })
@@ -84,12 +97,9 @@ describe('defaultPermissions', () => {
     // settings.local.json (re-add bare Edit/Write), .jean-agent.json (become
     // sensei), and .mcp.json (define own server:jean) all live inside the
     // worktree — every authority surface must be denied.
-    expect(deny).toContain(`Edit(${wt}/.claude/**)`)
-    expect(deny).toContain(`Write(${wt}/.claude/**)`)
-    expect(deny).toContain(`Edit(${wt}/.jean/**)`)
-    expect(deny).toContain(`Write(${wt}/.jean/**)`)
-    expect(deny).toContain(`Edit(${wt}/.mcp.json)`)
-    expect(deny).toContain(`Write(${wt}/.mcp.json)`)
+    expect(deny).toContain(R(wt, '/.claude/**'))
+    expect(deny).toContain(R(wt, '/.jean/**'))
+    expect(deny).toContain(R(wt, '/.mcp.json'))
   })
 
   test('every role includes safe read + git', () => {
@@ -102,31 +112,50 @@ describe('defaultPermissions', () => {
     }
   })
 
-  test('with dojoRoot: every role denies Edit/Write on .jean/context/**', () => {
+  test('context is never writable: sensei denies it directly, workers deny all of .jean', () => {
     const ctx = resolve(DOJO, '.jean', 'context')
-    for (const role of ['sensei', 'worker', 'user'] as const) {
-      const { deny } = defaultPermissions(role, DOJO)
-      expect(deny).toContain(`Edit(${ctx}/**)`)
-      expect(deny).toContain(`Write(${ctx}/**)`)
+    const jeanDir = resolve(DOJO, '.jean')
+    // Sensei writes .jean/workspace, so it denies context specifically.
+    const sensei = defaultPermissions('sensei', DOJO)
+    expect(sensei.deny).toContain(R(ctx))
+    // Workers/users deny the WHOLE dojo .jean (superset of context) — under
+    // auto-approve the --add-dir'd .jean is otherwise auto-writable.
+    for (const role of ['worker', 'user'] as const) {
+      const { deny } = defaultPermissions(role, DOJO, { worktree: resolve(DOJO, 'w') })
+      expect(deny).toContain(R(jeanDir))
     }
   })
 
-  test('workspace asymmetry: sensei gets scoped Edit/Write allow, others get deny', () => {
+  test('worker deny covers the whole dojo .jean/** (auto-approve write-boundary)', () => {
+    const jeanDir = resolve(DOJO, '.jean')
+    const { deny } = defaultPermissions('worker', DOJO, { worktree: resolve(DOJO, 'builder') })
+    // history.jsonl, jean.config.json, sessions/, roles/ — all under .jean and
+    // all --add-dir'd for reads; the broad deny stops auto-approve from making
+    // them writable. context + workspace are subsets, so both stay covered
+    // without a separate rule.
+    expect(deny).toContain(R(jeanDir))
+    expect(resolve(jeanDir, 'workspace').startsWith(`${jeanDir}/`)).toBe(true) // ws ⊂ .jean/**
+  })
+
+  test('workspace asymmetry: sensei may write it, everyone else is denied', () => {
     const ws = resolve(DOJO, '.jean', 'workspace')
+    const jeanDir = resolve(DOJO, '.jean')
 
     // Sensei is the workspace's only writer — scoped allow, no deny.
     const sensei = defaultPermissions('sensei', DOJO)
-    expect(sensei.allow).toContain(`Edit(${ws}/**)`)
-    expect(sensei.allow).toContain(`Write(${ws}/**)`)
+    expect(sensei.allow).toContain(R(ws))
     for (const rule of sensei.deny) {
       expect(rule).not.toContain('workspace')
     }
 
-    // Everyone else reads but never writes (workers, users, librarian).
-    for (const role of ['worker', 'user', 'librarian'] as const) {
-      const { deny } = defaultPermissions(role, DOJO)
-      expect(deny).toContain(`Edit(${ws}/**)`)
-      expect(deny).toContain(`Write(${ws}/**)`)
+    // Librarian denies the workspace directly (it writes .jean/context but not
+    // workspace).
+    const lib = defaultPermissions('librarian', DOJO)
+    expect(lib.deny).toContain(R(ws))
+    // Workers/users deny the whole .jean (superset of workspace).
+    for (const role of ['worker', 'user'] as const) {
+      const { deny } = defaultPermissions(role, DOJO, { worktree: resolve(DOJO, 'w') })
+      expect(deny).toContain(R(jeanDir))
     }
   })
 
@@ -134,23 +163,23 @@ describe('defaultPermissions', () => {
     const { allow, deny } = defaultPermissions('librarian', DOJO)
 
     // The librarian is the only role that may write the wiki, so its allow
-    // includes Edit + Write and its deny does NOT block .jean/context/**.
+    // includes the bare Edit + Write tool grants and its deny does NOT block
+    // .jean/context/**.
     expect(allow).toContain('Edit')
     expect(allow).toContain('Write')
     expect(allow).toContain('Read')
 
     // No deny on .jean/context — the very thing this role exists to do.
     for (const rule of deny) {
-      expect(rule).not.toContain('.jean/context')
+      expect(rule).not.toContain('.jean/context/')
       expect(rule).not.toContain('.jean/.consolidator')
     }
   })
 
-  test('librarian: deny Edit/Write on .jean/raw_context/** (immutable sources)', () => {
+  test('librarian: deny Edit on .jean/raw_context/** (immutable sources)', () => {
     const { deny } = defaultPermissions('librarian', DOJO)
     const rawCtx = resolve(DOJO, '.jean', 'raw_context')
-    expect(deny).toContain(`Edit(${rawCtx}/**)`)
-    expect(deny).toContain(`Write(${rawCtx}/**)`)
+    expect(deny).toContain(R(rawCtx))
   })
 
   test('librarian: no MCP tools at all (runs without channel plugin)', () => {
@@ -165,13 +194,13 @@ describe('defaultPermissions', () => {
     expect(allow).toContain('Bash(curl:*)')
   })
 
-  test('with dojoRoot: deny paths are absolute (not relative)', () => {
-    // Relative paths in deny rules would resolve against the agent's
-    // working directory, not the dojo root — making the deny brittle if
-    // the agent runs from a worktree subdir. Always use absolute.
-    const { deny } = defaultPermissions('worker', '/some/where/dojo')
+  test('file deny paths are filesystem-absolute (double leading slash)', () => {
+    // A single leading slash anchors at the settings source, not the filesystem
+    // root, so `Edit(/abs/**)` silently never matches. Every file rule must use
+    // `Edit(//...)`. (Non-file rules like mcp/Bash are exempt.)
+    const { deny } = defaultPermissions('worker', '/some/where/dojo', { worktree: '/some/where/dojo/w' })
     for (const rule of deny) {
-      expect(rule).toMatch(/^(Edit|Write)\(\//)
+      expect(rule).toMatch(/^Edit\(\/\//)
     }
   })
 })
@@ -190,12 +219,11 @@ describe('mergePermissions', () => {
     expect(merged.allow).toContain('Bash(npm:*)')
     // Adds framework defaults that were missing
     expect(merged.allow).toContain('mcp__jean__*')
-    // Adds the wiki deny rules
-    expect(merged.deny).toContain('Edit(/dojo/.jean/context/**)')
-    expect(merged.deny).toContain('Write(/dojo/.jean/context/**)')
+    // Adds the wiki deny rule (double-slash absolute, Edit-only)
+    expect(merged.deny).toContain('Edit(//dojo/.jean/context/**)')
 
     expect(addedAllow).toContain('mcp__jean__*')
-    expect(addedDeny).toContain('Edit(/dojo/.jean/context/**)')
+    expect(addedDeny).toContain('Edit(//dojo/.jean/context/**)')
   })
 
   test('idempotent — second merge is a no-op', () => {
@@ -223,14 +251,36 @@ describe('mergePermissions', () => {
     // file. Sync should leave those alone.
     const existing = {
       allow: defaultPermissions('worker', '/dojo').allow,
-      deny: ['Edit(/dojo/secrets.json)'], // user-added, not in defaults
+      deny: ['Edit(//dojo/secrets.json)'], // user-added, not in defaults
     }
     const defaults = defaultPermissions('worker', '/dojo')
     const { merged } = mergePermissions(existing, defaults)
 
-    expect(merged.deny).toContain('Edit(/dojo/secrets.json)')
-    // And framework rules still present
-    expect(merged.deny).toContain('Edit(/dojo/.jean/context/**)')
+    expect(merged.deny).toContain('Edit(//dojo/secrets.json)')
+    // And framework rules still present (worker denies the whole dojo .jean)
+    expect(merged.deny).toContain('Edit(//dojo/.jean/**)')
+  })
+
+  test('strips inert Write(path) rules from both lists (they warn at startup)', () => {
+    // Older Jean versions emitted Write(...) rules; current CC never matches
+    // them. Sync removes them — inert, so no behavior change, but no warnings.
+    const existing = {
+      allow: ['Edit(//dojo/w/**)', 'Write(//dojo/w/**)', 'Bash(npm:*)'],
+      deny: ['Edit(//dojo/.jean/**)', 'Write(//dojo/.jean/**)'],
+    }
+    const defaults = defaultPermissions('worker', '/dojo', { worktree: '/dojo/w' })
+    const { merged, removedAllow, removedDeny } = mergePermissions(existing, defaults, {
+      obsoleteAllow: ['Edit', 'Write'],
+    })
+
+    expect(removedAllow).toContain('Write(//dojo/w/**)')
+    expect(removedDeny).toContain('Write(//dojo/.jean/**)')
+    expect(merged.allow).not.toContain('Write(//dojo/w/**)')
+    expect(merged.deny).not.toContain('Write(//dojo/.jean/**)')
+    // The matched Edit rules survive; user customization survives.
+    expect(merged.allow).toContain('Edit(//dojo/w/**)')
+    expect(merged.allow).toContain('Bash(npm:*)')
+    expect(merged.deny).toContain('Edit(//dojo/.jean/**)')
   })
 
   test('obsoleteAllow strips a fence-defeating bare grant, keeps the scoped one', () => {
@@ -247,7 +297,7 @@ describe('mergePermissions', () => {
     expect(removedAllow).toEqual(['Edit', 'Write'])
     expect(merged.allow).not.toContain('Edit')
     expect(merged.allow).not.toContain('Write')
-    expect(merged.allow).toContain(`Edit(${wt}/**)`)
+    expect(merged.allow).toContain(R(wt))
     // User customization survives the strip.
     expect(merged.allow).toContain('Bash(npm:*)')
   })

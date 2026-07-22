@@ -2232,19 +2232,22 @@ function cmdAgentSyncPermissions(args: string[]) {
     // the bare one survives). The librarian keeps them — it has no worktree
     // fence, so nothing to shed.
     const obsoleteAllow = t.worktree ? ['Edit', 'Write'] : []
-    const { merged, addedAllow, addedDeny, removedAllow } = mergePermissions(existing, expected, { obsoleteAllow })
+    const { merged, addedAllow, addedDeny, removedAllow, removedDeny } = mergePermissions(existing, expected, {
+      obsoleteAllow,
+    })
 
-    if (addedAllow.length === 0 && addedDeny.length === 0 && removedAllow.length === 0) {
+    const changes = addedAllow.length + addedDeny.length + removedAllow.length + removedDeny.length
+    if (changes === 0) {
       console.log(`  ${DIM}ok${RESET}    ${label} — already current`)
       continue
     }
 
     console.log(`  ${GREEN}sync${RESET}  ${label}`)
-    for (const rule of removedAllow)
-      console.log(`    ${RED}-${RESET} Allow: ${rule} ${DIM}(fenced to worktree)${RESET}`)
+    for (const rule of removedAllow) console.log(`    ${RED}-${RESET} Allow: ${rule} ${DIM}(obsolete/inert)${RESET}`)
+    for (const rule of removedDeny) console.log(`    ${RED}-${RESET} Deny:  ${rule} ${DIM}(inert Write rule)${RESET}`)
     for (const rule of addedAllow) console.log(`    ${GREEN}+${RESET} Allow: ${rule}`)
     for (const rule of addedDeny) console.log(`    ${GREEN}+${RESET} Deny:  ${rule}`)
-    totalChanges += addedAllow.length + addedDeny.length + removedAllow.length
+    totalChanges += changes
     touchedAgents++
 
     if (!dryRun) {

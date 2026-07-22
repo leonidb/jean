@@ -75,6 +75,24 @@ function sanitizeWritePaths(paths: unknown, dojoRoot: string): string[] {
   return out
 }
 
+/** A Claude Code file-rule path for a FILESYSTEM-ABSOLUTE directory. CC anchors
+ *  a single leading `/` at the *settings source*, NOT the filesystem root — so
+ *  `Edit(/Users/…/.jean/**)` silently fails to match and the rule is inert. The
+ *  filesystem root needs a DOUBLE leading slash. (CC permissions docs, the
+ *  `//path` vs `/path` table.) resolve() returns a single-slash absolute path;
+ *  this re-anchors it to `//`. */
+function fsAbs(p: string): string {
+  return `//${p.replace(/^\/+/, '')}`
+}
+
+/** A path-scoped file deny/allow. Only `Edit(path)` is matched by CC's file
+ *  permission checks — and it gates the Edit, Write AND NotebookEdit tools. A
+ *  `Write(path)` / `NotebookEdit(path)` rule is accepted-but-never-matched and
+ *  warns at startup, so we emit ONLY the `Edit(...)` form. */
+function fileRule(absPath: string, glob = '/**'): string {
+  return `Edit(${fsAbs(absPath)}${glob})`
+}
+
 export function defaultPermissions(role: AgentRole, dojoRoot: string, opts: PermissionOpts = {}): Permissions {
   if (role === 'librarian') {
     // Librarian is the wiki's only writer and runs headless without MCP.
@@ -110,7 +128,8 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string, opts: Perm
       // raw_context/: human-curated source material, read-but-never-modify.
       // workspace/: the librarian ignores it entirely (not read as authority,
       // not rewritten) — the deny enforces the "ignores" half it could violate.
-      deny: [`Edit(${rawCtx}/**)`, `Write(${rawCtx}/**)`, `Edit(${librarianWs}/**)`, `Write(${librarianWs}/**)`],
+      // (Bare Edit/Write above are tool-level grants; these path denies win.)
+      deny: [fileRule(rawCtx), fileRule(librarianWs)],
     }
   }
 
@@ -122,8 +141,9 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string, opts: Perm
   // sensei gets a scoped Edit/Write allow (it otherwise has none, so
   // workspace curation would prompt), everyone else gets a deny.
   // See the context skill ("Where data lives").
-  const ctx = resolve(dojoRoot, '.jean', 'context')
-  const ws = resolve(dojoRoot, '.jean', 'workspace')
+  const jeanDir = resolve(dojoRoot, '.jean')
+  const ctx = resolve(jeanDir, 'context')
+  const ws = resolve(jeanDir, 'workspace')
 
   // The write allow, scoped by the fence. Common infra (MCP + read + git) is
   // shared; the Edit/Write grant is where roles diverge.
@@ -134,23 +154,31 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string, opts: Perm
     // configured outbound directories — its delivery escape hatch. It gets NO
     // bare Edit/Write: a stale sensei that still carries one is exactly the
     // "wrote to iCloud freely" footgun `senseiWritePaths` replaces.
-    const extra = sanitizeWritePaths(opts.senseiWritePaths, dojoRoot).flatMap((root) => [
-      `Edit(${root}/**)`,
-      `Write(${root}/**)`,
-    ])
+    const extra = sanitizeWritePaths(opts.senseiWritePaths, dojoRoot).map((root) => fileRule(root))
     return {
-      allow: [...base, `Edit(${ws}/**)`, `Write(${ws}/**)`, ...extra],
-      deny: [`Edit(${ctx}/**)`, `Write(${ctx}/**)`],
+      allow: [...base, fileRule(ws), ...extra],
+      deny: [fileRule(ctx)],
     }
   }
 
-  // Worker / user: hard-fenced to their own worktree. A scoped Edit/Write is
-  // the fence — with no bare grant, a write outside the worktree isn't
-  // auto-approved and (no human at the prompt) is effectively blocked. Without
-  // a worktree (test/degenerate callers only), fall back to bare Edit/Write —
-  // the pre-fence behavior — rather than silently granting nothing.
+  // Worker / user: hard-fenced to their own worktree. Two mechanisms, because
+  // dojo agents run in auto-approve (`acceptEdits`) mode where the ALLOW list
+  // is bypassed for edits — so the scoped allow below only bites in `default`
+  // mode; under auto-approve the fence is the OTHER two facts:
+  //   1. Removing the bare `Edit`/`Write` grant. Auto-approve only auto-accepts
+  //      edits INSIDE the workspace (cwd + `--add-dir`); anything outside
+  //      prompts (= blocked, no human). A bare grant, by contrast, matches an
+  //      allow rule in EVERY mode and would auto-approve edits anywhere — the
+  //      actual hole a worker used to write cross-repo. Gone now.
+  //   2. Deny rules, which win in every mode. The worker's launch `--add-dir`s
+  //      the dojo `.jean/` (to READ roles/skills), which under auto-approve
+  //      also makes it auto-WRITABLE — so we deny the whole `.jean/**` below,
+  //      not just context+workspace. Truly-outside paths (other repos, $HOME)
+  //      need no deny: they're outside the workspace, so auto-approve prompts.
+  // Without a worktree (test/degenerate callers only), fall back to bare
+  // Edit/Write — the pre-fence behavior — rather than silently granting nothing.
   const wt = opts.worktree
-  const writeAllow = wt ? [`Edit(${wt}/**)`, `Write(${wt}/**)`] : ['Edit', 'Write']
+  const writeAllow = wt ? [fileRule(wt)] : ['Edit', 'Write']
   return {
     // mcp__jean__* covers all current + future Jean MCP tools (send, reply,
     // infra, memorize, ack, …). The channel plugin gates tool exposure per
@@ -166,13 +194,14 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string, opts: Perm
     // wrapper. Documented, not yet fenced.
     allow: ['mcp__jean__*', 'Read', 'Glob', 'Grep', ...writeAllow, 'Bash(git:*)'],
     deny: [
-      // ctx/ws denies are now mostly redundant with the worktree-scoped allow
-      // (both live under .jean/, outside any worktree), but kept explicit as
-      // defense-in-depth and to document the asymmetry.
-      `Edit(${ctx}/**)`,
-      `Write(${ctx}/**)`,
-      `Edit(${ws}/**)`,
-      `Write(${ws}/**)`,
+      // Deny ALL writes to the dojo `.jean/**` (wiki, workspace, event log,
+      // config, sessions, roles). Under auto-approve this is load-bearing, not
+      // redundant: the worker `--add-dir`s the dojo `.jean/` for READ access,
+      // which also makes it auto-writable — so without this a worker could
+      // clobber dojo state (history.jsonl, jean.config.json). Workers never
+      // write `.jean/` directly; they memorize/comment via MCP. (Covers the
+      // old context+workspace denies, which were subsets of this.)
+      fileRule(jeanDir),
       // The worktree allow otherwise covers the worker's OWN authority files,
       // which live inside it — a self-escalation hole. Editing
       // .claude/settings.local.json would let it re-add a bare Edit/Write
@@ -183,16 +212,7 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string, opts: Perm
       // the launch cwd, and `jean agent start` doesn't pass
       // --strict-mcp-config) → code execution / spoofed channel on next start.
       // Deny beats the worktree allow, closing all three.
-      ...(wt
-        ? [
-            `Edit(${wt}/.claude/**)`,
-            `Write(${wt}/.claude/**)`,
-            `Edit(${wt}/.jean/**)`,
-            `Write(${wt}/.jean/**)`,
-            `Edit(${wt}/.mcp.json)`,
-            `Write(${wt}/.mcp.json)`,
-          ]
-        : []),
+      ...(wt ? [fileRule(wt, '/.claude/**'), fileRule(wt, '/.jean/**'), fileRule(wt, '/.mcp.json')] : []),
     ],
   }
 }
@@ -206,34 +226,46 @@ export function defaultPermissions(role: AgentRole, dojoRoot: string, opts: Perm
  * rules are the load-bearing piece — they MUST be present — so we add
  * what's missing without removing user customizations.
  *
- * `obsoleteAllow` is the one exception to "never remove": rules that a new
- * default supersedes and which would DEFEAT it if left in place. The write
- * fence needs this — a scoped `Edit(<wt>/**)` is worthless while a bare `Edit`
- * still auto-approves everything — so sync passes `['Edit','Write']` for
- * fenced roles to strip the obsolete grant. Matched exactly (bare `Edit`),
- * so scoped `Edit(<path>/**)` rules are never touched.
+ * Two exceptions to "never remove":
+ *  - `obsoleteAllow`: rules a new default supersedes that would DEFEAT it if
+ *    left in place. The write fence needs this — a scoped `Edit(<wt>/**)` is
+ *    worthless while a bare `Edit` still auto-approves everything — so sync
+ *    passes `['Edit','Write']` for fenced roles. Matched exactly (bare `Edit`),
+ *    so scoped `Edit(<path>/**)` rules are never touched.
+ *  - Dead `Write(path)` rules: current Claude Code matches file writes via
+ *    `Edit(path)` ONLY; a `Write(path)` rule is accepted-but-never-matched and
+ *    warns at startup. Older Jean versions emitted them, so we strip every
+ *    `Write(...)` (path-form) rule from both lists — inert, so removing changes
+ *    no behavior, but it clears the warnings and half the legacy cruft. (Bare
+ *    `Write`, a tool-level grant, is NOT a path-form and is left alone.)
  */
+const isDeadWriteRule = (rule: string) => rule.startsWith('Write(')
+
 export function mergePermissions(
   existing: Partial<Permissions> | undefined,
   defaults: Permissions,
   opts: { obsoleteAllow?: string[] } = {},
-): { merged: Permissions; addedAllow: string[]; addedDeny: string[]; removedAllow: string[] } {
+): { merged: Permissions; addedAllow: string[]; addedDeny: string[]; removedAllow: string[]; removedDeny: string[] } {
   const existingAllow = existing?.allow ?? []
   const existingDeny = existing?.deny ?? []
   const obsolete = new Set(opts.obsoleteAllow ?? [])
+  const dropAllow = (rule: string) => obsolete.has(rule) || isDeadWriteRule(rule)
 
-  const removedAllow = existingAllow.filter((rule) => obsolete.has(rule))
-  const keptAllow = existingAllow.filter((rule) => !obsolete.has(rule))
+  const removedAllow = existingAllow.filter(dropAllow)
+  const keptAllow = existingAllow.filter((rule) => !dropAllow(rule))
+  const removedDeny = existingDeny.filter(isDeadWriteRule)
+  const keptDeny = existingDeny.filter((rule) => !isDeadWriteRule(rule))
   const addedAllow = defaults.allow.filter((rule) => !keptAllow.includes(rule))
-  const addedDeny = defaults.deny.filter((rule) => !existingDeny.includes(rule))
+  const addedDeny = defaults.deny.filter((rule) => !keptDeny.includes(rule))
 
   return {
     merged: {
       allow: [...keptAllow, ...addedAllow],
-      deny: [...existingDeny, ...addedDeny],
+      deny: [...keptDeny, ...addedDeny],
     },
     addedAllow,
     addedDeny,
     removedAllow,
+    removedDeny,
   }
 }
