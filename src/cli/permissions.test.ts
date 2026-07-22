@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { defaultPermissions, mergePermissions } from './permissions.ts'
 
@@ -17,15 +18,78 @@ describe('defaultPermissions', () => {
     expect(allow).not.toContain('Bash(curl:*)')
   })
 
-  test('worker has edit/write + no curl (per-role distinctions are filesystem, not MCP)', () => {
-    const { allow } = defaultPermissions('worker', DOJO)
-    expect(allow).toContain('Edit')
-    expect(allow).toContain('Write')
+  test('worker write is FENCED to its worktree (no bare Edit/Write escape)', () => {
+    const wt = resolve(DOJO, 'builder')
+    const { allow } = defaultPermissions('worker', DOJO, { worktree: wt })
+    // Scoped to the worktree — the whole point of the fence.
+    expect(allow).toContain(`Edit(${wt}/**)`)
+    expect(allow).toContain(`Write(${wt}/**)`)
+    // A bare grant would auto-approve writes ANYWHERE — must be absent.
+    expect(allow).not.toContain('Edit')
+    expect(allow).not.toContain('Write')
     expect(allow).not.toContain('Bash(curl:*)')
   })
 
-  test('user role mirrors worker', () => {
-    expect(defaultPermissions('user', DOJO)).toEqual(defaultPermissions('worker', DOJO))
+  test('worker without a worktree falls back to bare Edit/Write (pre-fence)', () => {
+    // Degenerate/test callers only — real callers always pass a worktree.
+    const { allow } = defaultPermissions('worker', DOJO)
+    expect(allow).toContain('Edit')
+    expect(allow).toContain('Write')
+  })
+
+  test('user role mirrors worker (also fenced)', () => {
+    const wt = resolve(DOJO, 'helper')
+    expect(defaultPermissions('user', DOJO, { worktree: wt })).toEqual(
+      defaultPermissions('worker', DOJO, { worktree: wt }),
+    )
+  })
+
+  test('sensei stays workspace-only by default (no bare Edit/Write, no outbound)', () => {
+    const { allow } = defaultPermissions('sensei', DOJO)
+    const ws = resolve(DOJO, '.jean', 'workspace')
+    expect(allow).toContain(`Edit(${ws}/**)`)
+    expect(allow).not.toContain('Edit')
+    expect(allow).not.toContain('Write')
+    // Nothing outside the workspace is writable until a path is configured.
+    expect(allow.some((r) => r.startsWith('Edit(') && !r.includes('workspace'))).toBe(false)
+  })
+
+  test('sensei outbound allowlist: senseiWritePaths widen the fence (abs + ~ + relative)', () => {
+    const home = homedir()
+    const { allow } = defaultPermissions('sensei', DOJO, {
+      senseiWritePaths: ['/abs/drop', '~/iCloud/out', 'rel/dir'],
+    })
+    expect(allow).toContain('Edit(/abs/drop/**)')
+    expect(allow).toContain('Write(/abs/drop/**)')
+    expect(allow).toContain(`Edit(${resolve(home, 'iCloud/out')}/**)`)
+    expect(allow).toContain(`Edit(${resolve(DOJO, 'rel/dir')}/**)`)
+  })
+
+  test('senseiWritePaths rejects over-broad / malformed entries', () => {
+    // "" → dojo root, ".." → dojo parent — both would grant write to the whole
+    // dojo (all worktrees). Must be dropped; a non-array must not throw.
+    const { allow } = defaultPermissions('sensei', DOJO, {
+      senseiWritePaths: ['', '  ', '..', '/legit/out'],
+    })
+    expect(allow).toContain('Edit(/legit/out/**)') // the good one survives
+    expect(allow).not.toContain(`Edit(${DOJO}/**)`) // "" did not grant the dojo
+    expect(allow).not.toContain(`Edit(${resolve(DOJO, '..')}/**)`) // ".." did not grant the parent
+    // A non-array (hand-edited config) is ignored, not thrown.
+    expect(() => defaultPermissions('sensei', DOJO, { senseiWritePaths: 'oops' as unknown as string[] })).not.toThrow()
+  })
+
+  test('worker CANNOT write its own authority files (no self-escalation)', () => {
+    const wt = resolve(DOJO, 'builder')
+    const { deny } = defaultPermissions('worker', DOJO, { worktree: wt })
+    // settings.local.json (re-add bare Edit/Write), .jean-agent.json (become
+    // sensei), and .mcp.json (define own server:jean) all live inside the
+    // worktree — every authority surface must be denied.
+    expect(deny).toContain(`Edit(${wt}/.claude/**)`)
+    expect(deny).toContain(`Write(${wt}/.claude/**)`)
+    expect(deny).toContain(`Edit(${wt}/.jean/**)`)
+    expect(deny).toContain(`Write(${wt}/.jean/**)`)
+    expect(deny).toContain(`Edit(${wt}/.mcp.json)`)
+    expect(deny).toContain(`Write(${wt}/.mcp.json)`)
   })
 
   test('every role includes safe read + git', () => {
@@ -167,6 +231,34 @@ describe('mergePermissions', () => {
     expect(merged.deny).toContain('Edit(/dojo/secrets.json)')
     // And framework rules still present
     expect(merged.deny).toContain('Edit(/dojo/.jean/context/**)')
+  })
+
+  test('obsoleteAllow strips a fence-defeating bare grant, keeps the scoped one', () => {
+    // The migration case: an existing worker still carries bare Edit/Write;
+    // sync must remove them so the new scoped fence actually bites.
+    const wt = '/dojo/builder'
+    const existing = {
+      allow: ['mcp__jean__*', 'Read', 'Edit', 'Write', 'Bash(npm:*)'],
+      deny: [],
+    }
+    const defaults = defaultPermissions('worker', '/dojo', { worktree: wt })
+    const { merged, removedAllow } = mergePermissions(existing, defaults, { obsoleteAllow: ['Edit', 'Write'] })
+
+    expect(removedAllow).toEqual(['Edit', 'Write'])
+    expect(merged.allow).not.toContain('Edit')
+    expect(merged.allow).not.toContain('Write')
+    expect(merged.allow).toContain(`Edit(${wt}/**)`)
+    // User customization survives the strip.
+    expect(merged.allow).toContain('Bash(npm:*)')
+  })
+
+  test('obsoleteAllow never touches an already-scoped rule', () => {
+    const wt = '/dojo/builder'
+    const defaults = defaultPermissions('worker', '/dojo', { worktree: wt })
+    // Already-fenced settings: a second sync removes nothing, adds nothing.
+    const { removedAllow, addedAllow } = mergePermissions(defaults, defaults, { obsoleteAllow: ['Edit', 'Write'] })
+    expect(removedAllow).toEqual([])
+    expect(addedAllow).toEqual([])
   })
 
   test('preserves order: existing entries first, additions appended', () => {

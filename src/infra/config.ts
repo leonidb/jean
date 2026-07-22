@@ -46,6 +46,15 @@ export type JeanConfig = {
    *  are read as legacy bridge connectors for back-compat. See
    *  docs/connectors.md. */
   connectors?: Record<string, ConnectorEntry>
+  /** Directories the sensei may write to OUTSIDE its worktree/workspace — the
+   *  sensei's outbound delivery escape hatch (e.g. an iCloud drop folder).
+   *  Empty by default: the sensei is fenced to its workspace, and every path
+   *  here is an explicit, per-dojo widening. Each becomes an `Edit(<p>/**)` +
+   *  `Write(<p>/**)` allow in the sensei's settings. Absolute paths (a leading
+   *  `~/` is expanded to $HOME); relative paths resolve against the dojo root.
+   *  Workers get no equivalent — they are hard-fenced to their worktree. See
+   *  src/cli/permissions.ts. */
+  senseiWritePaths?: string[]
 }
 
 /** A raw connector entry as it appears in jean.config.json. `kind`/`role` are

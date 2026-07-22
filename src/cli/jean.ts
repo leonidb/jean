@@ -113,6 +113,7 @@ const RESET = '\x1b[0m'
 const BOLD = '\x1b[1m'
 const DIM = '\x1b[2m'
 const GREEN = '\x1b[32m'
+const RED = '\x1b[31m'
 
 // Dispatch is wrapped so all module-level declarations finish evaluating before
 // any command handler runs — otherwise a handler reached via top-level await can
@@ -2102,7 +2103,10 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
       settingsPath,
       `${JSON.stringify(
         {
-          permissions: defaultPermissions(role, dojoRoot),
+          permissions: defaultPermissions(role, dojoRoot, {
+            worktree: agentDir,
+            senseiWritePaths: readConfig(resolve(dojoRoot, '.jean')).senseiWritePaths,
+          }),
           hooks: {
             Stop: [
               {
@@ -2171,7 +2175,11 @@ function cmdAgentSyncPermissions(args: string[]) {
   const dryRun = args.includes('--dry-run')
   const dojoRoot = findDojoRoot()
 
-  type Target = { name: string; role: AgentRole; settingsPath: string }
+  const senseiWritePaths = readConfig(resolve(dojoRoot, '.jean')).senseiWritePaths
+
+  // `worktree` scopes the write fence; undefined for the librarian, which is
+  // not worktree-fenced and legitimately keeps bare Edit/Write.
+  type Target = { name: string; role: AgentRole; settingsPath: string; worktree?: string }
   const targets: Target[] = []
 
   for (const a of discoverAgents(dojoRoot)) {
@@ -2179,6 +2187,7 @@ function cmdAgentSyncPermissions(args: string[]) {
       name: a.name,
       role: a.role,
       settingsPath: resolve(a.path, '.claude', 'settings.local.json'),
+      worktree: a.path,
     })
   }
 
@@ -2217,19 +2226,25 @@ function cmdAgentSyncPermissions(args: string[]) {
       continue
     }
 
-    const expected = defaultPermissions(t.role, dojoRoot)
+    const expected = defaultPermissions(t.role, dojoRoot, { worktree: t.worktree, senseiWritePaths })
     const existing = (json.permissions ?? {}) as Partial<{ allow: string[]; deny: string[] }>
-    const { merged, addedAllow, addedDeny } = mergePermissions(existing, expected)
+    // Fenced roles must SHED bare Edit/Write (a scoped grant is defeated while
+    // the bare one survives). The librarian keeps them — it has no worktree
+    // fence, so nothing to shed.
+    const obsoleteAllow = t.worktree ? ['Edit', 'Write'] : []
+    const { merged, addedAllow, addedDeny, removedAllow } = mergePermissions(existing, expected, { obsoleteAllow })
 
-    if (addedAllow.length === 0 && addedDeny.length === 0) {
+    if (addedAllow.length === 0 && addedDeny.length === 0 && removedAllow.length === 0) {
       console.log(`  ${DIM}ok${RESET}    ${label} — already current`)
       continue
     }
 
     console.log(`  ${GREEN}sync${RESET}  ${label}`)
+    for (const rule of removedAllow)
+      console.log(`    ${RED}-${RESET} Allow: ${rule} ${DIM}(fenced to worktree)${RESET}`)
     for (const rule of addedAllow) console.log(`    ${GREEN}+${RESET} Allow: ${rule}`)
     for (const rule of addedDeny) console.log(`    ${GREEN}+${RESET} Deny:  ${rule}`)
-    totalChanges += addedAllow.length + addedDeny.length
+    totalChanges += addedAllow.length + addedDeny.length + removedAllow.length
     touchedAgents++
 
     if (!dryRun) {
