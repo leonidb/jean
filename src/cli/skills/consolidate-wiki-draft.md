@@ -85,7 +85,7 @@ ls .jean/context/
 ```
 
 Branch:
-- **`cursor.json` missing**: bootstrap. Set `lastEventId` to current max. The next phase has nothing to consolidate.
+- **`cursor.json` missing** (first run): set `lastEventId` to **0** and process the FULL backlog. Building the wiki from everything already accumulated (memory + task-status events) is the first run's entire purpose — never bootstrap the cursor forward to skip history. Even when `.jean/context/` already has hand-authored pages that predate the librarian, still harvest from 0 and integrate *additively* (preserve every existing page, dedup by topic).
 - **`cursor.json` exists**: trust as-is. `lastEventId: 0` may be a deliberate human reset — don't override.
 
 ### Step 2 — read inputs

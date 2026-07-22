@@ -86,11 +86,11 @@ ls -d .jean/context/index.md 2>/dev/null
 
 Branch on what exists:
 
-- **Empty (fresh dojo)**: no `.jean/context/` content yet (the dir might exist but `index.md` doesn't). Bootstrap: create `.jean/context/index.md` and `log.md` as empty starter files, write `.jean/.consolidator/cursor.json` with `lastEventId: 0`.
-- **Pre-existing populated `.jean/context/`** (e.g. a dojo with hand-authored pages from before the librarian existed): preserve all current content; build a one-time `index.md` from existing pages if missing; set `cursor.json` to current max event ID so you don't try to distill events that pre-date the wiki's existence.
+- **Empty (fresh dojo)**: no `.jean/context/` content yet (the dir might exist but `index.md` doesn't). Bootstrap: create `.jean/context/index.md` and `log.md` as empty starter files, write `.jean/.consolidator/cursor.json` with `lastEventId: 0`, and harvest the full backlog.
+- **Pre-existing populated `.jean/context/`** (e.g. a dojo with hand-authored pages from before the librarian existed): preserve all current content; build a one-time `index.md` from existing pages if missing; **still start from `lastEventId: 0`** and harvest the full event backlog — integrate *additively* into the existing pages (dedup by topic; never re-create what's already there). Do NOT skip old events: the first run's job is to fold accumulated knowledge into the wiki.
 - **Steady state**: `cursor.json` exists, `.jean/context/` has `index.md` and pages. Read the cursor and proceed.
 
-When `cursor.json` exists, **trust it as-is** even if `lastEventId` is 0 — that may be a deliberate human reset for a historical harvest. The "set to max" override only applies when `cursor.json` is missing entirely.
+**First run (missing `cursor.json`) always starts from `lastEventId: 0`** — the whole point is to build the wiki from the history that already exists; there is no "skip the backlog" bootstrap. When `cursor.json` already exists, **trust it as-is** even if `lastEventId` is 0 (that may be a deliberate human reset for a historical harvest).
 
 ### 1b. Reflect on prior runs
 
