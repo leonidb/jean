@@ -13,7 +13,7 @@
  * No LLM — fast, deterministic plumbing.
  */
 
-import { existsSync, mkdirSync, readdirSync, rmSync, unlinkSync, watch, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, unlinkSync, watch, writeFileSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { Cron } from 'croner'
@@ -97,6 +97,8 @@ import {
   type WikiConsolidatedData,
 } from './reducers.ts'
 import { upsertDojo } from './registry.ts'
+import { buildIndex, search as runSearch, type SearchDoc, type SearchResult } from './retrieval.ts'
+import { channelDocs, memoryDocs, type RecentMemory, type TaskInput, taskDocs, wikiDocs } from './retrieval-corpus.ts'
 import { shouldCatchUp } from './trigger-catchup.ts'
 
 const DATA_DIR = resolve(process.env.JEAN_DATA_DIR ?? '.')
@@ -403,6 +405,104 @@ function pendingByAgent(): Record<string, number> {
     if (agent) counts[agent] = (counts[agent] ?? 0) + 1
   }
   return counts
+}
+
+// ── Retrieval (wiki-first search) ─────────────────────────────────
+
+/** Memorize events not yet folded into the wiki (id > consolidator cursor) —
+ *  the same-day slice, folded into the search corpus so today's facts are
+ *  findable without waiting for the nightly librarian run. */
+async function unconsolidatedMemories(): Promise<RecentMemory[]> {
+  const cursorPath = resolve(DATA_DIR, '.consolidator', 'cursor.json')
+  let since = 0
+  try {
+    since = (JSON.parse(await Bun.file(cursorPath).text()) as { lastEventId?: number }).lastEventId ?? 0
+  } catch {
+    // no cursor — fresh dojo / librarian never ran; take everything.
+  }
+  const events = await store.read({ stream: MEMORY_STREAM, afterId: since })
+  return events.map((e) => ({ id: e.id, ...(e.data as MemoryData) }))
+}
+
+/** Append one search to the retrieval log — operational telemetry, NOT an
+ *  event (it carries private query text + snippets, stays in gitignored
+ *  `.jean/`, and is for offline investigation + scoring, not the provenance
+ *  record). Best-effort; a log failure never fails the search. */
+function logRetrieval(record: Record<string, unknown>): void {
+  try {
+    appendFileSync(resolve(DATA_DIR, 'retrieval-log.jsonl'), `${JSON.stringify(record)}\n`)
+  } catch {
+    // telemetry is best-effort
+  }
+}
+
+/** Every task + its curated comments — the `tasks` search corpus. */
+async function buildTaskInputs(): Promise<TaskInput[]> {
+  const commentEvents = await store.read({ types: ['task-comment'] })
+  const byTask = new Map<string, string[]>()
+  for (const e of commentEvents) {
+    const tid = taskIdFromStream(e.stream)
+    if (!tid) continue
+    const arr = byTask.get(tid) ?? []
+    arr.push((e.data as TaskCommentData).text)
+    byTask.set(tid, arr)
+  }
+  return boardProjection.state.tasks.map((t) => ({
+    id: t.id,
+    title: t.title,
+    description: t.description,
+    comments: byTask.get(t.id) ?? [],
+  }))
+}
+
+/** The human↔agent conversation, chronological — the `channel` search corpus.
+ *  Reply events on a role:'user' stream are the human; send events are the
+ *  agent. Both live on the chat agent's stream (routeSend + bridge onInbound).
+ *
+ *  User surfaces are derived from PERSISTED `register` events, not the live
+ *  `agents` map — otherwise the conversation is silently omitted whenever the
+ *  bridge isn't currently connected, which would make an all-scope empty
+ *  non-definitive for this source (the whole point of default-all). */
+async function buildChannelMessages(): Promise<{ who: string; text: string }[]> {
+  const registers = await store.read({ types: ['register'] })
+  const userAgents = new Set<string>()
+  for (const e of registers) {
+    const d = e.data as RegisterData
+    if (d.role === 'user' && d.agent) userAgents.add(d.agent)
+  }
+  const rows: { at: number; who: string; text: string }[] = []
+  for (const name of userAgents) {
+    const events = await store.read({ stream: agentStream(name) })
+    for (const e of events) {
+      if (e.type === 'reply') rows.push({ at: e.id, who: 'human', text: (e.data as ReplyData).text })
+      else if (e.type === 'send')
+        rows.push({ at: e.id, who: (e.data as SendData).from ?? 'agent', text: (e.data as SendData).text })
+    }
+  }
+  rows.sort((a, b) => a.at - b.at)
+  return rows.map(({ who, text }) => ({ who, text }))
+}
+
+/** The valid `scope` values for /context/search (`all` is also the default). */
+const CONTEXT_SCOPES = ['knowledge', 'tasks', 'channel', 'all']
+
+/** Build the search corpus for a scope. `all` (the default) = the union of
+ *  every source; `knowledge` = wiki + unconsolidated memorize; `tasks` = task
+ *  comments; `channel` = the human conversation. Default-`all` makes empty
+ *  recall-safe: an all-scope empty means "definitively not in the dojo's
+ *  memory," whereas a narrow-scope empty rules out only that one source. */
+async function buildCorpus(scope: string): Promise<SearchDoc[]> {
+  const docs: SearchDoc[] = []
+  if (scope === 'knowledge' || scope === 'all') {
+    docs.push(...wikiDocs(resolve(DATA_DIR, 'context')), ...memoryDocs(await unconsolidatedMemories()))
+  }
+  if (scope === 'tasks' || scope === 'all') {
+    docs.push(...taskDocs(await buildTaskInputs()))
+  }
+  if (scope === 'channel' || scope === 'all') {
+    docs.push(...channelDocs(await buildChannelMessages()))
+  }
+  return docs
 }
 
 // ── Sensei nudge ──────────────────────────────────────────────────
@@ -1358,6 +1458,74 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             ...(e.data as MemoryData),
           })),
         })
+      })()
+    }
+
+    // GET /context/map — the live page map (name + trigger-style description),
+    // generated from page frontmatter so it never lags consolidation. The
+    // agent's "which page holds X" answer, one glance.
+    if (path === '/context/map' && req.method === 'GET') {
+      try {
+        const pages = wikiDocs(resolve(DATA_DIR, 'context')).map((d) => ({
+          page: d.page,
+          description: d.description,
+        }))
+        return Response.json({ pages, count: pages.length })
+      } catch (err) {
+        // Read failure ≠ empty map — surface it rather than imply "no pages."
+        return Response.json(
+          { error: 'the wiki could not be read', detail: err instanceof Error ? err.message : String(err) },
+          { status: 503 },
+        )
+      }
+    }
+
+    // GET /context/search?q=…&scope=all&topN=5 — curated search over the dojo's
+    // memory. `scope` defaults to `all` (wiki + unconsolidated memory + task
+    // comments + human⇄agent channel), ranked together: recall-safety is the
+    // default, so an all-scope empty means "definitively nowhere in the dojo's
+    // memory" — the signal that kills the grep-the-raw-log reflex. Narrow to
+    // knowledge/tasks/channel to search one source on purpose. Ranking is
+    // field-boosted BM25 + capped fuzzy (see retrieval.ts).
+    if (path === '/context/search' && req.method === 'GET') {
+      return (async () => {
+        const q = url.searchParams.get('q') ?? ''
+        // Absent scope defaults to `all`; an INVALID scope is a caller error,
+        // not a silent widen — returning all-scope hits for a typo'd
+        // `scope=knowlege` would mislead a caller who meant to narrow.
+        const scopeParam = url.searchParams.get('scope')
+        if (scopeParam !== null && !CONTEXT_SCOPES.includes(scopeParam)) {
+          return Response.json({ error: `invalid scope "${scopeParam}"`, validScopes: CONTEXT_SCOPES }, { status: 400 })
+        }
+        const scope = scopeParam ?? 'all'
+        // Pass the raw parse through; search() clamps garbage (negative,
+        // fractional, NaN) to a sane [1, MAX] rather than letting it reach
+        // slice()/Math.min. Absent → undefined → search's default.
+        const topNParam = url.searchParams.get('topN')
+        const topN = topNParam !== null ? Number(topNParam) : undefined
+        let result: SearchResult
+        try {
+          result = runSearch(buildIndex(await buildCorpus(scope)), q, { topN, scope })
+        } catch (err) {
+          // A knowledge source that fails to READ (vs. legitimately absent)
+          // must not masquerade as an empty result — empty means "definitively
+          // not in memory," so a masked read failure would be a lie. Surface it.
+          return Response.json(
+            { error: 'a knowledge source could not be read', detail: err instanceof Error ? err.message : String(err) },
+            { status: 503 },
+          )
+        }
+        logRetrieval({
+          at: new Date().toISOString(),
+          from: url.searchParams.get('from') ?? undefined,
+          query: q,
+          scope,
+          total: result.total,
+          returned: result.returned,
+          empty: result.empty,
+          hits: result.hits.map((h) => ({ page: h.page, source: h.source, score: h.score })),
+        })
+        return Response.json(result)
       })()
     }
 

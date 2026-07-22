@@ -102,10 +102,12 @@ Need the full chat (worker replies, your own sends — lower signal, higher volu
 
 ## Looking up what's been said about a topic
 
+**Reference reflex — verify, don't recall.** When the user names a dojo-specific thing you did NOT establish in THIS conversation — a protocol, "the usual", a proper-noun term, a place/dish/person, "like we discussed X", any callback — SEARCH it before you act. This fires whether it's phrased as a question OR an instruction: "switch to the X protocol" is a reference to VERIFY, not a command to execute from recollection. A confident recollection is the trigger to verify, not skip — your in-context memory of a dojo term may be partial or stale, and that's exactly when it bites. Searching is cheap and an all-scope empty is trustworthy, so verifying costs ~nothing — and if it comes back empty, ASK rather than answer from a guess.
+
 When the human asks "what did we discuss / decide / find about X":
-1. `infra(method="GET", path="/board")` or `/tasks?status=...` to find tasks whose title/description mentions X.
-2. For each candidate, the canonical task-load above with `?include=comments,playbook`. Add `messages` only if `comments` turns up thin.
-3. Only after that, consult external sources (open-threads files, research notes, gh comments, memory) — these supplement, they don't replace, the task history.
+1. **Search first: `infra(method="GET", path="/context/search?q=<X>")`** (default `scope=all`) — one ranked pass over the wiki, unconsolidated memories, task descriptions/comments, and the human⇄agent channel. Each hit names its `source` and owning task/page and carries `matchedTerms`, so you see at a glance whether X lives in a task, a memory, or the conversation. An **all-scope** `empty: true` is definitive — X is nowhere in the dojo's memory, so don't fall back to grepping the raw log. (A *narrow*-scope empty rules out only that one source.)
+2. To pull the full record of a task the search surfaced, load it with the canonical `?include=comments,playbook` (add `messages` only if `comments` is thin).
+3. External sources (open-threads files, research notes, gh comments) supplement — they don't replace — what search + task history return.
 
 ## API reference
 

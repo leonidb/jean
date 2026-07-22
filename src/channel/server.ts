@@ -318,17 +318,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     })
   }
 
-  if (req.params.name === 'recent_memories') {
-    const params = new URLSearchParams()
-    // Coerce in case the LLM client sent a string despite the schema.
-    const since = Number(args.since)
-    const limit = Number(args.limit)
-    if (Number.isFinite(since)) params.set('since', String(since))
-    if (Number.isFinite(limit)) params.set('limit', String(limit))
-    const qs = params.toString() ? `?${params.toString()}` : ''
-    return callInfraTool('recent_memories', 'GET', `/context/recent${qs}`)
-  }
-
   if (req.params.name === 'ack') {
     const upToId = Number(args.upToId)
     if (!Number.isFinite(upToId) || upToId < 1) {

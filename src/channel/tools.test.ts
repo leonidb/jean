@@ -7,29 +7,28 @@ import {
   formatInfraResponse,
   INFRA_MAX_BODY_BYTES,
   MEMORIZE_TOOL,
-  RECENT_MEMORIES_TOOL,
   REPLY_TOOL,
   resolveReplyTaskId,
   SEND_TOOL,
 } from './tools.ts'
 
 describe('buildTools', () => {
-  test('sensei gets send + comment + memorize + recent_memories + ack + infra (no reply)', () => {
+  test('sensei gets send + comment + memorize + ack + infra (no reply)', () => {
     const names = buildTools('sensei').map((t) => t.name)
-    expect(names).toEqual(['send', 'comment', 'memorize', 'recent_memories', 'ack', 'infra'])
+    expect(names).toEqual(['send', 'comment', 'memorize', 'ack', 'infra'])
     expect(names).not.toContain('reply')
   })
 
-  test('worker gets reply + comment + memorize + recent_memories + infra (no send, no ack)', () => {
+  test('worker gets reply + comment + memorize + infra (no send, no ack)', () => {
     const names = buildTools('worker').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'infra'])
     expect(names).not.toContain('send')
     expect(names).not.toContain('ack')
   })
 
   test('user role matches worker (non-sensei has same toolset)', () => {
     const names = buildTools('user').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'recent_memories', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'infra'])
   })
 })
 
@@ -84,13 +83,6 @@ describe('tool shapes', () => {
   test('memorize scope is enum dojo|user', () => {
     const scope = propsOf(MEMORIZE_TOOL).scope as { enum?: string[] }
     expect(scope.enum).toEqual(['dojo', 'user'])
-  })
-
-  test('recent_memories has no required fields; since and limit are number', () => {
-    expect(RECENT_MEMORIES_TOOL.inputSchema.required).toBeUndefined()
-    const props = propsOf(RECENT_MEMORIES_TOOL)
-    expect((props.since as { type: string }).type).toBe('number')
-    expect((props.limit as { type: string }).type).toBe('number')
   })
 
   test('ack requires upToId (number)', () => {

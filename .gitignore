@@ -42,3 +42,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Local event log (only belongs inside dojos via .jean/, never at repo root)
 /history.jsonl
+
+# Dojo infra state — if a dojo is run inside this repo (e.g. for testing), its
+# .jean/ holds private, machine-local data (history, wiki, retrieval-log with
+# raw query text). Never commit it.
+.jean/

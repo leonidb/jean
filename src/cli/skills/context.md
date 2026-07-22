@@ -4,8 +4,9 @@ description: >
   The reading map of where data lives in a dojo — four homes (raw_context /
   wiki / the repo the dojo owns / the task), one writer each — and how to use
   the persistent knowledge wiki at `.jean/context/`. Read on session start;
-  navigate via `index.md`; record durable knowledge via `memorize`; never
-  edit the wiki directly. Loaded by sensei and workers.
+  search it via `/context/search` (default scope=all — an all-scope empty means
+  definitively absent), navigate via `index.md`; record durable knowledge via
+  `memorize`; never edit the wiki directly. Loaded by sensei and workers.
 ---
 
 # Where data lives — and the wiki
@@ -32,40 +33,36 @@ Everything is readable by everyone; each home has one writer. Two universal rule
 
 **Filing decisions are the sensei's.** Workers: your output lives as commits on a branch plus the task record (your skill has the details); when you're unsure where something belongs, say so in your `reply` — don't invent a spot. Sensei: your filing rules are in your skill's "Data homes" section.
 
-## Reading the wiki — index-first
+## Finding what the dojo knows — search first
 
-On session start (or when you need durable context), read in this order:
+**Reference reflex — verify, don't recall.** When the user names a dojo-specific thing you did NOT establish in THIS conversation — a protocol, "the usual", a proper-noun term, a place/dish/person, "like we discussed X", any callback — SEARCH it before you act. A confident recollection is the trigger to VERIFY, not skip: your in-context memory of a dojo term may be partial or stale, and that's exactly when it bites. Searching is cheap and an all-scope empty is trustworthy, so verifying costs ~nothing — and if it comes back empty, ASK rather than answer from a guess.
 
-```
-.jean/context/index.md     — master TOC, one line per page, organized by category
-.jean/context/log.md       — append-only operation timeline (what was added/changed when)
-.jean/context/<page>.md    — specific pages, opened only after the index says they're relevant
-```
-
-**Don't read every file.** The wiki may have hundreds of pages. Read `index.md` first, identify the 1–3 pages that bear on your current question, read those.
-
-**The index carries page descriptions.** Each line is `- [[Page]] — <one-sentence description>`. The description tells you what's on the page; you often don't need to open the page itself to know whether it's relevant. Open only the pages whose descriptions answer your question.
-
-**Follow wiki-links when relevant.** Pages contain `[[Page Name]]` references to related concepts. Treat them as first-class navigation: after the 1–3 pages from the index, follow links when the destination is plausibly relevant to your question. Stop when you have enough — don't traverse transitively forever. The pattern is index → page → link-hop, not index → page only.
-
-If the index is missing or empty (fresh dojo), the wiki hasn't been populated yet — proceed without it; consolidation will build it as memories accumulate.
-
-## Pending memorize events — the gap between memorize and the wiki
-
-The wiki is *yesterday's* snapshot. Memorize events emitted today don't land in `.jean/context/` until the next librarian run (typically nightly). To see what's been memorized but not yet consolidated:
+Before you browse the index or reach for `grep`, **search**. One call ranks every home of the dojo's memory at once:
 
 ```
-recent_memories()                 # everything since the consolidator cursor
-recent_memories(since=1180)       # explicit event-id override
-recent_memories(limit=20)         # only the tail of N events
+infra GET /context/search?q=<terms>                    # default scope=all
+infra GET /context/search?q=<terms>&topN=15            # widen the cut (default 5)
+infra GET /context/search?q=<terms>&scope=knowledge    # narrow to one source on purpose
 ```
 
-Returns the consolidator cursor (when the wiki was last updated and through which event id) plus every memorize event since. Two situations want this:
+`scope` defaults to `all` — wiki pages + today's unconsolidated memories + task descriptions/comments + the human⇄agent conversation, ranked together (field-boosted BM25 + capped fuzzy). Every hit carries its `source`, the owning `page`/task, that page's description, a snippet centered on the matched line, and `matchedTerms` — which of your query's terms it actually matched. Read `matchedTerms` to reject a weak hit at a glance: a multi-word query can return something that matched only one incidental word.
 
-- **Verification after writing.** You memorized something a few minutes ago and want to confirm it landed.
-- **Bootstrap as a fresh worker.** When you're dispatched on a task, the wiki gives you durable knowledge as of last night — `recent_memories` gives you facts memorized earlier in the *current* session that aren't in the wiki yet. Read both: wiki for lasting context, `recent_memories` for fresh facts the dispatching sensei (or peers on this task) just wrote.
+**Empty on the default (all-scope) is definitive — stop, don't grep.** When an all-scope search returns `empty: true`, the topic is genuinely nowhere in the dojo's memory (wiki, memories, tasks, or conversation). That is the whole point of this tool: it makes one cheap search authoritative so you don't fall back to grepping the raw event log — a grep after an all-scope empty finds nothing the search didn't.
 
-No agent filter — all memorize events are returned; you pick out the ones relevant to you. The wiki remains authoritative for most questions; reach for `recent_memories` when you suspect the wiki is missing something fresh.
+**The definitive-empty guarantee holds only for `scope=all`.** A *narrow*-scope empty rules out only that one source — `scope=knowledge` empty still leaves tasks and channel unsearched; `scope=tasks` empty still leaves the wiki. So: search the default (all); empty *there* → stop. Reach for a narrow scope only when you deliberately want a single source.
+
+Browse the index (below) when you want to read a whole page, or when you don't yet have precise query terms. Reach for `grep` on the raw log essentially never — an all-scope empty has already told you it isn't there.
+
+## Browsing the wiki — when you want to read, not search
+
+Search (above) is how you *find* a fact. Browse the index when you instead want to *read* — orient at session start, read a whole page end-to-end, or when you don't yet have precise query terms:
+
+- `.jean/context/index.md` — master TOC, one line per page (`- [[Page]] — <description>`), organized by category. The description often tells you enough without opening the page. Open the 1–3 pages that bear on your question; follow `[[wiki-links]]` to related pages when relevant. Don't read every file.
+- `.jean/context/log.md` — append-only timeline of what changed when.
+
+If the index is missing or empty (fresh dojo), proceed without it — consolidation builds it as memories accumulate.
+
+Note on freshness: the wiki is last night's snapshot, but you don't need a separate tool to see today's memories — **search already includes memorize-events-not-yet-consolidated** (the `knowledge` scope, and therefore `all`). A fact you memorized minutes ago is findable by searching for it, before the nightly librarian run.
 
 ## Recording durable knowledge — `memorize`
 
@@ -96,13 +93,13 @@ Claude Code maintains its own per-project auto-memory at `~/.claude/projects/<pr
 
 The wiki is the dojo's memory. It's visible to all agents (not just you), durable across reinstalls and machine moves, distilled by the librarian, and corrected via the same `memorize()` channel. Auto-memory is per-Claude-instance, invisible to peers, silently bypasses curation, and creates a parallel knowledge store that defeats the whole point of the wiki design.
 
-**Active use closes the loop.** The wiki feels alive when you treat it as one — read early and often, not just at session start:
+**Active use closes the loop.** The wiki feels alive when you treat it as one — search early and often, not just at session start:
 
-- Skim `index.md` whenever you reach a "what do we know about X" moment
-- Call `recent_memories()` to see what you (or peers) memorized this session, *immediately* after writing — no need to wait for nightly consolidation to confirm it landed
+- Search whenever you reach a "what do we know about X" moment (see "Finding what the dojo knows" above)
+- To confirm a write landed: `memorize` returns the event id (proof it was recorded), and the fact is searchable immediately — the knowledge scope includes unconsolidated memories, so you don't wait for nightly consolidation
 - When you hit a stale fact, emit a `CORRECTION:` memorize and move on; trust that the librarian renders it
 
-The "I just wrote it, I can't see it" feeling that drives agents to auto-memory is solved by `recent_memories` — your write shows up there within seconds. Use it; the wiki is not write-only.
+The "I just wrote it, I can't see it" feeling that drives agents to auto-memory is answered twice over: the `memorize` call returns an id, and a follow-up search surfaces the fact within seconds. The wiki is not write-only.
 
 ### What NOT to memorize
 
@@ -148,6 +145,7 @@ You don't invoke the librarian directly. It runs on a schedule (default nightly)
 
 ## Quick reference
 
+- Search the dojo's memory: `infra GET /context/search?q=…` (default scope=all) — the first move for any lookup; an all-scope empty = definitively absent, stop there
 - Read wiki: open `.jean/context/index.md`, navigate from there
 - Read pending memorize events: `infra GET /context/recent` — what's queued for the next consolidation
 - Record knowledge: `memorize` (cross-task, durable)
