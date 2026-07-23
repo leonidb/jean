@@ -1,12 +1,28 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import {
   buildHeadlessCommand,
+  CONSOLIDATE_WIKI_PROMPT,
+  CONSOLIDATE_WIKI_TRIGGER_ID,
+  commitConsolidation,
+  LIBRARIAN_DEFAULT_CRON,
+  LIBRARIAN_DEFAULT_MODEL,
   LibrarianRoleNotInitializedError,
   parseHeadlessJson,
   parseHeadlessStreamJson,
   probeAnthropicAPI,
+  provisionLibrarianTrigger,
   recoverWikiLayout,
   spawnHeadless,
 } from './librarian.ts'
@@ -221,6 +237,46 @@ describe('recoverWikiLayout', () => {
 
   test('no context/, no staging/, no old-* → throws (caller must bootstrap)', () => {
     expect(() => recoverWikiLayout(ROOT)).toThrow(/missing/)
+  })
+
+  // Establish context/ as a git repo with one committed page.
+  const gitInitCtx = () => {
+    mkdirSync(ctx, { recursive: true })
+    writeFileSync(resolve(ctx, 'a.md'), 'committed\n')
+    const g = (args: string[]) => Bun.spawnSync(['git', '-C', ctx, ...args], { stdout: 'pipe', stderr: 'pipe' })
+    g(['init', '-q'])
+    g(['add', '-A'])
+    g(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'base'])
+  }
+
+  test('git era: dirty context/ + staging → reverts tracked to HEAD, PRESERVES untracked', () => {
+    gitInitCtx()
+    // Crash mid copy-sync: a tracked page half-written, plus untracked content —
+    // a human's manual page that was never committed — with staging present.
+    writeFileSync(resolve(ctx, 'a.md'), 'HALF-WRITTEN\n')
+    writeFileSync(resolve(ctx, 'human-notes.md'), 'hand-written, never committed\n')
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(resolve(staging, 'x.md'), 'x\n')
+
+    const r = recoverWikiLayout(ROOT)
+
+    expect(r.recovered).toBe('reset')
+    expect(readFileSync(resolve(ctx, 'a.md'), 'utf8')).toBe('committed\n') // tracked reverted to HEAD
+    // Untracked content is NEVER destroyed — recovery must not `git clean` it away.
+    expect(readFileSync(resolve(ctx, 'human-notes.md'), 'utf8')).toBe('hand-written, never committed\n')
+    expect(existsSync(staging)).toBe(false) // staging dropped → next run rebuilds
+  })
+
+  test('git era: clean context/ + staging present → drops staging, keeps the commit', () => {
+    gitInitCtx()
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(resolve(staging, 'x.md'), 'x\n')
+
+    const r = recoverWikiLayout(ROOT)
+
+    expect(r.recovered).toBe('cleanup')
+    expect(existsSync(staging)).toBe(false)
+    expect(readFileSync(resolve(ctx, 'a.md'), 'utf8')).toBe('committed\n') // untouched
   })
 })
 
@@ -511,5 +567,337 @@ describe('probeAnthropicAPI', () => {
     const result = await probeAnthropicAPI({ binary: '/nonexistent/path/to/claude', timeoutMs: 2000 })
     expect(result.ok).toBe(false)
     expect(result.error).toBeDefined()
+  })
+})
+
+describe('provisionLibrarianTrigger', () => {
+  let dir: string
+  let historyPath: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(resolve(tmpdir(), 'jean-provision-'))
+    historyPath = resolve(dir, 'history.jsonl')
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  /** Parse the jsonl event log back into objects. */
+  function readEvents(): Array<{ id: number; stream: string; type: string; data: Record<string, unknown> }> {
+    if (!existsSync(historyPath)) return []
+    return readFileSync(historyPath, 'utf8')
+      .trimEnd()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+  }
+
+  test('creates the consolidate-wiki trigger in an empty log with the pipeline-dispatching shape', async () => {
+    const { created } = await provisionLibrarianTrigger({ historyPath })
+    expect(created).toBe(true)
+
+    const createdEvents = readEvents().filter((e) => e.type === 'trigger-created')
+    expect(createdEvents).toHaveLength(1)
+    const d = createdEvents[0]?.data as Record<string, unknown>
+    // role + id are what server.ts keys the draft→review→commit pipeline on.
+    expect(d.id).toBe(CONSOLIDATE_WIKI_TRIGGER_ID)
+    expect(d.agent).toBe('librarian')
+    expect(d.kind).toBe('headless')
+    expect(d.cron).toBe(LIBRARIAN_DEFAULT_CRON)
+    expect(d.model).toBe(LIBRARIAN_DEFAULT_MODEL)
+    expect(d.prompt).toBe(CONSOLIDATE_WIKI_PROMPT)
+    expect(d.actor).toBe('init')
+    expect(createdEvents[0]?.stream).toBe('triggers')
+  })
+
+  test('is idempotent — a second call does not duplicate', async () => {
+    const first = await provisionLibrarianTrigger({ historyPath })
+    const second = await provisionLibrarianTrigger({ historyPath })
+    expect(first.created).toBe(true)
+    expect(second.created).toBe(false)
+    expect(readEvents().filter((e) => e.type === 'trigger-created')).toHaveLength(1)
+  })
+
+  test('does not resurrect a deliberately removed trigger', async () => {
+    await provisionLibrarianTrigger({ historyPath })
+    // Simulate a user `jean trigger remove consolidate-wiki`.
+    appendFileSync(
+      historyPath,
+      `${JSON.stringify({
+        id: 99,
+        stream: 'triggers',
+        type: 'trigger-removed',
+        ts: '2026-01-01T00:00:00.000Z',
+        data: { id: CONSOLIDATE_WIKI_TRIGGER_ID },
+      })}\n`,
+    )
+    const { created } = await provisionLibrarianTrigger({ historyPath })
+    expect(created).toBe(false)
+    // Still exactly one create — we did not re-add it.
+    expect(readEvents().filter((e) => e.type === 'trigger-created')).toHaveLength(1)
+  })
+
+  test('honors cron and model overrides', async () => {
+    await provisionLibrarianTrigger({ historyPath, cron: '0 5 * * *', model: 'opus' })
+    const d = readEvents().find((e) => e.type === 'trigger-created')?.data as Record<string, unknown>
+    expect(d.cron).toBe('0 5 * * *')
+    expect(d.model).toBe('opus')
+  })
+})
+
+describe('commitConsolidation (git-backed context/)', () => {
+  let dir: string
+  let context: string
+  let consolidator: string
+  let staging: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(resolve(tmpdir(), 'jean-commit-'))
+    const jean = resolve(dir, '.jean')
+    context = resolve(jean, 'context')
+    consolidator = resolve(jean, '.consolidator')
+    staging = resolve(consolidator, 'staging')
+    mkdirSync(context, { recursive: true })
+    mkdirSync(staging, { recursive: true })
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const writeCursor = (id: number) =>
+    writeFileSync(
+      resolve(consolidator, 'cursor.json'),
+      JSON.stringify({ lastEventId: id, lastConsolidatedAt: 'x', lastRawConsolidatedAt: 'x' }),
+    )
+  const writePlan = (plan: Record<string, unknown>) =>
+    writeFileSync(resolve(consolidator, 'plan.json'), JSON.stringify(plan))
+  const gitSubjects = (repo: string): string[] =>
+    Bun.spawnSync(['git', '-C', repo, 'log', '--format=%s'], { stdout: 'pipe', stderr: 'pipe' })
+      .stdout.toString()
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+  const filesInHead = (repo: string): string[] =>
+    Bun.spawnSync(['git', '-C', repo, 'show', '--name-only', '--format=', 'HEAD'], { stdout: 'pipe', stderr: 'pipe' })
+      .stdout.toString()
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+  const noop = async () => {}
+
+  test('git-backs a fresh context/, commits the pages, advances the cursor', async () => {
+    writeCursor(470)
+    writeFileSync(resolve(staging, 'index.md'), '# Index\n')
+    writeFileSync(resolve(staging, 'bills.md'), '# Bills\ncancelled\n')
+    writePlan({
+      phase: 'draft',
+      newCursor: 512,
+      decisions: [
+        { op: 'create', page: 'bills.md' },
+        { op: 'create', page: 'index.md' },
+      ],
+      stats: { eventsProcessed: 3, pagesCreated: 2 },
+    })
+
+    const res = await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+
+    expect(res.swapped).toBe(true)
+    expect(existsSync(resolve(context, '.git'))).toBe(true)
+    expect(existsSync(resolve(context, 'bills.md'))).toBe(true)
+    expect(existsSync(staging)).toBe(false) // staging consumed
+    // Commit subject carries the event-id watermark (prev → new cursor).
+    expect(gitSubjects(context)[0]).toBe('consolidate 470→512: 2 created')
+    // Cursor advanced to the plan's newCursor.
+    expect(JSON.parse(readFileSync(resolve(consolidator, 'cursor.json'), 'utf8')).lastEventId).toBe(512)
+  })
+
+  test('migrates a pre-git context/ with a baseline commit, then applies the run', async () => {
+    // Pre-existing wiki, not yet a git repo.
+    writeFileSync(resolve(context, 'old.md'), '# Old\nexisting\n')
+    writeCursor(100)
+    // Draft carries old.md forward (keep) and adds new.md.
+    writeFileSync(resolve(staging, 'old.md'), '# Old\nexisting\n')
+    writeFileSync(resolve(staging, 'new.md'), '# New\n')
+    writePlan({
+      phase: 'draft',
+      newCursor: 120,
+      decisions: [
+        { op: 'keep', page: 'old.md' },
+        { op: 'create', page: 'new.md' },
+      ],
+      stats: { eventsProcessed: 1, pagesCreated: 1 },
+    })
+
+    await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+
+    const subjects = gitSubjects(context) // newest first
+    expect(subjects.length).toBe(2)
+    expect(subjects[1]).toContain('initial commit') // baseline captured old.md
+    expect(subjects[0]).toBe('consolidate 100→120: 1 created')
+    // The run commit's diff is ONLY new.md — old.md was byte-identical, no noise.
+    expect(filesInHead(context)).toEqual(['new.md'])
+    expect(existsSync(resolve(context, 'old.md'))).toBe(true)
+  })
+
+  test('an archived page is deleted and the deletion is committed', async () => {
+    // First run establishes a git-backed context with a.md + b.md.
+    writeCursor(0)
+    writeFileSync(resolve(staging, 'a.md'), '# A\n')
+    writeFileSync(resolve(staging, 'b.md'), '# B\n')
+    writePlan({
+      phase: 'draft',
+      newCursor: 10,
+      decisions: [
+        { op: 'create', page: 'a.md' },
+        { op: 'create', page: 'b.md' },
+      ],
+      stats: { eventsProcessed: 2, pagesCreated: 2 },
+    })
+    await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+    expect(existsSync(resolve(context, 'b.md'))).toBe(true)
+
+    // Second run: staging omits b.md (archived away).
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(resolve(staging, 'a.md'), '# A\n')
+    writePlan({
+      phase: 'draft',
+      newCursor: 20,
+      decisions: [
+        { op: 'keep', page: 'a.md' },
+        { op: 'archive', page: 'b.md' },
+      ],
+      stats: { eventsProcessed: 1, pagesArchived: 1 },
+    })
+    await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+
+    expect(existsSync(resolve(context, 'b.md'))).toBe(false) // removed from the tree
+    expect(existsSync(resolve(context, 'a.md'))).toBe(true)
+    expect(gitSubjects(context)[0]).toBe('consolidate 10→20: 1 archived')
+    // b.md is recoverable from history even though it's gone from the tree.
+    const show = Bun.spawnSync(['git', '-C', context, 'show', 'HEAD~1:b.md'], { stdout: 'pipe', stderr: 'pipe' })
+    expect(show.exitCode).toBe(0)
+    expect(show.stdout.toString()).toContain('# B')
+  })
+
+  test('a keep-only plan makes no commit and sweeps staging', async () => {
+    writeCursor(5)
+    writeFileSync(resolve(context, 'a.md'), '# A\n')
+    writeFileSync(resolve(staging, 'a.md'), '# A\n')
+    writePlan({ phase: 'draft', newCursor: 5, decisions: [{ op: 'keep', page: 'a.md' }], stats: {} })
+
+    const res = await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+
+    expect(res.swapped).toBe(false)
+    expect(existsSync(staging)).toBe(false) // straggler staging swept
+    expect(existsSync(resolve(context, '.git'))).toBe(false) // no changes → not git-backed yet
+  })
+
+  // First run helper: establish a git-backed context/ with the given pages.
+  const firstRun = async (pages: Record<string, string>, newCursor: number) => {
+    writeCursor(0)
+    for (const [f, body] of Object.entries(pages)) {
+      mkdirSync(resolve(staging, f, '..'), { recursive: true })
+      writeFileSync(resolve(staging, f), body)
+    }
+    writePlan({
+      phase: 'draft',
+      newCursor,
+      decisions: Object.keys(pages).map((page) => ({ op: 'create', page })),
+      stats: { eventsProcessed: 1, pagesCreated: Object.keys(pages).length },
+    })
+    await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+  }
+
+  test('byte-identical update makes no commit but still advances the cursor', async () => {
+    await firstRun({ 'a.md': '# A\ncontent\n' }, 10)
+    const commitsAfterFirst = gitSubjects(context).length
+
+    // Second run: an 'update' decision but byte-identical content → no git diff.
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(resolve(staging, 'a.md'), '# A\ncontent\n') // identical bytes
+    writePlan({
+      phase: 'draft',
+      newCursor: 20,
+      decisions: [{ op: 'update', page: 'a.md' }],
+      stats: { eventsProcessed: 1, pagesUpdated: 1 },
+    })
+    const res = await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+
+    expect(res.swapped).toBe(true) // plan had changes...
+    expect(gitSubjects(context).length).toBe(commitsAfterFirst) // ...but NO new commit (no diff)
+    // Cursor still advances — the events were processed even if the wiki didn't change.
+    expect(JSON.parse(readFileSync(resolve(consolidator, 'cursor.json'), 'utf8')).lastEventId).toBe(20)
+  })
+
+  test('a stray staging/.git never clobbers the real context/ repo', async () => {
+    await firstRun({ 'a.md': '# A\n' }, 10)
+    const firstHead = Bun.spawnSync(['git', '-C', context, 'rev-parse', 'HEAD'], { stdout: 'pipe' })
+      .stdout.toString()
+      .trim()
+
+    // Second run whose staging contains a bogus .git (e.g. a skill that cp -r'd context).
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(resolve(staging, 'a.md'), '# A\nv2\n')
+    mkdirSync(resolve(staging, '.git'), { recursive: true })
+    writeFileSync(resolve(staging, '.git', 'BOGUS'), 'not a real repo\n')
+    writePlan({
+      phase: 'draft',
+      newCursor: 20,
+      decisions: [{ op: 'update', page: 'a.md' }],
+      stats: { eventsProcessed: 1, pagesUpdated: 1 },
+    })
+    await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+
+    expect(existsSync(resolve(context, '.git', 'BOGUS'))).toBe(false) // bogus .git never copied in
+    // History chains back to the first commit → the real repo was not clobbered.
+    const parent = Bun.spawnSync(['git', '-C', context, 'rev-parse', 'HEAD~1'], { stdout: 'pipe' })
+      .stdout.toString()
+      .trim()
+    expect(parent).toBe(firstHead)
+  })
+
+  test('a dirty context/ (human edit) is captured in its own commit before consolidation overwrites it', async () => {
+    await firstRun({ 'a.md': '# A\noriginal\n' }, 10)
+    // Human hand-edits a tracked page — dirty, never committed.
+    writeFileSync(resolve(context, 'a.md'), '# A\nHUMAN EDIT never memorized\n')
+
+    // A consolidation run overwrites a.md with a distilled version.
+    mkdirSync(staging, { recursive: true })
+    writeFileSync(resolve(staging, 'a.md'), '# A\ndistilled v2\n')
+    writePlan({
+      phase: 'draft',
+      newCursor: 20,
+      decisions: [{ op: 'update', page: 'a.md' }],
+      stats: { eventsProcessed: 1, pagesUpdated: 1 },
+    })
+    await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+
+    // Working tree ends at the distilled version...
+    expect(readFileSync(resolve(context, 'a.md'), 'utf8')).toBe('# A\ndistilled v2\n')
+    // ...but the human edit is NOT lost — captured in git history first.
+    const subjects = gitSubjects(context)
+    expect(subjects[0]).toContain('consolidate 10→20') // newest: the consolidation
+    expect(subjects[1]).toBe('wiki: capture pre-consolidation edits') // the captured human edit
+    const captured = Bun.spawnSync(['git', '-C', context, 'show', 'HEAD~1:a.md'], { stdout: 'pipe' }).stdout.toString()
+    expect(captured).toContain('HUMAN EDIT never memorized')
+  })
+
+  test('a removed NESTED page is deleted (recursive mirror)', async () => {
+    await firstRun({ 'topics/a.md': '# A\n', 'topics/b.md': '# B\n' }, 10)
+    expect(existsSync(resolve(context, 'topics', 'b.md'))).toBe(true)
+
+    // Second run: staging omits topics/b.md.
+    mkdirSync(resolve(staging, 'topics'), { recursive: true })
+    writeFileSync(resolve(staging, 'topics', 'a.md'), '# A\n')
+    writePlan({
+      phase: 'draft',
+      newCursor: 20,
+      decisions: [{ op: 'archive', page: 'topics/b.md' }],
+      stats: { eventsProcessed: 1, pagesArchived: 1 },
+    })
+    await commitConsolidation({ dojoRoot: dir, recordEvent: noop })
+
+    expect(existsSync(resolve(context, 'topics', 'b.md'))).toBe(false) // nested removal handled
+    expect(existsSync(resolve(context, 'topics', 'a.md'))).toBe(true)
   })
 })

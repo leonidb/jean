@@ -8,7 +8,9 @@ description: >
 
 # Consolidate Wiki
 
-You are the **librarian** of this dojo. Your job: read new `memory` events and recently-completed tasks, distill durable knowledge into the wiki at `.jean/context/`, and atomically swap in the new version.
+> **Reference overview — not the runtime path.** Scheduled consolidation runs as a **three-phase pipeline**: `consolidate-wiki-draft` (writes `staging/` + `plan.json`) → `consolidate-wiki-review` (proofreads `staging/`) → an in-process shell phase, **run deterministically by the trigger harness with no model in the loop**, that commits `staging/` into the **git-backed** `.jean/context/` (one commit per run), advances the cursor, and emits the event. Because that final step is mechanical and modelless, it can never be forgotten or improvised. This doc is kept as a conceptual guide to the **page principles** below; treat its mechanical steps as illustrative, and never execute a manual `mv`/swap of `context/` or a `POST /context/consolidated` — the shell phase owns those.
+
+You are the **librarian** of this dojo. Your job: read new `memory` events and recently-completed tasks, distill durable knowledge into the wiki at `.jean/context/`, and hand a finished `staging/` to the shell phase that commits it.
 
 You are the **only writer** of `.jean/context/`. Every other agent emits memorize events; you alone produce the structured wiki.
 
@@ -168,14 +170,14 @@ Skip this for small runs (<20 events) — Haiku spawn overhead isn't worth it.
 
 ### 4. Build the next version
 
-Copy the current wiki to a staging directory as your working copy:
+Copy the current wiki to a staging directory as your working copy — **page by page**. Never `cp -r .jean/context/.`: `context/` is a git repo, and a recursive copy would drag its `.git` into staging.
 
 ```bash
-rm -r .jean/.consolidator/staging
-cp -r .jean/context/. .jean/.consolidator/staging/
+rm -rf .jean/.consolidator/staging && mkdir -p .jean/.consolidator/staging
+for f in .jean/context/*.md; do cp "$f" .jean/.consolidator/staging/; done
 ```
 
-Now edit pages in `.jean/.consolidator/staging/` only. Never touch `.jean/context/` directly — readers are using it.
+Now edit pages in `.jean/.consolidator/staging/` only. Never touch `.jean/context/` directly — readers are using it, and the shell phase (not you) writes it.
 
 For each input you decided to distill:
 - **New entity / concept**: create `.jean/.consolidator/staging/<slug>.md`. Add a one-line entry in `staging/index.md`.
@@ -233,54 +235,17 @@ This is a judgment pass, not a checklist. Read, think, fix what's wrong; don't t
 
 The principle: **don't delete or rewrite without reason. Do update when evidence shows current content is wrong or stale, regardless of who wrote it.**
 
-### 6. Swap (two renames + cleanup)
+### 6. Hand off — the shell phase commits (you do NOT swap)
 
-Replace `.jean/context/` with `staging/` via two renames. **All in one Bash invocation** — bash variables don't persist across separate tool calls, so don't split this into multiple steps:
+`.jean/context/` is a **git repo**. You do not rename it, swap it, or edit it directly. When you exit, a deterministic in-process shell phase copy-syncs your `staging/` into `context/` and makes **one git commit per run** — `git log -p` becomes the consolidation history, and the commit subject carries the event-id watermark (`consolidate <prev>→<new>`). That phase also handles crash recovery (a torn run resets `context/` to its last commit) and cleans up `staging/`. Your job ends at "staging is ready and `plan.json` is written."
 
-```bash
-TS=$(date -u +%Y%m%dT%H%M%SZ) && \
-  mv .jean/context .jean/.consolidator/old-$TS && \
-  mv .jean/.consolidator/staging .jean/context && \
-  rm -r .jean/.consolidator/old-$TS
-```
+Do **not** `mv`/swap `context/`, and do **not** write `.git`.
 
-Brief microsecond gap between the two `mv` calls where `.jean/context/` doesn't exist; concurrent readers (rare; this runs once a night) get `ENOENT` and naturally retry. The final `rm -r` cleans up the previous version.
+### 7. Cursor & completion are the shell's job too
 
-If you crash between the two renames, the next librarian invocation's pre-spawn recovery routine restores the layout deterministically — you don't have to defend against your own crash.
+You do **not** write `cursor.json`, advance the cursor, or `POST /context/consolidated`. The shell phase does all three after it commits: it advances the cursor to the highest event id you recorded and emits the `wiki-consolidated` event (surfacing your `anomalies` to sensei in its next nudge). Record your decisions, stats, and anomalies in `plan.json`, then exit.
 
-### 7. Advance cursor & emit completion
-
-Write the new cursor:
-
-```
-.jean/.consolidator/cursor.json
-{
-  "lastEventId": <highest event id you processed>,
-  "lastConsolidatedAt": "<ISO timestamp>",
-  "lastRawConsolidatedAt": "<run-start ISO — covers all files modified up to now>"
-}
-```
-
-`lastRawConsolidatedAt` should be the time you started this run, NOT the latest mtime you saw — using run-start ensures any file modified during your run gets picked up next time (avoiding the lost-update window).
-
-Then record the run via the infra HTTP API:
-
-```bash
-PORT=$(cat ../../infra.port)
-curl -s -X POST "http://127.0.0.1:$PORT/context/consolidated" \
-  -H 'content-type: application/json' \
-  -d '{
-    "pagesUpdated": <N>,
-    "pagesCreated": <K>,
-    "corrections": <M>,
-    "tasksDistilled": <T>,
-    "eventsProcessed": <E>,
-    "rawFilesProcessed": <R>,
-    "anomalies": []
-  }'
-```
-
-Sensei will see this `wiki-consolidated` event in its normal nudge cycle and surface non-empty `anomalies` to the human. Use `anomalies` for things sensei should know about: stale references, files you couldn't extract, contradictions you flagged but didn't auto-fix.
+Use `anomalies` for things sensei should know about: stale references, files you couldn't extract, contradictions you flagged but didn't auto-fix.
 
 ## Failure modes (be aware)
 
@@ -301,12 +266,8 @@ The deterministic pre-spawn recovery routine handles most of these before you st
 
 ## Sharpness checklist before exiting
 
-- [ ] Cursor advanced to highest event ID processed
-- [ ] `.jean/context/` is a real directory containing the new version
-- [ ] `.jean/.consolidator/staging/` does NOT exist (it became `.jean/context/`)
-- [ ] `.jean/.consolidator/old-*/` does NOT exist (cleaned up after swap)
-- [ ] `index.md` lists every page in `.jean/context/`
-- [ ] `log.md` has a new entry for this run
-- [ ] `wiki-consolidated` event recorded
+- [ ] `.jean/.consolidator/staging/` is complete — every kept / updated / created page present
+- [ ] `index.md` in staging lists every page
+- [ ] You did NOT touch `.jean/context/`, did NOT swap, did NOT advance the cursor, did NOT emit the event — the shell phase commits staging into the git-backed `context/` and does all of that
 
 When the checklist passes, exit cleanly with code 0.

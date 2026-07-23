@@ -96,6 +96,7 @@ Tell the human in 3–5 lines:
   ...
   ```
 - Mention that each `jean agent start` spawns a Claude Code session that takes over a terminal, so they'll want a terminal per agent (tmux/iTerm panes/separate windows).
+- Introduce the **librarian** (they likely won't know the term): a background helper that periodically reads the short memory notes agents jot down and distills them into a clean, deduplicated wiki under `.jean/context/`, so the dojo's knowledge accumulates instead of scattering across chat logs. It's already set up — a brief nightly run (03:00, on sonnet), added automatically at `jean dojo init`, first firing after `jean infra start`. They can see it with `jean trigger list` or turn it off with `jean trigger remove consolidate-wiki`. Define it in one sentence, then the practical bits — don't over-explain.
 
 Then stop. Do not offer to do more. Do not answer follow-ups about ongoing dojo operation — that's the sensei's job, once infra is running.
 

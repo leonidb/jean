@@ -48,6 +48,13 @@ import {
   validateConfigKey,
   writeConfig,
 } from '../infra/config.ts'
+import {
+  CONSOLIDATE_WIKI_PROMPT,
+  CONSOLIDATE_WIKI_TRIGGER_ID,
+  LIBRARIAN_DEFAULT_CRON,
+  LIBRARIAN_DEFAULT_MODEL,
+  provisionLibrarianTrigger,
+} from '../infra/librarian.ts'
 import { identityFromConfig, loadPeers, type Peer, savePeers } from '../infra/peers.ts'
 import {
   allocatePort,
@@ -241,19 +248,27 @@ function cmdLibrarian(args: string[]) {
   }
 }
 
-function cmdLibrarianSetup() {
-  const dojoRoot = findDojoRoot()
+/**
+ * Ship the librarian role into a dojo: raw_context/ dir, the three consolidate-
+ * wiki skills, and a settings.local.json carrying librarian permissions. Pure
+ * filesystem — no running infra required — so both `jean dojo init` and the
+ * standalone `jean librarian setup` share it. The trigger is provisioned
+ * separately (provisionLibrarianTrigger), because it writes to the event log.
+ */
+function provisionLibrarianRole(dojoRoot: string, opts?: { quiet?: boolean }): void {
   const jeanDir = resolve(dojoRoot, '.jean')
   const roleDir = resolve(jeanDir, 'roles', 'librarian')
+  const quiet = opts?.quiet ?? false
 
   // Create raw_context/ if missing — librarian reads from here, never writes.
   // Empty dir is fine; users drop source material in as they accumulate it.
   const rawContextDir = resolve(jeanDir, 'raw_context')
   if (!existsSync(rawContextDir)) {
     mkdirSync(rawContextDir, { recursive: true })
-    console.log(
-      `  ${GREEN}created${RESET} ${relative(dojoRoot, rawContextDir)}/  (drop human-curated source material here)`,
-    )
+    if (!quiet)
+      console.log(
+        `  ${GREEN}created${RESET} ${relative(dojoRoot, rawContextDir)}/  (drop human-curated source material here)`,
+      )
   }
 
   shipSkill(roleDir, 'consolidate-wiki')
@@ -269,19 +284,25 @@ function cmdLibrarianSetup() {
       settingsPath,
       `${JSON.stringify({ permissions: defaultPermissions('librarian', dojoRoot) }, null, 2)}\n`,
     )
-    console.log(`  ${GREEN}wrote${RESET} ${relative(dojoRoot, settingsPath)}`)
-  } else {
+    if (!quiet) console.log(`  ${GREEN}wrote${RESET} ${relative(dojoRoot, settingsPath)}`)
+  } else if (!quiet) {
     console.log(`  ${DIM}skip${RESET}  ${relative(dojoRoot, settingsPath)} (already exists)`)
   }
+}
+
+function cmdLibrarianSetup() {
+  const dojoRoot = findDojoRoot()
+  provisionLibrarianRole(dojoRoot)
 
   console.log(`\n${GREEN}Librarian setup complete in ${dojoRoot}/.jean/roles/librarian/${RESET}`)
   console.log()
-  console.log(`Next: create the consolidate-wiki trigger`)
+  console.log(`${DIM}New dojos get the librarian automatically at 'jean dojo init'.${RESET}`)
+  console.log(`To add the consolidate-wiki trigger to THIS existing dojo (infra must be running):`)
   console.log(`  jean trigger add --kind headless --agent librarian \\`)
-  console.log(`    --cron "0 3 * * *" --id consolidate-wiki \\`)
   console.log(
-    `    --prompt "Consolidate the wiki. Read .consolidator/cursor.json, fetch new memory events, distill into .jean/context/, atomically swap, advance cursor."`,
+    `    --cron "${LIBRARIAN_DEFAULT_CRON}" --id ${CONSOLIDATE_WIKI_TRIGGER_ID} --model ${LIBRARIAN_DEFAULT_MODEL} \\`,
   )
+  console.log(`    --prompt "${CONSOLIDATE_WIKI_PROMPT}"`)
 }
 
 // ── Commands ───────────────────────────────────────────────────────
@@ -1068,7 +1089,7 @@ async function cmdDojo(args: string[]) {
   const sub = args[0]
   switch (sub) {
     case 'init':
-      cmdDojoInit(args.slice(1))
+      await cmdDojoInit(args.slice(1))
       break
     case 'move':
       cmdDojoMove(args.slice(1))
@@ -1197,8 +1218,9 @@ function ensureWorkspace(jeanDir: string): void {
   if (commit.exitCode !== 0) warn('commit', commit)
 }
 
-function cmdDojoInit(args: string[]) {
+async function cmdDojoInit(args: string[]) {
   const useGit = args.includes('--git')
+  const noLibrarian = args.includes('--no-librarian')
   const gitFromIdx = args.indexOf('--git-from')
   const gitFrom = gitFromIdx >= 0 ? args[gitFromIdx + 1] : undefined
   if (gitFromIdx >= 0 && (!gitFrom || gitFrom.startsWith('--'))) {
@@ -1229,6 +1251,7 @@ function cmdDojoInit(args: string[]) {
     if (!arg?.startsWith('--')) continue
     const key = arg.slice(2)
     if (key === 'git') continue // not a config key
+    if (key === 'no-librarian') continue // boolean flag, not a config key
     if (key === 'git-from') {
       i++ // takes a value, but the value is the repo (handled above), not a config key
       continue
@@ -1330,6 +1353,19 @@ function cmdDojoInit(args: string[]) {
   // Record in the machine-global registry so future `jean dojo init` calls avoid this port.
   upsertDojo({ path: dojoRoot, port, identity: config.identity })
 
+  // Provision the librarian here — init is the ONE place a dojo is configured.
+  // Ships the role (skills + permissions) and writes the consolidate-wiki trigger
+  // into the brand-new event log: infra is down, so the direct append is
+  // race-free, and the first `infra start` replays + schedules it. Deliberately
+  // never reconciled on restart (see provisionLibrarianTrigger). --no-librarian
+  // opts out (throwaway/experimental dojos that don't want a nightly wiki run).
+  let librarianProvisioned = false
+  if (!noLibrarian) {
+    provisionLibrarianRole(dojoRoot, { quiet: true })
+    await provisionLibrarianTrigger({ historyPath: resolve(jeanDir, 'history.jsonl') })
+    librarianProvisioned = true
+  }
+
   console.log(`${GREEN}Dojo initialized at ${dojoRoot}${RESET} ${DIM}(port ${port})${RESET}`)
   console.log()
   console.log(`  ${dojoRoot}/`)
@@ -1347,6 +1383,15 @@ function cmdDojoInit(args: string[]) {
   console.log(`      sessions/        ${DIM}← agent session handles${RESET}`)
   console.log(`      jean.config.json ${DIM}← configuration${RESET}`)
   console.log()
+  if (librarianProvisioned) {
+    console.log(
+      `${GREEN}Librarian scheduled${RESET} ${DIM}— consolidates memory → wiki nightly (${LIBRARIAN_DEFAULT_CRON}, ${LIBRARIAN_DEFAULT_MODEL}); first run after 'infra start'.${RESET}`,
+    )
+    console.log(
+      `  ${DIM}see it: jean trigger list   ·   turn it off: jean trigger remove ${CONSOLIDATE_WIKI_TRIGGER_ID}${RESET}`,
+    )
+    console.log()
+  }
   console.log(`Next steps:`)
   console.log(`  jean setup             ${DIM}← register the channel (once per machine)${RESET}`)
   console.log(`  jean satori            ${DIM}← guided setup (recommended)${RESET}`)

@@ -131,6 +131,58 @@ describe('jean dojo init', () => {
     expect(existsSync(resolve(dojo, '.jean', 'workspace', '.git'))).toBe(true)
   })
 
+  test('provisions the librarian by default — role + consolidate-wiki trigger in the log', () => {
+    const dojo = resolve(tmp, 'dojo')
+    const { exitCode, stdout } = runInit(dojo, '--port', '8700')
+    expect(exitCode).toBe(0)
+
+    // Role dir: skills + permissions shipped.
+    expect(
+      existsSync(resolve(dojo, '.jean', 'roles', 'librarian', '.claude', 'skills', 'consolidate-wiki', 'SKILL.md')),
+    ).toBe(true)
+    expect(existsSync(resolve(dojo, '.jean', 'roles', 'librarian', '.claude', 'settings.local.json'))).toBe(true)
+    expect(existsSync(resolve(dojo, '.jean', 'raw_context'))).toBe(true)
+
+    // Trigger written directly into the fresh event log — first `infra start`
+    // will replay + schedule it (no server was running at init).
+    const events = readFileSync(resolve(dojo, '.jean', 'history.jsonl'), 'utf8')
+      .trimEnd()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+    const created = events.filter((e) => e.type === 'trigger-created' && e.data.id === 'consolidate-wiki')
+    expect(created).toHaveLength(1)
+    expect(created[0].data.agent).toBe('librarian')
+    expect(created[0].data.kind).toBe('headless')
+    expect(created[0].data.cron).toBe('0 3 * * *')
+    expect(created[0].data.model).toBe('sonnet')
+
+    // Init tells the human it scheduled a nightly run (transparency — it's a cost).
+    expect(stdout).toContain('Librarian scheduled')
+  })
+
+  test('--no-librarian skips the trigger and the runnable role config', () => {
+    const dojo = resolve(tmp, 'dojo')
+    const { exitCode, stdout } = runInit(dojo, '--port', '8700', '--no-librarian')
+    expect(exitCode).toBe(0)
+
+    expect(stdout).not.toContain('Librarian scheduled')
+
+    // The librarian can't RUN without its permissions or a schedule — those are
+    // what --no-librarian withholds. (Framework skills still ship into the role
+    // dir unconditionally; they're inert with no trigger + no settings.)
+    expect(existsSync(resolve(dojo, '.jean', 'roles', 'librarian', '.claude', 'settings.local.json'))).toBe(false)
+    expect(existsSync(resolve(dojo, '.jean', 'raw_context'))).toBe(false)
+
+    // No trigger event (and typically no history.jsonl at all, since init writes
+    // no other events).
+    const historyPath = resolve(dojo, '.jean', 'history.jsonl')
+    if (existsSync(historyPath)) {
+      const hasTrigger = readFileSync(historyPath, 'utf8').includes('"consolidate-wiki"')
+      expect(hasTrigger).toBe(false)
+    }
+  })
+
   test('auto-allocates a port when --port is omitted and records it in the registry', () => {
     const dojo = resolve(tmp, 'dojo')
     const { exitCode } = runInit(dojo, '--git')

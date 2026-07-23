@@ -16,10 +16,11 @@
  * See docs/llm-wiki-design.md (Adaptation 7).
  */
 
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
+import { createStore, jsonlBackend } from '../es/index.ts'
 import type { AgentRole } from './protocol.ts'
-import type { WikiConsolidatedData } from './reducers.ts'
+import { TRIGGERS_STREAM, type TriggerCreatedData, type WikiConsolidatedData } from './reducers.ts'
 
 export type SpawnHeadlessOpts = {
   /** The dojo root containing `.jean/`. */
@@ -100,21 +101,26 @@ export class LibrarianRoleNotInitializedError extends Error {
 }
 
 /**
- * Recover the wiki layout from a possible mid-swap crash before letting the
+ * Recover the wiki layout from a possible mid-run crash before letting the
  * librarian LLM run. Deterministic, no LLM involvement.
  *
- * Three crash states this fixes:
- *   - context/ missing, staging/ present       → mv staging → context (new version wins)
- *   - context/ missing, old-<ts>/ present      → mv old-<ts> → context (rollback)
- *   - context/ present AND old-<ts>/ present   → rm -rf old-<ts>/ (swap completed; cleanup raced)
+ * Git era (context/ is a git repo): a crash during the copy-sync leaves
+ * context/ dirty with staging/ still present → reset context/ to its last
+ * commit (the last consistent wiki) and drop staging so the next run rebuilds.
  *
- * After this returns, `.jean/context/` is guaranteed to exist as a real
- * directory (or the dojo is in a state we can't auto-recover from, in
- * which case we throw and the librarian doesn't run).
+ * Legacy (pre-git, rename-swap era) crash states, still handled for dojos that
+ * crashed before migrating:
+ *   - context/ missing, staging/ present   → mv staging → context (new version won)
+ *   - context/ missing, old-<ts>/ present  → mv old-<ts> → context (rollback)
+ *   - context/ present AND old-<ts>/       → rm -rf old-<ts>/ (swap done; cleanup raced)
  *
- * Steady state where context/ exists and no old-* exists is a no-op.
+ * After this returns, `.jean/context/` is guaranteed to exist (or the dojo is in
+ * a state we can't auto-recover from, in which case we throw). Steady state
+ * (context/ present, no staging, no old-*) is a no-op.
  */
-export function recoverWikiLayout(dojoRoot: string): { recovered: 'staging' | 'old' | 'cleanup' | 'none' } {
+export function recoverWikiLayout(dojoRoot: string): {
+  recovered: 'staging' | 'old' | 'cleanup' | 'reset' | 'none'
+} {
   const { consolidator, context, staging } = consolidatorPaths(dojoRoot)
 
   const oldDirs = existsSync(consolidator)
@@ -124,6 +130,7 @@ export function recoverWikiLayout(dojoRoot: string): { recovered: 'staging' | 'o
         .sort()
     : []
 
+  // Legacy: context/ was renamed away mid-swap (only possible on a pre-git dojo).
   if (!existsSync(context)) {
     if (existsSync(staging)) {
       renameSync(staging, context)
@@ -142,17 +149,42 @@ export function recoverWikiLayout(dojoRoot: string): { recovered: 'staging' | 'o
     )
   }
 
-  // Steady state: context/ exists. Sweep transient dirs from a previous run.
+  // context/ exists. Sweep any legacy old-<ts>/ left by the rename era.
+  let sweptOld = false
   if (oldDirs.length > 0) {
     for (const o of oldDirs) rmSync(o, { recursive: true, force: true })
+    sweptOld = true
+  }
+
+  // Git era: only act when staging/ is present (a crashed/incomplete run). A
+  // clean git repo with no staging is steady state — don't touch it, and don't
+  // reset a human's manual wiki edit (the next commit will just include it).
+  if (isGitRepo(context) && existsSync(staging)) {
+    const hasHead = git(context, ['rev-parse', '--verify', '-q', 'HEAD']).exitCode === 0
+    const dirty = hasHead && git(context, ['status', '--porcelain']).stdout.trim().length > 0
+    if (dirty) {
+      // Revert TRACKED files to the last commit (undoes a torn/partial sync).
+      // Deliberately NOT `git clean -fd`: that would also destroy UNTRACKED
+      // content — a human's manually-added page, or a new page from the crashed
+      // run not yet committed. Untracked leftovers are harmless here; the next
+      // run's sync mirrors away anything not part of the rebuilt wiki.
+      git(context, ['checkout', '--', '.'])
+      rmSync(staging, { recursive: true, force: true })
+      return { recovered: 'reset' }
+    }
+    // Clean tree + staging present → the commit landed before staging was
+    // removed (or draft/review crashed after building it). Just drop staging.
+    rmSync(staging, { recursive: true, force: true })
     return { recovered: 'cleanup' }
   }
+
+  // Non-git context/ with a straggler staging/ (pre-migration, or mid-draft crash).
   if (existsSync(staging)) {
     rmSync(staging, { recursive: true, force: true })
     return { recovered: 'cleanup' }
   }
 
-  return { recovered: 'none' }
+  return { recovered: sweptOld ? 'cleanup' : 'none' }
 }
 
 /**
@@ -416,6 +448,159 @@ function flattenAnomaly(a: AnomalyEntry): string {
   return prefix ? `${prefix} ${text}` : text
 }
 
+// ── Git-backed context/ ─────────────────────────────────────────────
+// context/ is its own git repo (like .jean/workspace/) so every consolidation
+// is a commit: durable history, `git revert`-able rollback, and a diff that
+// shows exactly which pages changed. The librarian does its slow work in
+// staging/, then a fast copy-sync into context/ + a commit — readers see a
+// consistent wiki (the copy window is sub-second vs. the minutes of LLM work)
+// and a crash is recovered by resetting context/ to its last commit. `.git`
+// lives inside context/ and never moves, so it survives the sync (which is why
+// we copy-in-place rather than rename-swap). The dojo's own .gitignore excludes
+// all of .jean/, so this nested repo is invisible to the dojo repo.
+
+/** Run a git subcommand inside `dir`. Never throws — caller inspects exitCode.
+ *  Bun.spawnSync THROWS when the binary is missing (rather than returning a
+ *  nonzero exit), so we catch that and surface it as exitCode -1 to honor the
+ *  contract; a git-less machine then fails loudly at ensureContextGitRepo with
+ *  a clear message instead of an opaque uncaught throw. */
+function git(dir: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
+  try {
+    const r = Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'pipe', stderr: 'pipe' })
+    return { exitCode: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() }
+  } catch (err) {
+    return { exitCode: -1, stdout: '', stderr: String(err) }
+  }
+}
+
+/** True if `dir` is the root of a git repo (has a `.git`). */
+function isGitRepo(dir: string): boolean {
+  return existsSync(resolve(dir, '.git'))
+}
+
+/**
+ * Ensure context/ is a git repo. On a pre-git dojo this inits it and makes a
+ * baseline commit of the current wiki (so the pre-migration state is commit #1),
+ * which auto-migrates every existing dojo on its first git-backed consolidation.
+ * No-op once the repo exists.
+ */
+function ensureContextGitRepo(context: string): void {
+  if (isGitRepo(context)) return
+  mkdirSync(context, { recursive: true })
+  const init = git(context, ['init', '-q'])
+  if (init.exitCode !== 0) {
+    throw new Error(
+      `git init failed in ${context} (is git installed and on PATH?): exit ${init.exitCode} ${init.stderr.trim()}`,
+    )
+  }
+  // Fresh repos default to whatever init.defaultBranch is set to; pin main.
+  // Tolerated if it fails (ancient git) — recovery is branch-agnostic (rev-parse
+  // HEAD / checkout -- .), so an unusual default branch is harmless.
+  git(context, ['symbolic-ref', 'HEAD', 'refs/heads/main'])
+  // Baseline commit captures any pre-existing wiki. Force it even for an EMPTY
+  // context/ (allowEmpty) so there is ALWAYS a HEAD to reset to — otherwise a
+  // crash during the very first sync (no HEAD yet) leaves recovery unable to
+  // restore a consistent state.
+  gitCommitContext(context, 'wiki: initial commit (git-backed context)', { allowEmpty: true })
+}
+
+/**
+ * Mirror staging/ into context/ in place, preserving `.git`. Copy first so a
+ * reader mid-sync never sees a valid page momentarily missing (it sees the new
+ * content, plus at worst a just-removed page lingering a few ms); then drop the
+ * pages the new version removed.
+ */
+function syncStagingIntoContext(staging: string, context: string): void {
+  // Copy staging → context (recursive adds/updates). Skip a stray `staging/.git`
+  // so a bad copy (e.g. a skill that `cp -r`'d context including its repo) can
+  // never clobber the real `.git` we're about to commit into.
+  for (const e of readdirSync(staging)) {
+    if (e === '.git') continue
+    cpSync(resolve(staging, e), resolve(context, e), { recursive: true, force: true })
+  }
+  // Remove context entries the new version dropped — recursively, so a removed
+  // NESTED page is deleted too (the wiki is flat today, but don't rely on it).
+  mirrorDelete(staging, context, '')
+}
+
+/** Recursively delete context entries with no counterpart in staging. Preserves
+ *  the top-level `.git`. */
+function mirrorDelete(staging: string, context: string, rel: string): void {
+  const dir = rel ? resolve(context, rel) : context
+  for (const e of readdirSync(dir)) {
+    if (rel === '' && e === '.git') continue
+    const childRel = rel ? `${rel}/${e}` : e
+    if (!existsSync(resolve(staging, childRel))) {
+      rmSync(resolve(context, childRel), { recursive: true, force: true })
+    } else if (statSync(resolve(context, childRel)).isDirectory()) {
+      mirrorDelete(staging, context, childRel)
+    }
+  }
+}
+
+/**
+ * Stage everything and commit — but only if the tree actually changed (git
+ * compares blob content, so pages copied back byte-identical produce no diff
+ * and no commit). Returns whether a commit was made. Identity is passed per
+ * invocation so we never mutate the machine's git config.
+ */
+function gitCommitContext(context: string, message: string, opts?: { allowEmpty?: boolean }): boolean {
+  git(context, ['add', '-A'])
+  // `diff --cached --quiet` exits 0 when nothing is staged, 1 when there is.
+  // Skip the no-diff short-circuit when allowEmpty (baseline commit must land).
+  if (!opts?.allowEmpty && git(context, ['diff', '--cached', '--quiet']).exitCode === 0) return false
+  const r = git(context, [
+    '-c',
+    'user.name=jean-librarian',
+    '-c',
+    'user.email=librarian@jean.local',
+    'commit',
+    '-q',
+    ...(opts?.allowEmpty ? ['--allow-empty'] : []),
+    '-m',
+    message,
+  ])
+  if (r.exitCode !== 0) throw new Error(`git commit failed in ${context}: ${r.stderr.trim()}`)
+  return true
+}
+
+/** Build the commit message from the run's plan — the consolidation "log" now
+ *  lives in git history (`git log -p` = summary + the diff, together). The
+ *  subject carries the event-id watermark (prev → new cursor) so it's clear at
+ *  a glance which events each consolidation ran over. */
+function buildCommitMessage(planObj: ConsolidatorPlan, anomalies: string[], prevCursor: number): string {
+  const decisions = Array.isArray(planObj.decisions) ? planObj.decisions : []
+  const byOp = (op: string) => decisions.filter((d) => d.op === op)
+  const created = byOp('create')
+  const updated = byOp('update')
+  const archived = byOp('archive')
+  const stats = planObj.stats ?? {}
+  const ev = stats.eventsProcessed ?? 0
+  const newCursor = typeof planObj.newCursor === 'number' ? planObj.newCursor : prevCursor
+
+  const counts = [
+    created.length && `${created.length} created`,
+    updated.length && `${updated.length} updated`,
+    archived.length && `${archived.length} archived`,
+  ].filter(Boolean)
+  const subject = `consolidate ${prevCursor}→${newCursor}: ${counts.length ? counts.join(', ') : 'no page changes'}`
+
+  const body: string[] = [`events processed: ${ev} (cursor ${prevCursor} → ${newCursor})`]
+  if (stats.corrections) body.push(`corrections: ${stats.corrections}`)
+  if (stats.tasksDistilled) body.push(`tasks distilled: ${stats.tasksDistilled}`)
+  if (stats.rawFilesProcessed) body.push(`raw files: ${stats.rawFilesProcessed}`)
+  const pageLine = (label: string, ds: typeof decisions) =>
+    ds.length ? `${label}: ${ds.map((d) => d.page).join(', ')}` : undefined
+  for (const line of [pageLine('created', created), pageLine('updated', updated), pageLine('archived', archived)]) {
+    if (line) body.push(line)
+  }
+  if (anomalies.length) {
+    body.push('', 'anomalies:')
+    for (const a of anomalies) body.push(`- ${a}`)
+  }
+  return `${subject}\n\n${body.join('\n')}\n`
+}
+
 /**
  * Phase 3: read the staging/ + plan.json + (optional) review.json produced
  * by phases 1–2, atomically swap staging→context, emit wiki-consolidated,
@@ -454,16 +639,31 @@ export async function commitConsolidation(opts: {
   const rawAnomalies: AnomalyEntry[] = reviewObj?.anomalies ?? planObj.anomalies ?? []
   const anomalies = rawAnomalies.map(flattenAnomaly)
 
-  // Swap. recoverWikiLayout (above) handles any mid-rename crash on next start.
+  // Event-id watermark BEFORE this run — read the old cursor before we overwrite
+  // it, so the commit subject can show prev → new (which events this run covered).
+  const prevCursor = existsSync(p.cursorPath)
+    ? ((JSON.parse(await Bun.file(p.cursorPath).text()) as { lastEventId?: number }).lastEventId ?? 0)
+    : 0
+
+  // Apply changes into the git-backed context/, then commit. A crash mid-sync
+  // is recovered by recoverWikiLayout (reset context/ to its last commit) on
+  // the next start; the cursor stays put so the run redoes cleanly.
   if (hasChanges) {
     if (!existsSync(p.staging)) {
       throw new Error(`commitConsolidation: plan has changes but staging/ missing at ${p.staging}`)
     }
-    const ts = `${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}Z`
-    const oldDir = resolve(p.consolidator, `old-${ts}`)
-    if (existsSync(p.context)) renameSync(p.context, oldDir)
-    renameSync(p.staging, p.context)
-    rmSync(oldDir, { recursive: true, force: true })
+    ensureContextGitRepo(p.context) // migrates a pre-git dojo on its first run
+    // Preserve-over-reset (a sensei's catch): if context/ is dirty going in
+    // — a human hand-edited a page, or a prior run left uncommitted state —
+    // commit it FIRST as its own "manual edits" commit, so the consolidation's
+    // overwrite never destroys content that isn't in git history. No-op (no
+    // commit) when context/ is clean, which is the steady-state case.
+    gitCommitContext(p.context, 'wiki: capture pre-consolidation edits')
+    syncStagingIntoContext(p.staging, p.context)
+    // Commit BEFORE removing staging: if the commit throws, staging survives so
+    // recovery resets context/ to HEAD and the next run redoes the work cleanly.
+    gitCommitContext(p.context, buildCommitMessage(planObj, anomalies, prevCursor))
+    rmSync(p.staging, { recursive: true, force: true })
   } else {
     // No-op: sweep any straggler staging/ from a partial draft phase.
     rmSync(p.staging, { recursive: true, force: true })
@@ -547,4 +747,82 @@ export async function probeAnthropicAPI(opts?: { binary?: string; timeoutMs?: nu
   if (timedOut) return { ok: false, latencyMs, error: `probe timed out after ${timeoutMs}ms` }
   if (exitCode !== 0) return { ok: false, latencyMs, error: `probe exit code ${exitCode}` }
   return { ok: true, latencyMs }
+}
+
+// ── Librarian provisioning (init-time) ──────────────────────────────
+// The librarian is provisioned ONCE, at `jean dojo init`: the role dir (skills
+// + permissions, written CLI-side) plus the consolidate-wiki trigger written
+// here. There is deliberately NO reconcile-on-restart. A restart brings the
+// process back up; it does not re-derive configuration. The event log is the
+// single source of truth for triggers — re-emitting them every boot would both
+// fight a deliberate `jean trigger remove` (you turn it off, the next start
+// turns it back on) and spam the log with a no-op create on every boot. New
+// dojos get the librarian at init; existing dojos already have it.
+
+/** Trigger id the multi-phase consolidation pipeline dispatches on — server.ts
+ *  keys the draft→review→commit pipeline on role==='librarian' && this id. A
+ *  librarian trigger under any other id runs as a plain single-shot headless. */
+export const CONSOLIDATE_WIKI_TRIGGER_ID = 'consolidate-wiki'
+
+/** Default nightly schedule — 03:00 local. */
+export const LIBRARIAN_DEFAULT_CRON = '0 3 * * *'
+
+/** Consolidation is structured editing, not open-ended reasoning — sonnet is
+ *  plenty and a fraction of the cost of an unpinned (Opus-default) run. */
+export const LIBRARIAN_DEFAULT_MODEL = 'sonnet'
+
+/** The trigger prompt. The real procedure lives in the consolidate-wiki skill;
+ *  this only points the headless run at it. Kept identical to the working
+ *  dojos' stored prompt so a freshly-provisioned dojo behaves the same. */
+// NOTE: for the `consolidate-wiki` trigger this stored prompt is OVERRIDDEN at
+// runtime — runLibrarianMultiPhase substitutes the draft/review phase prompts.
+// It's kept accurate (not "swap / advance cursor", which the pipeline forbids)
+// so `jean trigger list` and any direct read isn't misleading.
+export const CONSOLIDATE_WIKI_PROMPT =
+  'Run the scheduled wiki-consolidation pipeline (draft → review). The trigger harness commits the ' +
+  'result into the git-backed .jean/context/ and advances the cursor — you build staging, not the wiki.'
+
+/**
+ * Write the `consolidate-wiki` trigger into a dojo's event log — idempotently.
+ *
+ * Called at `jean dojo init`, where the server is down and the log is
+ * brand-new, so a direct append is race-free. Folds the trigger reducer over
+ * existing TRIGGERS_STREAM events: a dojo that already has a live
+ * consolidate-wiki trigger is left untouched (`created: false`), and a
+ * create-then-remove history stays removed (we never resurrect a trigger the
+ * user deleted).
+ *
+ * MUST NOT run against a dojo whose infra is live — the server owns the append
+ * cursor in memory and a concurrent direct append would collide ids. Init is
+ * safe by construction (the dojo does not exist yet).
+ */
+export async function provisionLibrarianTrigger(opts: {
+  historyPath: string
+  cron?: string
+  model?: string
+}): Promise<{ created: boolean }> {
+  const store = createStore(jsonlBackend(opts.historyPath))
+  const events = await store.read({ stream: TRIGGERS_STREAM })
+  // Skip if a consolidate-wiki trigger was EVER created — not just if one is
+  // currently live. A create-then-remove history means the user deliberately
+  // deleted it; re-provisioning must not resurrect it. (Empty log at init →
+  // always creates.)
+  const everCreated = events.some(
+    (e) => e.type === 'trigger-created' && (e.data as { id?: string }).id === CONSOLIDATE_WIKI_TRIGGER_ID,
+  )
+  if (everCreated) return { created: false }
+  await store.append({
+    stream: TRIGGERS_STREAM,
+    type: 'trigger-created',
+    data: {
+      id: CONSOLIDATE_WIKI_TRIGGER_ID,
+      cron: opts.cron ?? LIBRARIAN_DEFAULT_CRON,
+      agent: 'librarian',
+      prompt: CONSOLIDATE_WIKI_PROMPT,
+      kind: 'headless',
+      model: opts.model ?? LIBRARIAN_DEFAULT_MODEL,
+      actor: 'init',
+    } satisfies TriggerCreatedData,
+  })
+  return { created: true }
 }
