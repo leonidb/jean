@@ -42,10 +42,10 @@ You're not redoing the draft's work. You're catching what one-pass writing misse
 
 ### 1. Page principles
 
-- **One concept per page.** A page that grew big enough to cover two distinct entities should be split. Splitting is normal; do it when warranted, update inbound `[[wiki-link]]` references.
+- **One concept per page.** Split a page that covers **two or more distinct concepts** — the trigger is multi-concept, *not* length (a long single concept stays whole; size safety-valve ~350 lines with a fault line). When you split, update inbound `[[wiki-link]]` references. Leave already-coherent pages unchanged (fixed-point — don't reshape a page that's fine, don't undo last run's split).
 - **Compact older content.** Detail superseded by later events should collapse to a one-liner (or move to `log.md`). Pages don't grow forever.
 - **Wiki-links are first-class.** Every concept reference uses `[[Page Name]]`. When a page mentions another wiki page, link it.
-- **No task / project state.** State-of-the-world data lives on the board, not in pages. If draft wrote phrases like "task 077 in-progress", "v1 readiness in-flight", "PR #123 awaiting review", "currently rolling out X" — strip those clauses. Keep the *learning* (e.g. "warming the cache avoids the cold-start timeout, found in task 012") and drop the state (e.g. "task 077 done"). When a whole sentence is just task state, delete the sentence. When the page's whole reason for existing is to track state, **archive it** — drop it from `index.md` and note the archival in `log.md`. A pure task-state page violates the no-state rule, so removing it is cleanup, not knowledge loss, and the `log.md` note keeps it visible and reversible; don't route it to a human. (Only escalate to `anomalies` if you're genuinely unsure whether durable knowledge is buried under the state — real knowledge *removal* stays a judgment call.)
+- **No task / project state.** State-of-the-world data lives on the board, not in pages. If draft wrote phrases like "task 012 in-progress", "v1 readiness in-flight", "PR #123 awaiting review", "currently rolling out X" — strip those clauses. Keep the *learning* (e.g. "warming the cache avoids the cold-start timeout, found in task 012") and drop the state (e.g. "task 012 done"). When a whole sentence is just task state, delete the sentence. When the page's whole reason for existing is to track state, **archive it — content-preserving**: move the page's body into `log.md` under a `## [<date>] archived | <page> | <why>` heading, THEN remove the page from staging + `index.md`. The content survives in `log.md`; `.jean/context/` is gitignored, so a page you merely delete is unrecoverable — never just drop + note. Removing a pure task-state page this way is cleanup, not knowledge loss; don't route it to a human. (Only escalate to `anomalies` if you're unsure whether durable knowledge is buried under the state — real knowledge *removal* stays a judgment call.)
 
 ### 2. Cross-page consistency
 
@@ -186,7 +186,7 @@ The shell phase will read `plan.json` + `review.json`, swap staging→context, e
 - Missing index.md (regenerate).
 - Broken `[[link]]` whose target was just archived (drop the link or update phrasing).
 - Direct factual contradiction with clear winner (most recent event, or a `CORRECTION:` memory).
-- **An oversized or multi-entity page → SPLIT it** (Page principles §1): write the new pages into staging, update every inbound `[[link]]` and `index.md`. Split / merge / compact preserve all the knowledge — they are normal librarian write operations, performed here, **never flagged for a human or the sensei to approve**. (You are the only writer of the wiki; a human or sensei *cannot* do it, so flagging it just strands the page. The pipeline is the safety net: you validate links below and phase 3 swaps atomically.)
+- **A genuinely multi-concept page → SPLIT it** (Page principles §1): write the new one-concept pages into staging, move the content, update every inbound `[[link]]` and `index.md`. This is a normal librarian write op, performed here, **never flagged for a human/sensei to approve** (only the librarian can write the wiki — flagging strands the page). Split on the multi-concept trigger, *not* length (a long coherent page stays whole; size safety-valve ~350 lines + a fault line), and leave coherent pages unchanged (fixed-point). **Verify no content was lost** and every moved `[[link]]` resolves — the atomic swap guards torn states and dangling links, but only YOU guard against a wrong restructure or lost content.
 
 **Flag in anomalies, don't fix**:
 - Two pages making contradictory claims with no clear winner.
@@ -200,6 +200,9 @@ The principle: **fix mechanical issues AND knowledge-preserving restructuring (s
 - [ ] Every page in staging has frontmatter with `description:`
 - [ ] `index.md` regenerated, lists every page in staging (except `index.md` and `log.md`)
 - [ ] Every `[[link]]` resolves to a page in staging (or is in `anomalies`)
+- [ ] `wc -l` on every staging page — every page over **~350 lines** is EITHER a single coherent concept (verified by reading it) OR was split this run into one-concept pages; no coherent page was split just for length
+- [ ] No content lost this run — every passage moved by a split / merge / archive still exists somewhere in staging or `log.md` (archive is content-preserving, not deletion)
+- [ ] Fixed-point — a page that received no newly-distilled content this run is structurally unchanged (you did not reshape or re-split a page that was already coherent)
 - [ ] `review.json` exists, valid JSON
 - [ ] `staging/` modifications are in place (no extra dirs, no leftover backup files)
 - [ ] `.jean/context/` is unchanged
