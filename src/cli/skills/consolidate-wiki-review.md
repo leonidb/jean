@@ -45,7 +45,7 @@ You're not redoing the draft's work. You're catching what one-pass writing misse
 - **One concept per page.** A page that grew big enough to cover two distinct entities should be split. Splitting is normal; do it when warranted, update inbound `[[wiki-link]]` references.
 - **Compact older content.** Detail superseded by later events should collapse to a one-liner (or move to `log.md`). Pages don't grow forever.
 - **Wiki-links are first-class.** Every concept reference uses `[[Page Name]]`. When a page mentions another wiki page, link it.
-- **No task / project state.** State-of-the-world data lives on the board, not in pages. If draft wrote phrases like "task 077 in-progress", "v1 readiness in-flight", "PR #123 awaiting review", "currently rolling out X" — strip those clauses. Keep the *learning* (e.g. "warming the cache avoids the cold-start timeout, found in task 012") and drop the state (e.g. "task 077 done"). When a whole sentence is just task state, delete the sentence. When the page's whole reason for existing is to track state, flag it as an `archive` candidate in `anomalies` (don't auto-archive — that's a judgment call for sensei).
+- **No task / project state.** State-of-the-world data lives on the board, not in pages. If draft wrote phrases like "task 077 in-progress", "v1 readiness in-flight", "PR #123 awaiting review", "currently rolling out X" — strip those clauses. Keep the *learning* (e.g. "warming the cache avoids the cold-start timeout, found in task 012") and drop the state (e.g. "task 077 done"). When a whole sentence is just task state, delete the sentence. When the page's whole reason for existing is to track state, **archive it** — drop it from `index.md` and note the archival in `log.md`. A pure task-state page violates the no-state rule, so removing it is cleanup, not knowledge loss, and the `log.md` note keeps it visible and reversible; don't route it to a human. (Only escalate to `anomalies` if you're genuinely unsure whether durable knowledge is buried under the state — real knowledge *removal* stays a judgment call.)
 
 ### 2. Cross-page consistency
 
@@ -186,14 +186,14 @@ The shell phase will read `plan.json` + `review.json`, swap staging→context, e
 - Missing index.md (regenerate).
 - Broken `[[link]]` whose target was just archived (drop the link or update phrasing).
 - Direct factual contradiction with clear winner (most recent event, or a `CORRECTION:` memory).
+- **An oversized or multi-entity page → SPLIT it** (Page principles §1): write the new pages into staging, update every inbound `[[link]]` and `index.md`. Split / merge / compact preserve all the knowledge — they are normal librarian write operations, performed here, **never flagged for a human or the sensei to approve**. (You are the only writer of the wiki; a human or sensei *cannot* do it, so flagging it just strands the page. The pipeline is the safety net: you validate links below and phase 3 swaps atomically.)
 
 **Flag in anomalies, don't fix**:
-- Pages that should probably be split (judgment call — the human or sensei may want input).
 - Two pages making contradictory claims with no clear winner.
 - A `[[link]]` to a page that doesn't exist and wasn't archived this run (something's missing from the wiki).
 - Suspicious `description:` that doesn't match the body (might be a draft-phase bug).
 
-The principle: **fix mechanical issues silently; surface judgment calls.**
+The principle: **fix mechanical issues AND knowledge-preserving restructuring (split / merge / compact) silently; surface only genuine unknowns you cannot resolve** — an unresolvable contradiction, a page that's genuinely missing. A structural change that keeps every bit of content is never a "judgment call" to punt to a human who can't act on it.
 
 ## Sharpness checklist before exit
 

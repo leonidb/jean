@@ -181,7 +181,7 @@ For each input you decided to distill:
 - **Update to existing page**: edit the page in staging; preserve unattributed content (it may be a manual user edit — see "Conservative lint" below).
 - **Correction**: edit the offending page in staging, then append a `## [<date>] correction | <page-slug> | <what>` entry to `staging/log.md`.
 
-Apply the **Page principles** above as you write: one concept per page, split when it grows past ~50 lines or multi-entity, compact older detail, wiki-link every concept reference, keep entity-class pages schema-consistent. Splitting and compaction are normal operations during this step — do them when warranted, not just for new content.
+Apply the **Page principles** above as you write: one concept per page, split when it grows past ~50 lines or multi-entity, compact older detail, wiki-link every concept reference, keep entity-class pages schema-consistent. Splitting, merging, and compaction are normal, **required** operations during this step — you are the wiki's only writer, so an oversized or multi-entity page MUST be split here (update inbound `[[links]]` + `index.md`); never defer it, flag it for approval, or leave it for a human — no one else can do it. Do them whenever warranted, not just for new content.
 
 Every page you create or meaningfully change must carry a `description:` in frontmatter. When you change a page, ask: does the description still describe what's there? If not, update it.
 
