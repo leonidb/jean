@@ -41,7 +41,7 @@ A pre-spawn recovery routine guarantees `staging/` does NOT exist when you start
 
 Wiki pages are for LLM consumption — terse, bullet-pointed, structured. Skim-in-seconds.
 
-- **One concept per page.** Subscription, project, decision, person — one each.
+- **One concept per page — SPLIT when it's violated.** Subscription, project, decision, person — one each. When a page has grown multi-entity or oversized (well past ~50 lines), split it here into one page per concept: create the new pages, move each concept's content across, update inbound `[[links]]`, and let review regenerate `index.md`. You are the wiki's ONLY writer — split / merge / compact are required, routine operations, **never deferred, never flagged for a human or the sensei to approve** (they can't do it — flagging just strands the page). This is not only for pages new events touched: **re-check every existing page you carry into staging** and split any that are oversized or cover multiple concepts.
 - **Compact older content.** Superseded detail collapses to a one-liner. Move narrative to `log.md` if worth keeping; drop otherwise.
 - **Wiki-links.** Every concept reference uses `[[Page Name]]` syntax.
 - **Frontmatter on every page.** YAML at top with `description:` (one-sentence summary used in `index.md`). Optional: `status:`, `updated:`, `type:`.
