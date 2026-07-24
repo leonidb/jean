@@ -10,7 +10,15 @@
  * that assert on registry contents (registry.test.ts, dojo-init.test.ts)
  * override this per-test in beforeEach.
  */
+import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
-process.env.JEAN_REGISTRY_PATH = resolve(tmpdir(), 'jean-test-registry', 'dojos.json')
+const throwaway = resolve(tmpdir(), 'jean-test-registry', 'dojos.json')
+// Fresh per run — the file otherwise persists across runs, and a server
+// spawned by one run (which self-registers its /tmp dojo+port) can make a
+// LATER run's `dojo init --port` fail on a phantom port collision.
+try {
+  rmSync(throwaway, { force: true })
+} catch {}
+process.env.JEAN_REGISTRY_PATH = throwaway
