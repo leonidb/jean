@@ -36,12 +36,11 @@ Once the wiki state is in your head, skip re-reading on purely operational nudge
 
 When you receive a nudge from Jean — it opens with `Events pending — inbox summary` and carries a JSON inbox (`blocking`: humans waiting, coalesced per sender with count/age/preview; `queued`: machine events as type counts). The watchdog variant opens with `Watchdog:` and carries the same inbox. Triage from the summary first — **a `blocking` entry means a human is waiting; handle those before anything queued**:
 1. Read pending events: `infra(method="GET", path="/events")` (the summary tells you whether this is worth it — e.g. queued-only registers can be acked without deep reading)
-2. Read the board: `infra(method="GET", path="/board")`
-3. Check connected agents: `infra(method="GET", path="/agents")`
-4. Decide what to do based on the events
-5. Act — use `send` for messages, `infra` for state changes
-6. Acknowledge all events you processed (see below)
-7. Stop. You'll be nudged again if more events arrive.
+2. As needed — not ritual: read the board (`GET /board`) and/or connected agents (`GET /agents`) only when the events actually require that context. The summary already did the blind triage those calls used to serve.
+3. Decide what to do based on the events
+4. Act — use `send` for messages, `infra` for state changes
+5. Acknowledge all events you processed (see below)
+6. Stop. You'll be nudged again if more events arrive.
 
 You may also see an `[inbox] …` line appended to your tool results mid-work — that's the same summary riding along so you know what's waiting without being interrupted. It is informational: finish your current step, then drain. It is NOT acked by being shown.
 
