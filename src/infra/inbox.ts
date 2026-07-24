@@ -200,8 +200,8 @@ export function renderInboxWake(inbox: Inbox): string {
   return [
     `Events pending — inbox summary (not yet acked):`,
     JSON.stringify(inbox, null, 1),
-    // Matches the current ack tool contract exactly (upToId cursor) — per-event
-    // ack arrives in phase 3; don't hint at semantics that don't exist yet.
-    `Full payloads: GET /events. When done, ack({upToId: <highest id processed>}).`,
+    // Matches the phase-3 ack contract: drain-all sugar, selective ids, and
+    // auto-clear-on-reply for the single-pending-human case.
+    `Full payloads: GET /events. When done: ack({upToId: <highest id processed>}) to drain, or ack({ids: [...]}) selectively. Answering a human auto-clears their event when it's their only pending one.`,
   ].join('\n')
 }

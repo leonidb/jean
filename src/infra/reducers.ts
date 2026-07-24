@@ -82,6 +82,11 @@ export type SendData = {
 
 export type AckData = {
   eventIds: number[]
+  /** Set when infra generated this ack itself — e.g. 'reply': the sensei
+   *  answered a bridge user whose single pending blocking event is thereby
+   *  handled (attention phase 3, docs/attention.md §5 auto-clear-on-reply).
+   *  Absent on agent-initiated acks. */
+  auto?: 'reply'
 }
 
 export type RegisterData = {

@@ -44,7 +44,7 @@ When you receive a nudge from Jean — it opens with `Events pending — inbox s
 
 You may also see an `[inbox] …` line appended to your tool results mid-work — that's the same summary riding along so you know what's waiting without being interrupted. It is informational: finish your current step, then drain. It is NOT acked by being shown.
 
-**Human messages wake you immediately — even mid-turn.** A wake opening with `A human is waiting` means a blocking (human) event was delivered regardless of your idle state. Don't hard-stop mid-thought, but do finish the current step and handle the human before starting anything new. If it stays unhandled, the same wake re-fires on an escalating backoff (2m → 5m → 10m) **until you ack** — answering the human does NOT clear it yet (auto-clear-on-reply is a later phase), so always ack after answering, or the wake will keep re-firing. A repeat of this wake means the human has now been waiting through at least one full backoff window.
+**Human messages wake you immediately — even mid-turn.** A wake opening with `A human is waiting` means a blocking (human) event was delivered regardless of your idle state. Don't hard-stop mid-thought, but do finish the current step and handle the human before starting anything new. If it stays unhandled, the same wake re-fires on an escalating backoff (2m → 5m → 10m) until cleared. **Answering IS the ack in the common case**: when a human has exactly ONE pending message, your reply to them auto-clears it — no manual ack needed. When they sent a **burst** (multiple pending messages), auto-clear deliberately stands down so a quick reply to question #1 can't silently swallow question #2 — handle them all, then ack explicitly (`ack({ids: [...]})` for just theirs, or `ack({upToId})` to drain everything you processed). A repeat of this wake means the human has now been waiting through at least one full backoff window.
 
 When the human asks you to do something (not a nudge from Jean):
 - Use the tools to interact with the board and agents directly
@@ -58,10 +58,12 @@ Each event has: `id`, `type`, `taskId` (if task-related), `agent` (source), and 
 
 **Processing pattern:** Read all pending events at once, understand the full picture, then act.
 
-**Acknowledging:** After processing, ack all events up to the highest ID you handled:
+**Acknowledging:** Use the `ack` tool. Two forms — drain-all (the common case) or selective:
 ```
-infra(method="POST", path="/events/ack", body={"upToId": <highest_id>})
+ack({upToId: <highest_id>})     // drain everything you processed
+ack({ids: [<id>, ...]})         // selective: handle the human now, leave machine events queued
 ```
+Answering a bridge human auto-clears their event when it's the only one pending from them — no ack needed for that case. A multi-message burst still needs an explicit ack.
 
 ## Event types
 
@@ -148,7 +150,8 @@ send(to="<agent>", text="<follow-up>", taskId="<id>")    // task-scoped message
 
 Events ack:
 ```
-infra(method="POST", path="/events/ack", body={"upToId": <highest_id>})
+ack({upToId: <highest_id>})   // drain-all
+ack({ids: [<id>, ...]})       // selective
 ```
 
 Triggers:

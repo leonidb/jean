@@ -85,10 +85,13 @@ describe('tool shapes', () => {
     expect(scope.enum).toEqual(['dojo', 'user'])
   })
 
-  test('ack requires upToId (number)', () => {
-    expect(ACK_TOOL.inputSchema.required).toEqual(['upToId'])
+  test('ack requires neither field at schema level (exactly-one-of upToId|ids, handler-enforced)', () => {
+    // `required: ['upToId']` would make the selective ids-only form
+    // schema-invalid — the phase-3 contract needs both forms callable.
+    expect(ACK_TOOL.inputSchema.required).toEqual([])
     const props = propsOf(ACK_TOOL)
     expect((props.upToId as { type: string }).type).toBe('number')
+    expect((props.ids as { type: string }).type).toBe('array')
   })
 })
 

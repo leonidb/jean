@@ -98,7 +98,9 @@ export const ACK_TOOL: Tool = {
   name: 'ack',
   description:
     'Acknowledge events as processed, advancing the per-agent pending count. ' +
-    'Pass `upToId` = the highest event id you have read and decided about — including events you decided to "hold" or take no action on. ' +
+    'Two forms — pass exactly one: `upToId` = drain-all (the common case: the highest event id you have read and decided about, including events you decided to "hold"); ' +
+    '`ids` = selective ack (handle the human now, leave machine events queued for later). ' +
+    'NOTE: answering a bridge human AUTO-clears their event when it is the only one pending from them — no ack needed for that case; a multi-message burst still needs an explicit ack. ' +
     'Without acking, the orchestrator keeps re-nudging with the same pendingCount, producing an infinite loop. ' +
     'Treat ack as a normal part of every turn that consumed events, not a rare operation.',
   inputSchema: {
@@ -106,10 +108,20 @@ export const ACK_TOOL: Tool = {
     properties: {
       upToId: {
         type: 'number',
-        description: 'Highest event id you have read and processed. All pending events with id ≤ upToId are acked.',
+        description:
+          'Drain-all form: highest event id you have read and processed. All pending events with id ≤ upToId are acked. Mutually exclusive with `ids`.',
+      },
+      ids: {
+        type: 'array',
+        items: { type: 'number' },
+        description:
+          'Selective form: exact pending event ids to ack (from the inbox summary or GET /events). Non-pending ids are harmless no-ops. Mutually exclusive with `upToId`.',
       },
     },
-    required: ['upToId'],
+    // Deliberately no `required`: exactly ONE of upToId | ids must be passed
+    // (enforced by the handler) — requiring upToId would make the selective
+    // ids-only form schema-invalid (review finding, 2026-07-24).
+    required: [],
   },
 }
 
@@ -229,7 +241,7 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
       `You are the sensei (orchestrator) in the Jean system, agent "${agentName}".`,
       `When you receive any message from Jean, FIRST load BOTH the jean-sensei skill (orchestrator behavior) AND the context skill (wiki-awareness + memorize). Then follow jean-sensei's instructions.`,
       `Use the \`send\` tool to message any agent or channel (including the human via the Slack channel). Use the \`comment\` tool to record durable decisions/context on a task (visible to workers via ?include=comments). Use the \`infra\` tool for all other API calls (board, tasks, triggers, playbooks, events).`,
-      `After reading the events that prompted a nudge — and deciding what (if anything) to do about each — call \`ack({upToId: <highest event id you processed>})\`. Ack also when you choose to "hold"; "hold and acked" is a normal verdict, "hold without ack" is the bug that produces nudge-loops.`,
+      `After reading the events that prompted a nudge — and deciding what (if anything) to do about each — ack them: \`ack({upToId})\` drains everything you processed (the common case); \`ack({ids: [...]})\` acks selectively. Answering a bridge human auto-clears their event when it's the only one pending from them (a burst still needs an explicit ack). Ack also when you choose to "hold"; "hold and acked" is a normal verdict, "hold without ack" is the bug that produces nudge-loops.`,
     ].join('\n')
   }
   return [

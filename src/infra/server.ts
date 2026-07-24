@@ -276,6 +276,22 @@ async function routeSend(args: {
   taskId?: string
   attachments?: string[]
 }): Promise<boolean> {
+  // Auto-clear candidate — snapshot at ENTRY, before any await (review
+  // finding): only an event already visible when this reply was INITIATED may
+  // be auto-cleared. Without the snapshot, a follow-up/proactive send could
+  // ack a brand-new message that arrived mid-flight and was never seen.
+  // Sender check falls back to persisted sensei names — the sensei's HTTP send
+  // works during a WS drop, and auto-clear must not silently stand down then.
+  const autoClearId: number | null = (() => {
+    const senderRole = agents.get(args.from)?.role ?? (senseiNames.has(args.from) ? 'sensei' : undefined)
+    if (senderRole !== 'sensei') return null
+    if (agents.get(args.to)?.role !== 'user') return null
+    const blocked = pendingProjection.state.filter(
+      (e) => isBlockingEvent(e) && (e.data as { agent?: unknown }).agent === args.to,
+    )
+    return blocked.length === 1 ? (blocked[0] as StoredEvent).id : null
+  })()
+
   const delivered = deliverToAgent(args.to, {
     type: 'deliver',
     from: args.from,
@@ -305,6 +321,33 @@ async function routeSend(args: {
   // failures via createPeerDeliver's onUndelivered).
   if (!delivered) {
     notifyUndelivered(args.from, args.to, 'no agent or peer by that name is registered here, or it is offline')
+  }
+
+  // Auto-clear-on-reply (attention phase 3, docs/attention.md §5): the sensei
+  // answering a bridge user IS the ack — observation removes a bookkeeping
+  // step, never adds one. THE EXACTLY-ONE RULE (sensei-review gate): auto-clear
+  // fires only when exactly ONE pending blocking event exists from that user;
+  // a multi-message burst requires an explicit ack, converting silent loss of
+  // question #2 into a visible leftover. Double-checked: the entry-snapshot id
+  // must STILL be the sole pending blocking event at the tail — a message that
+  // arrived mid-flight turns this into a burst (stand down), and a concurrent
+  // manual ack makes it a no-op. The recorded ack (auto:'reply') also ends the
+  // blocking episode via the normal drain path.
+  // KNOWN LIMITATION (review, deferred to the delivery-ledger item): bridge
+  // delivery is fire-and-forget — a Telegram/Slack API failure after queueing
+  // still counts as delivered, so the ack can clear a reminder for a reply the
+  // human never received. Bounded: the human re-messages → fresh blocking
+  // event → wake. Proper fix = bridge outcome reporting (ledger).
+  if (delivered && autoClearId !== null) {
+    const stillBlocking = pendingProjection.state.filter(
+      (e) => isBlockingEvent(e) && (e.data as { agent?: unknown }).agent === args.to,
+    )
+    if (stillBlocking.length === 1 && (stillBlocking[0] as StoredEvent).id === autoClearId) {
+      await record('ack', SYSTEM_STREAM, {
+        eventIds: [autoClearId],
+        auto: 'reply',
+      } satisfies AckData)
+    }
   }
   return delivered
 }
@@ -433,9 +476,14 @@ function pendingByAgent(): Record<string, number> {
  *  must never be missed (review finding, 2026-07-24). Seeded from history at
  *  startup, updated on every user register. */
 const userAgentNames = new Set<string>()
+/** Sensei identities that have EVER registered — persisted, symmetric to
+ *  userAgentNames. The sensei's HTTP sends keep working during a WS drop, and
+ *  auto-clear-on-reply must not silently stand down then (review finding). */
+const senseiNames = new Set<string>()
 for (const e of await store.read({ types: ['register'] })) {
   const d = e.data as RegisterData
   if (d.role === 'user' && d.agent) userAgentNames.add(d.agent)
+  if (d.role === 'sensei' && d.agent) senseiNames.add(d.agent)
 }
 
 function senseiInboxNow() {
@@ -2063,11 +2111,37 @@ function handleHttp(req: Request, server: Upgrader): Response | Promise<Response
 
   if (path === '/events/ack' && req.method === 'POST') {
     return (async () => {
-      const body = (await req.json()) as { upToId: number; agent?: string }
-      if (!body.upToId) {
-        return Response.json({ error: 'missing upToId' }, { status: 400 })
+      const body = (await req.json()) as { upToId?: number; ids?: number[]; agent?: string }
+      // Two forms (attention phase 3): `upToId` = drain-all sugar (the common
+      // pattern — everything read gets acked in one call); `ids` = selective
+      // per-event ack (handle the human, leave the machine events queued).
+      const hasIds = Array.isArray(body.ids)
+      const hasUpToId = body.upToId !== undefined
+      if (!hasUpToId && !hasIds) {
+        return Response.json({ error: 'pass upToId (drain-all) or ids (selective)' }, { status: 400 })
       }
-      let toAck = pendingProjection.state.filter((e) => e.id <= body.upToId)
+      if (hasUpToId && hasIds) {
+        return Response.json({ error: 'upToId and ids are mutually exclusive' }, { status: 400 })
+      }
+      let toAck: StoredEvent[]
+      if (hasIds) {
+        const valid = (body.ids as unknown[]).filter((n): n is number => Number.isInteger(n) && (n as number) > 0)
+        // Empty or all-invalid ids is a caller bug — fail loud, not a silent
+        // success-shaped no-op (a model passing string ids would otherwise
+        // believe it acked and the nudge loop resumes).
+        if (valid.length === 0) {
+          return Response.json({ error: 'ids must contain positive integer event ids' }, { status: 400 })
+        }
+        const wanted = new Set(valid)
+        // Intersect with what's actually pending — acking a non-pending id is
+        // a harmless no-op, not an error (it may have been auto-cleared already).
+        toAck = pendingProjection.state.filter((e) => wanted.has(e.id))
+      } else {
+        if (!Number.isInteger(body.upToId) || (body.upToId as number) < 1) {
+          return Response.json({ error: 'upToId must be a positive integer' }, { status: 400 })
+        }
+        toAck = pendingProjection.state.filter((e) => e.id <= (body.upToId as number))
+      }
       if (body.agent) {
         toAck = toAck.filter((e) => resolveAgent(e) === body.agent)
       }
@@ -2290,6 +2364,7 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
             })
             wsSend(ws, { type: 'registered', agent: msg.agent, role })
             if (role === 'user') userAgentNames.add(msg.agent)
+            if (role === 'sensei') senseiNames.add(msg.agent)
             void record('register', agentStream(msg.agent), {
               agent: msg.agent,
               role,

@@ -80,13 +80,19 @@ describe('inbox piggyback', () => {
     expect(notFound.status).toBe(404)
     expect(notFound.headers.get('x-jean-inbox')).toContain('blocking')
 
-    // POST paths get the header too (the channel plugin's send/memorize ride this).
+    // POST paths get the header too (the channel plugin's send/memorize ride
+    // this). NOTE (phase 3): this send answers the human's single pending
+    // message, so auto-clear-on-reply fires DURING the request — the header
+    // reflects the post-clear state: blocking gone, machine events remain.
     const post = await fetch(`${BASE}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-jean-agent': 'sensei' },
       body: JSON.stringify({ from: 'sensei', to: 'human', text: 'pong' }),
     })
-    expect(post.headers.get('x-jean-inbox')).toContain('blocking')
+    const postLine = post.headers.get('x-jean-inbox')
+    expect(postLine).not.toBeNull()
+    expect(postLine).not.toContain('blocking') // the reply WAS the ack
+    expect(postLine).toContain('queued')
 
     // Percent-encoded caller name decodes (non-ASCII names transit the header encoded).
     const encoded = await fetch(`${BASE}/board`, { headers: { 'x-jean-agent': encodeURIComponent('sensei') } })
