@@ -160,6 +160,49 @@ function undelivered(kind: string): ToolResponse {
   }
 }
 
+// ── Inbox piggyback (attention phase 1) ──
+// The infra attaches a compact inbox line as an `x-jean-inbox` response header
+// on sensei requests (identified by the `x-jean-agent` request header). We
+// append it to the tool result so an actively-working sensei learns of pending
+// work as a side effect of ANY infra call — no Stop hook, no extra fetch.
+// Empty inbox = no header = nothing appended (the empty case costs zero).
+
+const IS_SENSEI = AGENT_ROLE === 'sensei'
+
+/** HTTP headers are Latin-1-only — a raw non-ASCII agent name would make
+ *  `fetch` THROW on every call (verified in Bun), killing all HTTP tools for
+ *  that agent. Percent-encode; infra decodes. */
+const HEADER_AGENT_NAME = encodeURIComponent(AGENT_NAME)
+
+// Note: the line is appended to error results too — deliberate ("cannot not
+// know" beats a slightly cleaner failure message).
+function appendInboxLine(text: string, line: string | null): string {
+  if (!line) return text
+  return `${text}\n\n[inbox] ${line} — not acked; drain when you finish the current step.`
+}
+
+/** For the WS-path `comment` tool whose transport carries no response: one
+ *  cheap localhost GET after a successful send. Best-effort with a hard
+ *  timeout — a slow/wedged infra must not stall the tool call over
+ *  nonessential piggyback data; any failure just means no line this call.
+ *  (`reply` doesn't use this: it's a worker-only tool and the piggyback is
+ *  sensei-only in phase 1.) */
+async function fetchInboxLine(): Promise<string | null> {
+  if (!IS_SENSEI) return null
+  const base = discoverInfraHttpBase()
+  if (base === null) return null
+  try {
+    const res = await fetch(`${base}/inbox`, {
+      headers: { 'x-jean-agent': HEADER_AGENT_NAME },
+      signal: AbortSignal.timeout(1_500),
+    })
+    if (!res.ok) return null
+    return ((await res.json()) as { line?: string | null }).line ?? null
+  } catch {
+    return null
+  }
+}
+
 async function callInfraTool(toolName: string, method: string, path: string, body?: unknown): Promise<ToolResponse> {
   const base = discoverInfraHttpBase()
   if (base === null) {
@@ -174,7 +217,7 @@ async function callInfraTool(toolName: string, method: string, path: string, bod
     }
   }
   try {
-    const init: RequestInit = { method }
+    const init: RequestInit = { method, headers: IS_SENSEI ? { 'x-jean-agent': HEADER_AGENT_NAME } : {} }
     if (body !== undefined && method !== 'GET') {
       // Models sometimes pass body as a JSON-encoded string despite the
       // schema description saying object — JSON.stringify would then
@@ -189,12 +232,12 @@ async function callInfraTool(toolName: string, method: string, path: string, bod
         }
       }
       init.body = JSON.stringify(payload)
-      init.headers = { 'content-type': 'application/json' }
+      init.headers = { ...init.headers, 'content-type': 'application/json' }
     }
     const res = await fetch(`${base}${path}`, init)
     const { text, isError } = formatInfraResponse(res.status, res.statusText, await res.text())
     return {
-      content: [{ type: 'text' as const, text }],
+      content: [{ type: 'text' as const, text: appendInboxLine(text, res.headers.get('x-jean-inbox')) }],
       ...(isError && { isError: true }),
     }
   } catch (err) {
@@ -222,6 +265,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       return undelivered('Reply')
     }
 
+    // No piggyback here: `reply` is a worker-only tool (tools.ts buildTools)
+    // and the inbox is sensei-only in phase 1 — the fetch would always no-op.
     return {
       content: [{ type: 'text' as const, text: `Sent to orchestrator${taskId ? ` (task ${taskId})` : ''}.` }],
     }
@@ -240,7 +285,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       return undelivered('Comment')
     }
     return {
-      content: [{ type: 'text' as const, text: `Comment recorded on task ${taskId}.` }],
+      content: [
+        {
+          type: 'text' as const,
+          text: appendInboxLine(`Comment recorded on task ${taskId}.`, await fetchInboxLine()),
+        },
+      ],
     }
   }
 
@@ -263,10 +313,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const base = discoverInfraHttpBase()
     if (base === null) return undelivered('Message')
     let delivered = false
+    let inboxLine: string | null = null
     try {
       const res = await fetch(`${base}/send`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          ...(IS_SENSEI && { 'x-jean-agent': HEADER_AGENT_NAME }),
+        },
         body: JSON.stringify({
           from: AGENT_NAME,
           to,
@@ -275,6 +329,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           ...(attachments?.length && { attachments }),
         }),
       })
+      inboxLine = res.headers.get('x-jean-inbox')
       delivered = ((await res.json()) as { delivered?: boolean }).delivered ?? false
     } catch (err) {
       return {
@@ -295,7 +350,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
     const attachNote = attachments?.length ? ` with ${attachments.length} attachment(s)` : ''
     return {
-      content: [{ type: 'text' as const, text: `Sent to ${to}${taskId ? ` (task ${taskId})` : ''}${attachNote}.` }],
+      content: [
+        {
+          type: 'text' as const,
+          text: appendInboxLine(`Sent to ${to}${taskId ? ` (task ${taskId})` : ''}${attachNote}.`, inboxLine),
+        },
+      ],
     }
   }
 

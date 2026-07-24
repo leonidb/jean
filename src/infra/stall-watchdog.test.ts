@@ -61,9 +61,14 @@ describe('stall watchdog', () => {
       if (!stuck) await Bun.sleep(25)
     }
     expect(stuck).toBe(true)
-    expect(sensei.messages.some((m) => m.type === 'deliver' && m.text === 'Events pending. Check the board.')).toBe(
-      true,
-    )
+    // Nudges now carry the inbox summary (attention phase 1) instead of the
+    // old contentless "Check the board." — assert the payload is present.
+    expect(
+      sensei.messages.some(
+        (m) =>
+          m.type === 'deliver' && m.text.startsWith('Events pending — inbox summary') && m.text.includes('"queued"'),
+      ),
+    ).toBe(true)
     expect(sensei.messages.filter(isWatchdogNudge).length).toBe(0)
 
     // With pending non-empty and idle stuck false, the watchdog must still fire.
