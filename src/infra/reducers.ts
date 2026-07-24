@@ -95,6 +95,10 @@ export type NudgeData = {
   pendingCount: number
   /** True when fired by the stall watchdog (bypassing the idle gate) rather than the normal idle-gated path. */
   forced?: boolean
+  /** True when fired by the blocking-event path (a human is waiting) — delivered
+   *  regardless of the idle flag, with escalating backoff re-wakes (attention
+   *  phase 2, docs/attention.md §4). */
+  blocking?: boolean
 }
 
 export type PermissionRequestData = {

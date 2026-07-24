@@ -32,7 +32,7 @@ import { resolveConfig } from './config.ts'
 import { resolveConnectors } from './connectors/config.ts'
 import { SourceQueue } from './connectors/queue.ts'
 import { createSourceConnector, sourceContext } from './connectors/source.ts'
-import { buildInbox, renderInboxLine, renderInboxWake } from './inbox.ts'
+import { buildInbox, isUserSender, renderInboxLine, renderInboxWake } from './inbox.ts'
 import {
   commitConsolidation,
   type LibrarianPhase,
@@ -343,7 +343,9 @@ function broadcastSSE(event: StoredEvent) {
 // ── Record event (append + project + side effects) ───────────────
 
 async function record(type: string, stream: string, data: unknown): Promise<StoredEvent> {
-  const sizeBefore = pendingProjection.state.length
+  // Captured BEFORE apply: a blocking arrival starts a new wake episode only
+  // when nothing blocking was already pending (burst coalescing).
+  const hadBlockingBefore = hasBlockingPending()
   const event = await store.append({ stream, type, data })
   boardProjection.apply(event)
   pendingProjection.apply(event)
@@ -361,8 +363,20 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
   if (pendingProjection.state.length === 0) pendingSince = null
   else pendingSince ??= Date.now()
 
-  if (pendingProjection.state.length > sizeBefore) {
-    nudgeSenseiIfIdle()
+  // Blocking episode ends the moment blocking drains (ack) — reset here, not
+  // only on the backoff tick, so a new human message right after a drain gets
+  // its immediate wake instead of tripping the stale-episode race guard.
+  if (!hasBlockingPending()) blockingWakeCount = 0
+
+  // Did THIS event enter pending? Checked directly by id — a length-compare
+  // across record()'s await is maskable by an interleaved ack shrinking the
+  // queue (review finding), which would silently skip the wake/nudge dispatch.
+  const enteredPending = pendingProjection.state.some((e) => e.id === event.id)
+  if (enteredPending) {
+    // Attention phase 2: a human waiting wakes regardless of the idle flag;
+    // machine events keep the idle-gated nudge.
+    if (isBlockingEvent(event)) onBlockingArrival(hadBlockingBefore)
+    else nudgeSenseiIfIdle()
   }
 
   return event
@@ -430,6 +444,109 @@ function senseiInboxNow() {
     roleOf: (n) => agents.get(n)?.role ?? (userAgentNames.has(n) ? 'user' : undefined),
   })
 }
+
+// ── Blocking-event wake (attention phase 2 — docs/attention.md §4) ──
+// A human-origin event is BLOCKING: someone is holding a phone, unable to tell
+// thinking from broken. Blocking events wake the sensei REGARDLESS of the idle
+// flag (mid-turn injection is confirmed working and informative), so a stuck
+// Stop hook can never starve a waiting human — the measured 3-hour-stall class
+// dies here. Re-wakes escalate on a backoff schedule while blocking events
+// remain unhandled; the inbox ages climb in every piggyback in between.
+// Machine events keep the idle-gated nudge (deliberately conservative: pure
+// never-wake would regress worker-reply latency to heartbeat-period — the
+// trap the goals sensei flagged; full machine reclassification lands with the
+// turn-end drain discipline in later phases).
+
+/** Is this event a human waiting? MUST agree with the inbox's classification
+ *  (shared `isUserSender`, incl. the `chat-` prefix fallback) — divergence
+ *  means a wake whose own payload contradicts it (review finding, 2026-07-24). */
+function isBlockingEvent(event: StoredEvent): boolean {
+  if (event.type !== 'reply') return false
+  const sender = (event.data as { agent?: unknown }).agent
+  if (typeof sender !== 'string') return false
+  return isUserSender(sender, (n) => agents.get(n)?.role ?? (userAgentNames.has(n) ? 'user' : undefined))
+}
+
+function hasBlockingPending(): boolean {
+  return pendingProjection.state.some(isBlockingEvent)
+}
+
+/** Re-wake delays AFTER the immediate arrival wake: 2m, 5m, then every 10m.
+ *  Env override (comma-separated ms) exists for tests. */
+const BLOCKING_BACKOFF_MS: number[] = (() => {
+  const env = process.env.JEAN_BLOCKING_BACKOFF_MS
+  if (env) {
+    const arr = env
+      .split(',')
+      .map(Number)
+      .filter((n) => Number.isFinite(n) && n > 0)
+    if (arr.length > 0) return arr
+  }
+  return [120_000, 300_000, 600_000]
+})()
+
+/** Wakes fired in the current blocking episode (resets when blocking drains). */
+let blockingWakeCount = 0
+let lastBlockingWakeAt = 0
+
+function wakeSenseiBlocking() {
+  const sensei = findSensei()
+  if (!sensei) return // nobody to wake; the piggyback + a future connect carry it
+  pendingSince = Date.now()
+  sensei.idle = false
+  const inbox = senseiInboxNow()
+  sensei.deliver({
+    type: 'deliver',
+    from: 'infra',
+    text: `A human is waiting — delivered regardless of idle state. Handle blocking first; finish your current step, don't start new unrelated work.\n${inbox ? renderInboxWake(inbox) : 'Check the board.'}`,
+  })
+  lastBlockingWakeAt = Date.now()
+  blockingWakeCount++
+  void record('nudge', SYSTEM_STREAM, {
+    pendingCount: pendingProjection.state.length,
+    blocking: true,
+  } satisfies NudgeData)
+}
+
+/** Called from record() when a blocking event lands. A NEW episode (no blocking
+ *  was pending before) wakes immediately; arrivals during an active episode are
+ *  coalesced — the existing wake + climbing piggyback ages cover the burst, and
+ *  the backoff loop below re-wakes if it stays unhandled. */
+function onBlockingArrival(hadBlockingBefore: boolean) {
+  if (hadBlockingBefore) return
+  // Race guard: two near-simultaneous arrivals can BOTH capture
+  // hadBlockingBefore=false across record()'s await — without this check the
+  // second would fire a duplicate immediate wake. A very recent blocking wake
+  // means the episode is already live; the backoff loop owns any re-wake.
+  if (blockingWakeCount > 0 && Date.now() - lastBlockingWakeAt < 30_000) return
+  blockingWakeCount = 0 // fresh episode — reset any stale backoff state
+  wakeSenseiBlocking()
+}
+
+// Backoff loop: while blocking events sit unhandled, re-wake on the schedule.
+// Quiet when there's nothing blocking (and resets the episode counter then).
+//
+// SELF-HEALING (review finding, empirically proven): blocking pending with
+// count === 0 is an UNSTARTED episode — the arrival wake was missed (no sensei
+// connected at arrival, infra restarted with blocking persisted in pending, or
+// the arrival was masked by an interleaved ack across record()'s await). The
+// tick fires wake #1 itself, so every such state converges within one tick
+// (≤15 s) of a sensei being available, instead of failing closed until the
+// watchdog — which would silently recreate the very stall class this phase
+// exists to kill.
+const blockingTickMs = Math.min(15_000, ...BLOCKING_BACKOFF_MS)
+setInterval(() => {
+  if (!hasBlockingPending()) {
+    blockingWakeCount = 0
+    return
+  }
+  if (blockingWakeCount === 0) {
+    wakeSenseiBlocking() // no-op if no sensei yet; retried next tick
+    return
+  }
+  const delay = BLOCKING_BACKOFF_MS[Math.min(blockingWakeCount - 1, BLOCKING_BACKOFF_MS.length - 1)] as number
+  if (Date.now() - lastBlockingWakeAt >= delay) wakeSenseiBlocking()
+}, blockingTickMs)
 
 /** Attach the compact inbox line as a response header when the request came
  *  from the sensei's channel plugin (`x-jean-agent`). Header-only — response
@@ -590,6 +707,12 @@ const stallEnv = Number(process.env.JEAN_STALL_NUDGE_MS)
 const STALL_NUDGE_AFTER_MS = Number.isFinite(stallEnv) && stallEnv > 0 ? stallEnv : 10 * 60_000
 
 function fireStallWatchdog() {
+  // During an active blocking episode the backoff re-wakes ARE the delivery
+  // attempts (each carries the full inbox incl. machine counts) — at the 10m
+  // backoff cap the two clocks run at identical periods and would double-fire
+  // seconds apart (review probe, 2026-07-24). The watchdog stands down until
+  // the episode drains; machine-only pending gets its usual watchdog.
+  if (blockingWakeCount > 0) return
   const sensei = findSensei()
   if (!sensei) return // nobody to wake; clock stays armed for when one connects
   pendingSince = Date.now()

@@ -60,9 +60,12 @@ function eventAgeMs(e: StoredEvent, now: number): number {
   return Math.max(0, now - (Number.isNaN(at) ? now : at))
 }
 
-/** Bridge surfaces register as `chat-<id>`; used as a fallback when the sender
- *  isn't currently in the live registry (bridge briefly disconnected). */
-function isUserSender(name: string, roleOf: BuildOpts['roleOf']): boolean {
+/** Is this sender a human? Bridge surfaces register as `chat-<id>`; the prefix
+ *  is the fallback when the sender is unknown to the caller's roleOf (bridge
+ *  briefly disconnected, or legacy history with no register event). Exported:
+ *  the server's blocking-wake path MUST use the same classification the inbox
+ *  uses, or a wake can contradict its own payload. */
+export function isUserSender(name: string, roleOf: BuildOpts['roleOf']): boolean {
   const role = roleOf(name)
   if (role !== undefined) return role === 'user'
   return name.startsWith('chat-')
