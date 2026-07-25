@@ -56,6 +56,142 @@ export type Bridge = {
   start: (host: BridgeHost) => Promise<void>
   /** Whether the transport is currently connected. */
   connected: () => boolean
+  /** Transport health for /status — see BridgeHealth. */
+  health: () => BridgeHealth
+}
+
+// ── Inbound-lag detection (task 006) ──────────────────────────────
+//
+// THE INCIDENT (2026-07-25, both dojos, ~08:47–08:56Z): a message sent at
+// 08:46:46Z reached infra at 08:56:13Z — 9m27s — while `connected()` read true
+// the whole time. Two independent pollers on different bot tokens resolved in
+// the same wall-clock minute, which rules out per-infra causes. The human
+// meanwhile had every reason to believe the dojo was ignoring them.
+//
+// TWO FAILURE CLASSES, and they need DIFFERENT signals — this is the crux:
+//
+//  (a) TELEGRAM HOLDS UPDATES while our polls keep completing normally. A
+//      long-poll that returns zero updates is INDISTINGUISHABLE from a quiet
+//      chat, so poll-liveness sees nothing wrong. The only observable is the
+//      age of a message once it finally arrives: receivedAt - sentAt. That is
+//      necessarily RETROSPECTIVE — no signal exists during the silence, because
+//      getUpdates is our only channel and it is telling us nothing is there.
+//      Detected here by `lastInboundLagMs`.
+//
+//  (b) THE POLLER STALLS OR ERRORS (bad token, 409 conflict, black-holed
+//      connection, network blip). Here polls stop completing, which IS
+//      observable live. Detected here by `lastPollAt` age.
+//
+// Which class the incident was is not yet settled — it turns on whether the
+// window shows silent empty returns (a) or errors (b) in the infra stderr, and
+// that scrollback is a pending ask. Both are cheap; both ship. Whichever it
+// was, the NEXT occurrence is diagnosable from /status alone.
+//
+// Deliberately NOT here: retry machinery. Telegram's long-poll owns retries.
+// This is observability only.
+
+export type BridgeHealth = {
+  connected: boolean
+  /** Epoch ms of the last completed poll cycle, ok or not. Null before the
+   *  first, and null for push transports (Slack socket mode) where "poll" has
+   *  no meaning — null is "not applicable", not "unknown". */
+  lastPollAt: number | null
+  /** Epoch ms of the last poll that returned successfully. */
+  lastPollOkAt: number | null
+  /** Consecutive failed polls since the last success. */
+  consecutiveFailures: number
+  /** Epoch ms we received the most recent inbound message. */
+  lastInboundAt: number | null
+  /** receivedAt - sentAt for the most recent inbound carrying a send time.
+   *  THE incident signal: ~567000 during the 08:47–08:56Z window, sub-second
+   *  normally. Null when the surface gives us no send time (Slack). */
+  lastInboundLagMs: number | null
+  /** Largest inbound lag seen this process lifetime — survives the resolving
+   *  batch, so a lag window is still visible minutes later. */
+  maxInboundLagMs: number | null
+}
+
+/** A poll gap beyond this is reported. Telegram holds getUpdates ~50s and the
+ *  fetch aborts at 55s, so a healthy loop always cycles inside ~55s; 2 minutes
+ *  is clear of that without being slack. */
+const POLL_GAP_WARN_MS = Number(process.env.JEAN_BRIDGE_POLL_GAP_MS ?? 120_000)
+/** An inbound arriving older than this is reported. Normal is sub-second; the
+ *  incident was 9m27s. PROVISIONAL — pending the stderr scrollback for the
+ *  08:47–08:56Z window, which is what would tell us the real jitter floor. */
+const INBOUND_LAG_WARN_MS = Number(process.env.JEAN_BRIDGE_LAG_MS ?? 60_000)
+
+/**
+ * Health tracker for a polling bridge. Clock is always injected so the whole
+ * thing is unit-testable without waiting on wall time or stubbing global fetch
+ * (the poll loop itself is unreachable from a test — it runs forever inside a
+ * closure over `fetch`; see the note in bridge.test.ts).
+ *
+ * `recordPoll` / `recordInbound` return a warning string when a threshold is
+ * crossed, rather than writing it. Keeping I/O at the call site is what makes
+ * the decision testable.
+ */
+export function createBridgeHealth() {
+  let lastPollAt: number | null = null
+  let lastPollOkAt: number | null = null
+  let consecutiveFailures = 0
+  let lastInboundAt: number | null = null
+  let lastInboundLagMs: number | null = null
+  let maxInboundLagMs: number | null = null
+
+  return {
+    /** Record a completed poll cycle. Returns a warning when the gap since the
+     *  previous cycle exceeded the threshold — i.e. the loop was stalled and has
+     *  just recovered. NOTE this is inherently after-the-fact: a loop that never
+     *  returns emits nothing, which is why /status also exposes lastPollAt for a
+     *  reader to age live. */
+    recordPoll(ok: boolean, now: number): string | null {
+      const gap = lastPollAt === null ? null : now - lastPollAt
+      lastPollAt = now
+      if (ok) {
+        lastPollOkAt = now
+        consecutiveFailures = 0
+      } else {
+        consecutiveFailures++
+      }
+      if (gap !== null && gap > POLL_GAP_WARN_MS) {
+        return `poll gap ${Math.round(gap / 1000)}s (threshold ${Math.round(POLL_GAP_WARN_MS / 1000)}s) — the poll loop was stalled, not the chat`
+      }
+      return null
+    },
+
+    /** Record an inbound message AT ARRIVAL — before any attachment download,
+     *  so our own fetch time never inflates the transport lag we are measuring.
+     *  `sentAt` is the surface's send time (Telegram `date`, 1s resolution);
+     *  pass undefined when the surface gives none. */
+    recordInbound(sentAt: number | undefined, now: number): string | null {
+      lastInboundAt = now
+      if (sentAt === undefined) {
+        lastInboundLagMs = null
+        return null
+      }
+      // Clamp: Telegram's `date` has 1s resolution and clocks skew, so a
+      // just-sent message can compute a small negative age.
+      const lag = Math.max(0, now - sentAt)
+      lastInboundLagMs = lag
+      if (maxInboundLagMs === null || lag > maxInboundLagMs) maxInboundLagMs = lag
+      if (lag > INBOUND_LAG_WARN_MS) {
+        return `inbound lagged ${Math.round(lag / 1000)}s from send to receipt (threshold ${Math.round(INBOUND_LAG_WARN_MS / 1000)}s) — the surface held it, our poll loop was healthy`
+      }
+      return null
+    },
+
+    snapshot(connected: boolean): BridgeHealth {
+      return {
+        connected,
+        lastPollAt,
+        lastPollOkAt,
+        consecutiveFailures,
+        lastInboundAt,
+        lastInboundLagMs,
+        maxInboundLagMs,
+      }
+    },
+  }
 }
 
 /**
@@ -113,6 +249,9 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
   // Tracks the outcome of the most recent getUpdates so /status.bridge.connected
   // reflects reality — not a write-once "we started" flag.
   let healthy = false
+  // Ages and lags behind that boolean (task 006) — `connected: true` was the
+  // whole of what we knew during a 9-minute inbound stall.
+  const pollHealth = createBridgeHealth()
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
   const call = async (
@@ -190,6 +329,7 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
     kind: 'telegram',
     target: chatId,
     connected: () => healthy,
+    health: () => pollHealth.snapshot(healthy),
     async start(host) {
       // Resolve a human-facing name: group title, else @username, else chat-<id>.
       // getChat may fail if the bot hasn't been messaged yet — harmless, the
@@ -273,6 +413,11 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
         let emit: Promise<void> = Promise.resolve()
         const setHealth = (ok: boolean, why?: string) => {
           healthy = ok
+          // Every poll outcome is recorded, including unchanged ones — the gap
+          // between cycles is the signal, so this must run BEFORE the
+          // transition-only early return below.
+          const warn = pollHealth.recordPoll(ok, Date.now())
+          if (warn) process.stderr.write(`[jean] telegram ${warn}\n`)
           if (ok === wasHealthy) return
           wasHealthy = ok
           process.stderr.write(
@@ -332,6 +477,12 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
                 ...(typeof m.date === 'number' && { sentAt: m.date * 1000 }),
                 ...(m.message_id != null && { sourceId: String(m.message_id) }),
               }
+              // Lag is measured HERE, at arrival off getUpdates — not after the
+              // emit chain — so a slow attachment download can't be mistaken for
+              // transport lag. This is the signal that would have named the
+              // 08:47–08:56Z incident while it was resolving (task 006).
+              const lagWarn = pollHealth.recordInbound(meta.sentAt, Date.now())
+              if (lagWarn) process.stderr.write(`[jean] telegram ${lagWarn}\n`)
               // Emit in arrival order, but don't block the poll loop on it.
               emit = emit.then(async () => {
                 const text = await prepared
@@ -357,11 +508,27 @@ function createTelegramBridge(botToken: string, chatId: string): Bridge {
 
 function createSlackBridge(appToken: string, botToken: string, channelId: string): Bridge {
   let connected = false
+  let lastInboundAt: number | null = null
 
   return {
     kind: 'slack',
     target: channelId,
     connected: () => connected,
+    // Socket Mode is PUSH, not polling — the poll fields are structurally
+    // inapplicable and report null rather than a fabricated value. Slack's
+    // message payload isn't parsed for a send time either (see the onInbound
+    // call below, which passes no meta), so inbound lag is genuinely unknown
+    // here; reporting null is the honest answer, not an omission to fix later
+    // by guessing.
+    health: () => ({
+      connected,
+      lastPollAt: null,
+      lastPollOkAt: null,
+      consecutiveFailures: 0,
+      lastInboundAt,
+      lastInboundLagMs: null,
+      maxInboundLagMs: null,
+    }),
     async start(host) {
       const { App } = await import('@slack/bolt')
       const app = new App({ token: botToken, appToken, socketMode: true })
@@ -380,6 +547,7 @@ function createSlackBridge(appToken: string, botToken: string, channelId: string
         // Ignore bot messages (our own) and non-matching channels.
         if (m.bot_id || m.subtype) return
         if (m.channel !== channelId || !m.text) return
+        lastInboundAt = Date.now()
         host.onInbound(name, m.text)
       })
 

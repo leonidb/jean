@@ -2602,15 +2602,34 @@ function handleHttp(req: Request, server: Upgrader): Response | Promise<Response
   // Full status: identity + live projection state, used by humans / CLI.
   if (path === '/status') {
     const sensei = findSensei()
+    // Bridge health (task 006): `connected` alone was the whole of what we knew
+    // while inbound lagged 9 minutes on 2026-07-25. `pollGapMs` is aged HERE, at
+    // read time, because a wedged poll loop cannot report on itself; the inbound
+    // lags carry the surface-side stall the poll loop structurally cannot see.
+    // See the failure-class note in src/infra/bridge.ts.
+    const bridgeHealth = bridge?.health()
     return Response.json({
       ...identity(),
       agents: [...agents.entries()].map(([n, e]) => ({ name: n, role: e.role })),
       sensei: sensei ? { connected: true, idle: sensei.idle } : { connected: false },
       pendingEvents: pendingProjection.state.length,
       activeTriggers: triggerProjection.state.triggers.filter((t) => t.status === 'active').length,
-      bridge: bridge
-        ? { configured: true, kind: bridge.kind, connected: bridge.connected(), target: bridge.target }
-        : { configured: false },
+      bridge:
+        bridge && bridgeHealth
+          ? {
+              configured: true,
+              kind: bridge.kind,
+              connected: bridge.connected(),
+              target: bridge.target,
+              lastPollAt: bridgeHealth.lastPollAt,
+              pollGapMs: bridgeHealth.lastPollAt === null ? null : Date.now() - bridgeHealth.lastPollAt,
+              lastPollOkAt: bridgeHealth.lastPollOkAt,
+              consecutiveFailures: bridgeHealth.consecutiveFailures,
+              lastInboundAt: bridgeHealth.lastInboundAt,
+              lastInboundLagMs: bridgeHealth.lastInboundLagMs,
+              maxInboundLagMs: bridgeHealth.maxInboundLagMs,
+            }
+          : { configured: false },
     })
   }
 

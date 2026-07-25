@@ -53,6 +53,18 @@ describe('infrastructure server', () => {
     expect(data.tasks).toEqual([])
   })
 
+  // Task 006: /status now reads bridge.health(). With no bridge configured the
+  // handler must still answer — the health lookup is the one place a missing
+  // bridge could throw and take the whole endpoint down.
+  test('/status reports an unconfigured bridge without touching health', async () => {
+    const res = await fetch(`${BASE}/status`)
+    expect(res.status).toBe(200)
+    const data = (await res.json()) as { bridge: { configured: boolean; lastPollAt?: unknown } }
+    expect(data.bridge.configured).toBe(false)
+    // No fabricated health fields on a bridge that doesn't exist.
+    expect(data.bridge.lastPollAt).toBeUndefined()
+  })
+
   test('/send returns not delivered when no agent connected', async () => {
     const res = await fetch(`${BASE}/send`, {
       method: 'POST',
