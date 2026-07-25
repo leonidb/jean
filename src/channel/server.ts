@@ -174,6 +174,12 @@ const IS_SENSEI = AGENT_ROLE === 'sensei'
  *  that agent. Percent-encode; infra decodes. */
 const HEADER_AGENT_NAME = encodeURIComponent(AGENT_NAME)
 
+/** Identify EVERY agent's HTTP call, not just the sensei's (attention phase 4):
+ *  infra infers liveness from observed traffic, and a
+ *  worker's infra reads are otherwise invisible between WS frames. The piggyback
+ *  itself stays sensei-only — infra decides that by role, not by this header. */
+const AGENT_HEADERS = { 'x-jean-agent': HEADER_AGENT_NAME } as const
+
 // Note: the line is appended to error results too — deliberate ("cannot not
 // know" beats a slightly cleaner failure message).
 function appendInboxLine(text: string, line: string | null): string {
@@ -217,7 +223,7 @@ async function callInfraTool(toolName: string, method: string, path: string, bod
     }
   }
   try {
-    const init: RequestInit = { method, headers: IS_SENSEI ? { 'x-jean-agent': HEADER_AGENT_NAME } : {} }
+    const init: RequestInit = { method, headers: { ...AGENT_HEADERS } }
     if (body !== undefined && method !== 'GET') {
       // Models sometimes pass body as a JSON-encoded string despite the
       // schema description saying object — JSON.stringify would then
@@ -319,7 +325,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          ...(IS_SENSEI && { 'x-jean-agent': HEADER_AGENT_NAME }),
+          ...AGENT_HEADERS,
         },
         body: JSON.stringify({
           from: AGENT_NAME,

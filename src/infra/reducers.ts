@@ -80,6 +80,25 @@ export type SendData = {
   peerDescription?: string
 }
 
+/**
+ * How an event reached its agent (attention phase 4 delivery ledger).
+ *
+ * PRECISION, deliberately stated (dual review, 2026-07-25): these record what
+ * infra HANDED OVER, not what the agent demonstrably read.
+ *   'wake'      — a push the transport accepted (a dead socket stamps nothing).
+ *   'heartbeat' — the same, from the stall watchdog.
+ *   'piggyback' — the inbox line was ATTACHED to a response infra returned to
+ *                 the agent. Attach-level only: infra cannot see the client
+ *                 read it, and an aborted/dropped response still counts here.
+ * Confirmed-read is not observable before the phase-5 mailbox model; treat
+ * these as "best evidence of delivery", not proof of receipt.
+ */
+export type DeliveredVia = 'wake' | 'piggyback' | 'heartbeat'
+
+/** What removed an event from pending: an explicit ack, or infra observing the
+ *  effect that handles it (auto-clear-on-reply, phase 3). */
+export type ClearedBy = 'ack' | 'auto-clear'
+
 export type AckData = {
   eventIds: number[]
   /** Set when infra generated this ack itself — e.g. 'reply': the sensei
@@ -87,6 +106,13 @@ export type AckData = {
    *  handled (attention phase 3, docs/attention.md §5 auto-clear-on-reply).
    *  Absent on agent-initiated acks. */
   auto?: 'reply'
+  /** Delivery ledger (attention phase 4), keyed by acked event id: how the
+   *  event reached the agent and what cleared it. Two fields, deliberately —
+   *  enough to answer "did this event ever actually get delivered, and by which
+   *  path" from the event log alone, which previously took watchdog
+   *  archaeology. `deliveredVia` is absent when the delivery mark was lost
+   *  (infra restarted while the event sat pending) — unknown, not wrong. */
+  ledger?: Record<string, { deliveredVia?: DeliveredVia; clearedBy: ClearedBy }>
 }
 
 export type RegisterData = {

@@ -40,6 +40,7 @@ import {
   recoverWikiLayout,
   spawnHeadless,
 } from './librarian.ts'
+import { type AgentSession, classifySession, envMs } from './liveness.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
 import {
   AGENT_ROLES,
@@ -58,6 +59,8 @@ import {
   agentFromEvent,
   agentStream,
   boardReducer,
+  type ClearedBy,
+  type DeliveredVia,
   type HeadlessCompletedData,
   MEMORY_STREAM,
   type MemoryData,
@@ -167,6 +170,42 @@ const lastTaskContext = createProjection<Map<string, string>>({
   filter: { types: ['send'] },
 })
 
+/**
+ * Last event timestamp per task — the board's staleness signal (attention
+ * phase 4; Leonid's housekeeping addition, 2026-07-25). Anything on a task's
+ * stream counts as activity: status moves, comments, and the task-scoped
+ * send/reply traffic that is what "someone is actually on this" looks like.
+ *
+ * A SEPARATE projection on purpose: the board projection is snapshotted and
+ * migrated, and a surfacing-only field has no business perturbing its stored
+ * shape. Costs one startup replay; no snapshot needed.
+ */
+const taskActivity = createProjection<Map<string, string>>({
+  name: 'taskActivity',
+  store,
+  reducer: (state, event) => {
+    const taskId = taskIdFromStream(event.stream)
+    if (!taskId) return state // reply/send also land on agent- streams
+    const next = new Map(state)
+    next.set(taskId, event.ts)
+    return next
+  },
+  initial: new Map(),
+  filter: {
+    types: ['task-created', 'task-status', 'task-updated', 'task-reverted', 'task-comment', 'reply', 'send'],
+  },
+})
+
+/** How long an in-progress task may go without a single event on its stream
+ *  before /board flags it `stale`. A day is deliberately generous: workers go
+ *  legitimately silent for hours on file/git/test work, and the target here is
+ *  the forgotten task, not the quiet one. Env-tunable (tests shrink it).
+ *  (Considered and rejected: flagging on the WORKER's quiet threshold instead —
+ *  it fires on healthy 45-min silences. Both signals are surfaced separately —
+ *  `session` on /agents, `lastEventAt` here — so the sensei can still combine
+ *  them by judgment.) */
+const STALE_TASK_MS = envMs('JEAN_STALE_TASK_MS') ?? 24 * 60 * 60_000
+
 const triggerProjection = createProjection<TriggerState>({
   name: 'triggers',
   store,
@@ -188,6 +227,7 @@ const playbookProjection = createProjection<PlaybookState>({
 await boardProjection.catchUp()
 await pendingProjection.catchUp()
 await lastTaskContext.catchUp()
+await taskActivity.catchUp()
 await triggerProjection.catchUp()
 await playbookProjection.catchUp()
 
@@ -205,6 +245,12 @@ type AgentEntry = {
    *  WS is still live — two `jean agent start <name>` processes fighting for
    *  the same slot). Peers and other non-WS agents have no live check. */
   isLive?: () => boolean
+  /** Epoch ms of the last INBOUND traffic observed from this agent — any WS
+   *  frame, any HTTP call carrying `x-jean-agent`, its `/agent-idle` posts, its
+   *  register. Attention phase 4 (docs/attention.md §3): liveness is INFERRED
+   *  from traffic infra already sees, never declared by a hook. Read-time only
+   *  — see sessionOf(); it must never gate delivery. */
+  lastActivityAt?: number
 }
 
 const agents = new Map<string, AgentEntry>()
@@ -251,6 +297,60 @@ function deliverToAgent(agentName: string, msg: DeliverMsg): boolean {
   const entry = agents.get(agentName)
   if (!entry) return false
   return entry.deliver(msg)
+}
+
+// ── Observed liveness (attention phase 4 — docs/attention.md §3) ──
+//
+// "Talked to me 8s ago" replaces the hook-set flag. Infra bumps
+// `lastActivityAt` on any inbound traffic it already sees; the session class is
+// computed at READ time, per role (see liveness.ts for the rules), and is
+// reported on GET /agents.
+//
+// INVARIANT (binding, docs/attention.md §3): session/quiet is a HINT — it must
+// never gate delivery. Nothing in the wake/nudge/queue path may branch on it;
+// a wrong classification costs a slightly-stale board reading, never a stall.
+// The `idle` flag keeps its (already demoted) push-vs-drain role.
+
+/**
+ * Note the last inbound traffic from `name`. Cheap and unconditional — call it
+ * from every inbound path; a name we don't know is a no-op.
+ *
+ * FORGEABLE, AND THAT IS ACCEPTED (dual review, 2026-07-25). The HTTP caller is
+ * self-declared via `x-jean-agent`, so any local process can move any agent's
+ * liveness hint. This does not widen the trust model: infra binds 127.0.0.1 and
+ * has no auth at all — POST /send, /events/ack and /agent-idle are equally
+ * self-declared, and those DO change state. What this function writes is a hint
+ * that gates nothing (see the invariant above), so the worst a forger achieves
+ * is a wrong `session` value on GET /agents. Pinned by a test
+ * ("forged x-jean-agent moves the hint and gates nothing"). Real authentication
+ * is a separate backlog item, and only matters if a Jean dojo ever runs on a
+ * machine with untrusted local users.
+ */
+function touchAgent(name: string | null | undefined): void {
+  if (!name) return
+  const entry = agents.get(name)
+  if (entry) entry.lastActivityAt = Date.now()
+}
+
+/** Session class at read time. A disconnected agent is normally absent from the
+ *  registry entirely, which reads as offline to any caller. */
+function sessionOf(entry: AgentEntry): AgentSession {
+  return classifySession(
+    {
+      role: entry.role,
+      ...(entry.lastActivityAt !== undefined && { lastActivityAt: entry.lastActivityAt }),
+      ...(entry.isLive && { transportLive: entry.isLive() }),
+    },
+    Date.now(),
+  )
+}
+
+/** Tasks this agent is actively holding. IN-PROGRESS ONLY — `waiting` is paused
+ *  by definition (board.ts TaskStatus), and a long-lived waiting task (the goals
+ *  dojo has one open since April) must never make a worker look permanently
+ *  busy. This is the dispatchability signal that replaces reading `idle`. */
+function openTaskCount(name: string): number {
+  return boardProjection.state.tasks.filter((t) => t.agent === name && t.status === 'in-progress').length
 }
 
 /** Push a delivery-failure notice back to the sender's session, so a silent drop
@@ -343,10 +443,7 @@ async function routeSend(args: {
       (e) => isBlockingEvent(e) && (e.data as { agent?: unknown }).agent === args.to,
     )
     if (stillBlocking.length === 1 && (stillBlocking[0] as StoredEvent).id === autoClearId) {
-      await record('ack', SYSTEM_STREAM, {
-        eventIds: [autoClearId],
-        auto: 'reply',
-      } satisfies AckData)
+      await recordAck([autoClearId], 'auto-clear')
     }
   }
   return delivered
@@ -392,6 +489,7 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
   const event = await store.append({ stream, type, data })
   boardProjection.apply(event)
   pendingProjection.apply(event)
+  taskActivity.apply(event)
   triggerProjection.apply(event)
   playbookProjection.apply(event)
   if (stream === TRIGGERS_STREAM) syncTriggerJobs()
@@ -403,8 +501,12 @@ async function record(type: string, stream: string, data: unknown): Promise<Stor
   broadcastSSE(event)
 
   // Stall-watchdog clock: starts when pending becomes non-empty, clears when drained.
-  if (pendingProjection.state.length === 0) pendingSince = null
-  else pendingSince ??= Date.now()
+  // A drained queue also ends the machine-nudge episode (attention phase 4): the
+  // next arrival on an empty queue is genuinely new news and nudges immediately.
+  if (pendingProjection.state.length === 0) {
+    pendingSince = null
+    resetNudgeEpisode()
+  } else pendingSince ??= Date.now()
 
   // Blocking episode ends the moment blocking drains (ack) — reset here, not
   // only on the backoff tick, so a new human message right after a drain gets
@@ -493,6 +595,99 @@ function senseiInboxNow() {
   })
 }
 
+// ── Delivery ledger (attention phase 4 — docs/attention.md "Observability") ──
+//
+// Two facts per event, no more: HOW it reached the agent (`deliveredVia`) and
+// WHAT cleared it (`clearedBy`). Deliberately minimal — the fuller ledger in the
+// design (wake attempted/landed/failed, per-path counters, a query endpoint) is
+// scope creep until a measured need shows up. Live state is in-memory; it
+// MATERIALIZES onto the `ack` event, which is the durable record (the phase-3
+// `auto: 'reply'` tag is the precedent this generalizes — the goals dojo's
+// phase-3 QA leaned on it as its only ledger-like evidence).
+//
+// In-memory means a restart forgets in-flight delivery marks: an event pending
+// across a restart acks with no `deliveredVia`. Honest and bounded — absence
+// reads as "unknown", never as a wrong path.
+
+/** eventId → how it first reached the agent. First delivery wins: a wake
+ *  followed by ten piggybacks stays 'wake'. (The design's `at` timestamp is
+ *  deliberately not kept — nothing surfaces it, and the ack event's own ts is
+ *  the clear time.) See DeliveredVia in reducers.ts for what each value does
+ *  and does NOT claim. */
+const deliveryLedger = new Map<number, DeliveredVia>()
+
+/** A pending event as the API renders it, plus how it reached the agent (absent
+ *  until something has actually delivered it). */
+function withDeliveredVia(event: StoredEvent) {
+  const deliveredVia = deliveryLedger.get(event.id)
+  return { ...toApiEvent(event), ...(deliveredVia && { deliveredVia }) }
+}
+
+/** THE one stamp site. Every delivery path routes through here (first-delivery-
+ *  wins lives inside it), so phase 5 can swap the in-memory map for
+ *  mailbox-derived custody state at a single seam instead of hunting inline
+ *  writes. `ids` defaults to everything currently pending — i.e. exactly what
+ *  the inbox just handed over. */
+function stampDelivery(via: DeliveredVia, ids?: number[]): void {
+  for (const id of ids ?? pendingProjection.state.map((e) => e.id)) {
+    if (!deliveryLedger.has(id)) deliveryLedger.set(id, via)
+  }
+}
+
+/** Ids an in-flight recordAck has claimed but not yet written. Reserved
+ *  SYNCHRONOUSLY, because the write straddles an await. */
+const ackInFlight = new Set<number>()
+
+/**
+ * The one place an `ack` event is written. Materializes the ledger for the ids
+ * it actually clears and drops their in-memory entries (pending is the only
+ * thing keeping them alive, and ack is the only exit from pending). Returns the
+ * ids actually acked, so callers report what happened rather than what they
+ * asked for.
+ *
+ * CONCURRENCY (review finding, deterministic repro): two acks for the same id
+ * used to produce two ack events, the second carrying `clearedBy` with no
+ * `deliveredVia` (the first write already dropped the ledger entry) — so a
+ * reader taking the LATEST ack concluded "delivery unknown" for an event that
+ * was demonstrably woken. A 20-way interleave produced 20 ack events. The
+ * membership check and the claim below happen in ONE synchronous step, with no
+ * await between them, so exactly one writer can own an id; everything else
+ * drops out and no empty ack is ever recorded. (The race predates phase 4 —
+ * duplicate acks were merely redundant before the ledger gave them a way to
+ * lie.)
+ */
+async function recordAck(eventIds: number[], clearedBy: ClearedBy): Promise<number[]> {
+  const pendingIds = new Set(pendingProjection.state.map((e) => e.id))
+  // Dedupe the input: no caller can pass a repeat today (both /events/ack forms
+  // funnel through a Set or a pending filter), but the reservation below is
+  // populated AFTER this filter, so a repeated id would slip past it and land
+  // twice in the recorded `eventIds`. Making the guarantee local beats relying
+  // on every present and future caller staying well-behaved.
+  const claimed = [...new Set(eventIds)].filter((id) => pendingIds.has(id) && !ackInFlight.has(id))
+  if (claimed.length === 0) return [] // already cleared, or another writer owns it
+  for (const id of claimed) ackInFlight.add(id)
+  try {
+    const ledger: NonNullable<AckData['ledger']> = {}
+    for (const id of claimed) {
+      const deliveredVia = deliveryLedger.get(id)
+      ledger[String(id)] = { ...(deliveredVia && { deliveredVia }), clearedBy }
+      deliveryLedger.delete(id)
+    }
+    await record('ack', SYSTEM_STREAM, {
+      eventIds: claimed,
+      // `auto: 'reply'` predates the ledger and stays — phase-3 QA (and the
+      // sensei skill) read it; clearedBy is its generalization, not a rename.
+      ...(clearedBy === 'auto-clear' && { auto: 'reply' as const }),
+      ledger,
+    } satisfies AckData)
+    return claimed
+  } finally {
+    // Released only after record() has applied the ack to the pending
+    // projection, so a later writer sees "not pending" rather than a free id.
+    for (const id of claimed) ackInFlight.delete(id)
+  }
+}
+
 // ── Blocking-event wake (attention phase 2 — docs/attention.md §4) ──
 // A human-origin event is BLOCKING: someone is holding a phone, unable to tell
 // thinking from broken. Blocking events wake the sensei REGARDLESS of the idle
@@ -540,16 +735,26 @@ let lastBlockingWakeAt = 0
 function wakeSenseiBlocking() {
   const sensei = findSensei()
   if (!sensei) return // nobody to wake; the piggyback + a future connect carry it
-  pendingSince = Date.now()
-  sensei.idle = false
   const inbox = senseiInboxNow()
-  sensei.deliver({
+  const landed = sensei.deliver({
     type: 'deliver',
     from: 'infra',
     text: `A human is waiting — delivered regardless of idle state. Handle blocking first; finish your current step, don't start new unrelated work.\n${inbox ? renderInboxWake(inbox) : 'Check the board.'}`,
   })
+  // NOTHING THAT DIDN'T HAPPEN GETS RECORDED (review finding [A], applied to
+  // every push path by symmetry). A wake the transport refused — a dead socket
+  // whose close handler hasn't run — must not advance the episode, stamp the
+  // ledger, push the watchdog clock, or leave a `nudge` event claiming the
+  // sensei was told. Leaving blockingWakeCount at 0 is precisely the
+  // "unstarted episode" state the backoff tick self-heals, so an undelivered
+  // wake is retried on the next tick (≤15s) instead of after a backoff window
+  // — the same treatment the no-sensei-at-all case already gets above.
+  if (!landed) return
+  pendingSince = Date.now()
+  sensei.idle = false
   lastBlockingWakeAt = Date.now()
   blockingWakeCount++
+  stampDelivery('wake')
   void record('nudge', SYSTEM_STREAM, {
     pendingCount: pendingProjection.state.length,
     blocking: true,
@@ -600,21 +805,35 @@ setInterval(() => {
  *  from the sensei's channel plugin (`x-jean-agent`). Header-only — response
  *  bodies are never mutated, so no consumer's JSON shape can break. Skips SSE
  *  and non-sensei callers; empty inbox = no header (the empty case costs 0). */
-function withInboxHeader(req: Request, res: Response): Response {
-  const rawCaller = req.headers.get('x-jean-agent')
-  if (!rawCaller) return res
-  // The channel plugin percent-encodes the name (HTTP headers are Latin-1-only;
-  // a non-ASCII agent name would otherwise arrive mojibake'd and never match).
-  let caller = rawCaller
+/** The agent behind an HTTP request, per its `x-jean-agent` header. The channel
+ *  plugin percent-encodes the name (HTTP headers are Latin-1-only; a non-ASCII
+ *  agent name would otherwise arrive mojibake'd and never match). */
+function callerFromHeader(req: Request): string | undefined {
+  const raw = req.headers.get('x-jean-agent')
+  if (!raw) return undefined
   try {
-    caller = decodeURIComponent(rawCaller)
+    return decodeURIComponent(raw)
   } catch {
-    /* not encoded — use as-is */
+    return raw // not encoded — use as-is
   }
+}
+
+function withInboxHeader(req: Request, res: Response): Response {
+  const caller = callerFromHeader(req)
+  if (!caller) return res
   if (agents.get(caller)?.role !== 'sensei') return res
   if ((res.headers.get('content-type') ?? '').includes('text/event-stream')) return res
   const inbox = senseiInboxNow()
   if (!inbox) return res
+  // ATTACH-LEVEL, NOT CONFIRMED READ (review finding [D]). Marking these
+  // 'piggyback' records that infra ATTACHED the inbox line to a response headed
+  // for the sensei — it cannot observe the client reading it, and a response the
+  // client aborts mid-flight (or a plugin that drops the header) is stamped all
+  // the same. That is the best evidence available before the phase-5 mailbox
+  // model; the alternative — not stamping — would under-report every event whose
+  // only delivery was a piggyback, which is the common case. Kept, with the
+  // claim stated precisely here and on DeliveredVia (reducers.ts).
+  stampDelivery('piggyback')
   const headers = new Headers(res.headers)
   headers.set('x-jean-inbox', renderInboxLine(inbox))
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
@@ -724,20 +943,98 @@ async function buildCorpus(scope: string): Promise<SearchDoc[]> {
 // nudge (either kind) fired — whichever is later. Null while pending is empty.
 let pendingSince: number | null = pendingProjection.state.length > 0 ? Date.now() : null
 
+// ── Machine-nudge episode backoff (attention phase 4) ────────────
+//
+// The goals dojo's event 10077: SIX re-nudges in ~25s on ONE deliberately-held
+// event. Not timer-driven — every turn-end posts /agent-idle, which sets
+// idle=true and calls nudgeSenseiIfIdle(), which had zero suppression. So the
+// loop rate WAS the reply rate: the sensei's own answer re-armed the interrupt
+// that produced it, and a deliberately deferred event nagged forever.
+//
+// Fix: an EPISODE (spanning a non-empty pending queue) nudges when it has
+// something new to say, not whenever the agent draws breath:
+//   1. first nudge of the episode — always;
+//   2. CONTENT CHANGED — an event entered pending since the last nudge (this is
+//      what keeps worker-reply latency at turn-end speed, the regression the
+//      goals review warned about);
+//   3. BACKOFF ELAPSED — the same held queue is worth one reminder per window.
+// Everything else is silence, on purpose. The queue is still readable (delivery
+// is pull), the piggyback still rides every infra call with climbing ages, the
+// stall watchdog is still the backstop, and blocking (human) events are a
+// separate path that this never touches.
+
+/** Re-nudge delays for a queue whose CONTENT hasn't changed: 1m, 2m, 5m, then
+ *  every 10m. Same structure and env-override form as BLOCKING_BACKOFF_MS. */
+const NUDGE_BACKOFF_MS: number[] = (() => {
+  const env = process.env.JEAN_NUDGE_BACKOFF_MS
+  if (env) {
+    const arr = env
+      .split(',')
+      .map(Number)
+      .filter((n) => Number.isFinite(n) && n > 0)
+    if (arr.length > 0) return arr
+  }
+  return [60_000, 120_000, 300_000, 600_000]
+})()
+
+/** Machine-nudge episode state. Resets when pending drains (record()). */
+let nudgeCount = 0
+let lastNudgeAt = 0
+/** Highest pending event id the sensei has already been told about. */
+let maxNudgedPendingId = 0
+
+function resetNudgeEpisode() {
+  nudgeCount = 0
+  lastNudgeAt = 0
+  maxNudgedPendingId = 0
+}
+
+/** Has an event entered pending since the last nudge? Id-based, not
+ *  count-based: an ack + an arrival between two nudges leaves the count equal
+ *  while the content is genuinely new. */
+function pendingHasNewContent(): boolean {
+  for (const e of pendingProjection.state) {
+    if (e.id > maxNudgedPendingId) return true
+  }
+  return false
+}
+
+function shouldNudge(): boolean {
+  if (nudgeCount === 0) return true
+  if (pendingHasNewContent()) return true
+  const delay = NUDGE_BACKOFF_MS[Math.min(nudgeCount - 1, NUDGE_BACKOFF_MS.length - 1)] as number
+  return Date.now() - lastNudgeAt >= delay
+}
+
 function nudgeSenseiIfIdle() {
   const sensei = findSensei()
+  // The idle gate is checked BEFORE any episode bookkeeping: a suppressed-
+  // because-busy call must not consume the content-changed signal, or the
+  // event that arrived mid-turn would never be announced at turn-end.
   if (!sensei?.idle) return
   if (pendingProjection.state.length === 0) return
+  if (!shouldNudge()) return
 
-  pendingSince = Date.now()
-  sensei.idle = false
   const inbox = senseiInboxNow()
-  sensei.deliver({
+  const landed = sensei.deliver({
     type: 'deliver',
     from: 'infra',
     // Full inbox on wakes (docs/attention.md §2): triage needs zero fetches.
     text: inbox ? renderInboxWake(inbox) : 'Events pending. Check the board.',
   })
+  // A nudge that never left the process tells the sensei nothing, so it must
+  // not consume the episode (review finding [A], 3x convergent). Advancing
+  // nudgeCount/lastNudgeAt here would suppress re-announcement for a whole
+  // backoff window — pre-phase-4, the next /agent-idle simply re-nudged.
+  if (!landed) return
+  pendingSince = Date.now()
+  sensei.idle = false
+  nudgeCount++
+  lastNudgeAt = Date.now()
+  for (const e of pendingProjection.state) {
+    if (e.id > maxNudgedPendingId) maxNudgedPendingId = e.id
+  }
+  stampDelivery('wake')
   void record('nudge', SYSTEM_STREAM, { pendingCount: pendingProjection.state.length } satisfies NudgeData)
 }
 
@@ -755,23 +1052,38 @@ const stallEnv = Number(process.env.JEAN_STALL_NUDGE_MS)
 const STALL_NUDGE_AFTER_MS = Number.isFinite(stallEnv) && stallEnv > 0 ? stallEnv : 10 * 60_000
 
 function fireStallWatchdog() {
-  // During an active blocking episode the backoff re-wakes ARE the delivery
-  // attempts (each carries the full inbox incl. machine counts) — at the 10m
-  // backoff cap the two clocks run at identical periods and would double-fire
-  // seconds apart (review probe, 2026-07-24). The watchdog stands down until
-  // the episode drains; machine-only pending gets its usual watchdog.
-  if (blockingWakeCount > 0) return
+  // While ANY blocking event is pending, the blocking path owns delivery and
+  // the watchdog stands down. Its re-wakes ARE the delivery attempts (each
+  // carries the full inbox including machine counts), and at the 10m backoff
+  // cap the two clocks run at identical periods and would double-fire seconds
+  // apart (review probe, 2026-07-24).
+  //
+  // The condition is "blocking is pending", NOT "a blocking episode has fired"
+  // (review finding [H]). Since [A] stopped failed deliveries from advancing
+  // blockingWakeCount, an UNSTARTED episode — blocking pending against a dead
+  // transport — sits at count 0, which the old `count > 0` guard didn't cover:
+  // the sensei reconnecting between the watchdog's check and the blocking tick
+  // got a duplicate push, with the ledger crediting 'heartbeat' for an event
+  // the blocking path owned. Standing down on pendingness costs nothing,
+  // because an unstarted episode self-heals within one blocking tick (≤15s),
+  // far inside the watchdog's own window.
+  if (hasBlockingPending()) return
   const sensei = findSensei()
   if (!sensei) return // nobody to wake; clock stays armed for when one connects
-  pendingSince = Date.now()
-  sensei.idle = false
   const minutes = Math.max(1, Math.round(STALL_NUDGE_AFTER_MS / 60_000))
   const inbox = senseiInboxNow()
-  sensei.deliver({
+  const landed = sensei.deliver({
     type: 'deliver',
     from: 'infra',
     text: `Watchdog: events pending for over ${minutes} min. (Sent regardless of your idle state — your Stop hook may have misfired.)\n${inbox ? renderInboxWake(inbox) : 'Check the board.'}`,
   })
+  // Same rule as the other push paths: a refused delivery must not re-arm the
+  // window (that would silence the backstop for another full period) or leave a
+  // `nudge` event claiming a reminder was sent. It simply retries next tick.
+  if (!landed) return
+  pendingSince = Date.now()
+  sensei.idle = false
+  stampDelivery('heartbeat')
   void record('nudge', SYSTEM_STREAM, {
     pendingCount: pendingProjection.state.length,
     forced: true,
@@ -1283,6 +1595,11 @@ async function initBridge() {
   if (!bridge) return
   await bridge.start({
     register: (name, send) => {
+      // NO lastActivityAt (review finding [C]). Bridge registration is INFRA's
+      // act at boot, not the human's — stamping it would make a chat surface
+      // that has been silent for months read `session: active` for the next 45
+      // minutes after every restart. The human's traffic is their inbound
+      // message (see onInbound below); until one arrives, absent → `quiet`.
       agents.set(name, {
         role: 'user',
         idle: true,
@@ -1297,6 +1614,9 @@ async function initBridge() {
       } satisfies RegisterData)
     },
     onInbound: (name, text, meta) => {
+      // A human's inbound message is that identity's traffic too — it makes
+      // `session` on GET /agents meaningful for bridge surfaces.
+      touchAgent(name)
       void record('reply', agentStream(name), {
         agent: name,
         text,
@@ -1809,6 +2129,9 @@ function handleHttp(req: Request, server: Upgrader): Response | Promise<Response
         return Response.json({ ok: false, error: 'agent not connected' })
       }
 
+      // A Stop-hook post is inbound traffic like any other (phase 4 §3) — it
+      // sharpens liveness even though it no longer carries correctness.
+      touchAgent(agentName)
       entry.idle = true
       const role = entry.role
       const taskId = inferTaskId(agentName)
@@ -2078,7 +2401,7 @@ function handleHttp(req: Request, server: Upgrader): Response | Promise<Response
 
   if (path === '/events' && req.method === 'GET') {
     const agent = url.searchParams.get('agent') ?? undefined
-    return Response.json({ events: pendingEvents(agent).map(toApiEvent) })
+    return Response.json({ events: pendingEvents(agent).map(withDeliveredVia) })
   }
 
   // Inbox summary (attention phase 1) — the WS-path channel tools
@@ -2091,7 +2414,7 @@ function handleHttp(req: Request, server: Upgrader): Response | Promise<Response
 
   if (path === '/events/pending') {
     const agent = url.searchParams.get('agent') ?? undefined
-    return Response.json({ events: pendingEvents(agent).map(toApiEvent) })
+    return Response.json({ events: pendingEvents(agent).map(withDeliveredVia) })
   }
 
   if (path === '/events/agents') {
@@ -2102,10 +2425,11 @@ function handleHttp(req: Request, server: Upgrader): Response | Promise<Response
   if (ackMatch && req.method === 'POST') {
     return (async () => {
       const id = Number(ackMatch[1])
-      const exists = pendingProjection.state.some((e) => e.id === id)
-      if (!exists) return Response.json({ ok: false })
-      await record('ack', SYSTEM_STREAM, { eventIds: [id] } satisfies AckData)
-      return Response.json({ ok: true })
+      // recordAck rechecks membership itself; `ok` reflects what it actually
+      // cleared, so a duplicate/racing ack reads false instead of claiming a
+      // second clear of the same event.
+      const acked = await recordAck([id], 'ack')
+      return Response.json({ ok: acked.length > 0 })
     })()
   }
 
@@ -2145,11 +2469,21 @@ function handleHttp(req: Request, server: Upgrader): Response | Promise<Response
       if (body.agent) {
         toAck = toAck.filter((e) => resolveAgent(e) === body.agent)
       }
-      const eventIds = toAck.map((e) => e.id)
-      if (eventIds.length > 0) {
-        await record('ack', SYSTEM_STREAM, { eventIds } satisfies AckData)
-      }
-      return Response.json({ acknowledged: eventIds.length, remaining: pendingProjection.state.length })
+      // Report what was actually cleared by THIS call: with concurrent acks,
+      // the ids this request selected may already be owned by another writer.
+      const acked = await recordAck(
+        toAck.map((e) => e.id),
+        'ack',
+      )
+      // `remaining` is a SNAPSHOT at reply time, not a transactional count: a
+      // request that loses the race returns before the winner's append lands,
+      // so it can report one too many (review nit [J]). Left as-is on purpose —
+      // no reordering inside this handler can see another request's in-flight
+      // write; making it exact means awaiting the overlapping writers, i.e. a
+      // shared ack queue, which is disproportionate for a display-only field
+      // (and is subsumed by the phase-5 mailbox model). `acknowledged` — the
+      // field a caller acts on — is always exact.
+      return Response.json({ acknowledged: acked.length, remaining: pendingProjection.state.length })
     })()
   }
 
@@ -2201,20 +2535,59 @@ function handleHttp(req: Request, server: Upgrader): Response | Promise<Response
   // ── Info endpoints ──────────────────────────────────────────
 
   if (path === '/board') {
-    return Response.json(boardProjection.state)
+    // Staleness surfacing (attention phase 4). `openTasks` is only trustworthy
+    // as a dispatchability signal if in-progress stays truthful, and the known
+    // failure mode is a task nobody parked: every task carries `lastEventAt`,
+    // and an in-progress task with nothing on its stream for JEAN_STALE_TASK_MS
+    // is flagged `stale`.
+    //
+    // SURFACING ONLY — no auto-demotion, ever. Statuses are sensei-owned and
+    // single-writer; infra inform, it does not obligate. The sensei's
+    // housekeeping ritual decides: ping the worker, or park it to `waiting`.
+    const now = Date.now()
+    const tasks = boardProjection.state.tasks.map((t) => {
+      // Pre-phase-4 tasks have no recorded stream activity in this projection's
+      // replay window; updatedAt is the honest floor.
+      const lastEventAt = taskActivity.state.get(t.id) ?? t.updatedAt
+      const quietMs = now - Date.parse(lastEventAt)
+      const stale = t.status === 'in-progress' && Number.isFinite(quietMs) && quietMs >= STALE_TASK_MS
+      return { ...t, lastEventAt, ...(stale && { stale: true as const }) }
+    })
+    return Response.json({ ...boardProjection.state, tasks })
   }
 
   if (path === '/agents') {
     // Liveness is only probed for peers (local agents are "live" by
     // definition — they hold an open WS). Probe in parallel; per-peer
     // results are cached for 5s inside peerLiveness().
+    //
+    // ATTENTION PHASE 4 — the field split (docs/attention.md §3). `idle` was
+    // asked two unrelated questions ("is a turn in flight?" and "is this agent
+    // available for work?") and answered both badly; a sensei reading it could
+    // see looks-busy-when-free and defer dispatch. Now:
+    //   session   — liveness, from OBSERVED traffic (active|quiet|offline)
+    //   openTasks — availability, from the board (in-progress only)
+    // Strictly ADDITIVE: `idle` keeps its exact meaning and position so no
+    // existing dispatch logic breaks; it's deprecated, not removed. The
+    // sanctioned dispatchability read is openTasks === 0 && session !== 'offline'.
+    // PEER SHAPE IS UNTOUCHED — skip-if-silent pings and channel-identity
+    // routing key on the peer `liveness` field exactly as it is.
     return (async () => {
       const list = await Promise.all(
         [...agents.entries()].map(async ([name, entry]) => {
           const base = { name, role: entry.role, idle: entry.idle, tags: entry.tags }
-          if (entry.role !== 'peer') return base
-          const peer = peers.get(name)
-          return { ...base, liveness: peer ? await peerLiveness(peer) : 'unknown' }
+          if (entry.role === 'peer') {
+            const peer = peers.get(name)
+            return { ...base, liveness: peer ? await peerLiveness(peer) : 'unknown' }
+          }
+          return {
+            ...base,
+            session: sessionOf(entry),
+            openTasks: openTaskCount(name),
+            ...(entry.lastActivityAt !== undefined && {
+              lastActivityAt: new Date(entry.lastActivityAt).toISOString(),
+            }),
+          }
         }),
       )
       return Response.json({ agents: list })
@@ -2252,6 +2625,10 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
   // (docs/attention.md §2 — the compact line rides as a response header on
   // sensei channel-tool requests; empty inbox = no header, zero cost).
   async fetch(req, server) {
+    // Observed liveness (attention phase 4 §3): an agent's HTTP call IS the
+    // proof it's alive — bump before handling, so even a request that errors
+    // still counts as traffic.
+    touchAgent(callerFromHeader(req))
     const res = await handleHttp(req, server)
     if (res === undefined) return undefined // WS upgrade path
     return withInboxHeader(req, res)
@@ -2271,6 +2648,12 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
     message(ws, raw) {
       try {
         const msg = JSON.parse(String(raw)) as InboundMsg
+
+        // Any frame from a registered session is proof of life (phase 4 §3).
+        // Keyed on the SESSION's agent, never the wire's `from` — same
+        // anti-spoofing rule the send path uses. (`register` has no entry yet;
+        // it sets lastActivityAt on creation below.)
+        touchAgent(ws.data.agent)
 
         switch (msg.type) {
           case 'register': {
@@ -2344,17 +2727,23 @@ Bun.serve<{ agent?: string; role?: AgentRole }>({
 
             ws.data.agent = msg.agent
             ws.data.role = msg.role
-            // Only `in-progress` counts as busy (see TaskStatus doc in board.ts — `waiting` is paused, not active).
-            const hasActiveTask = boardProjection.state.tasks.some(
-              (t) => t.agent === msg.agent && t.status === 'in-progress',
-            )
-            const idle = !hasActiveTask
+            // ATTENTION PHASE 4: register no longer derives `idle` from the
+            // board. A freshly-connected session has no turn in flight — that
+            // is all `idle` means now. Deriving it from task state was the
+            // looks-busy-when-free bug: a sensei holding an in-progress task
+            // registered idle:false and suppressed its OWN nudges from second
+            // one (docs/attention.md §3). Task-state now travels as `openTasks`
+            // on GET /agents, where it can't be mistaken for a session hint.
+            // RegisterData keeps the `idle` field — event shape unchanged.
+            const idle = true
             const sessionId = msg.sessionId
             agents.set(msg.agent, {
               role,
               idle,
               sessionId,
               tags: msg.tags ?? [],
+              // Registering IS traffic — the session's first observed activity.
+              lastActivityAt: Date.now(),
               deliver: wsDeliver(ws),
               close: () => {
                 ws.data.agent = undefined

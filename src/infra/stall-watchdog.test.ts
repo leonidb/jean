@@ -7,6 +7,14 @@ import { connectAgent } from './test-helpers.ts'
 const TEST_PORT = 8800
 const DATA_DIR = '/tmp/jean-test-stall-watchdog'
 const STALL_MS = 500
+/** Blocking re-wake schedule, shrunk so the blocking TICK (min(15s, schedule))
+ *  is observable in-test, but kept several watchdog windows long and NOT a
+ *  multiple of STALL_MS. Both matter for the second test: the watchdog must
+ *  get a real chance to fire first after the sensei reconnects (it would, at
+ *  ~500ms, against the blocking tick's ~3500ms), and aligned periods would
+ *  make the two timers fire in the same event-loop batch — where the blocking
+ *  tick, registered earlier, always wins and masks the bug being tested. */
+const BLOCKING_BACKOFF_MS = 3500
 let server: Subprocess
 
 beforeAll(async () => {
@@ -20,6 +28,7 @@ beforeAll(async () => {
       JEAN_PORT: String(TEST_PORT),
       JEAN_DATA_DIR: DATA_DIR,
       JEAN_STALL_NUDGE_MS: String(STALL_MS),
+      JEAN_BLOCKING_BACKOFF_MS: String(BLOCKING_BACKOFF_MS),
     },
     stdout: 'ignore',
     stderr: 'pipe',
@@ -71,6 +80,12 @@ describe('stall watchdog', () => {
     ).toBe(true)
     expect(sensei.messages.filter(isWatchdogNudge).length).toBe(0)
 
+    // An event arriving now can be carried by NOTHING but the watchdog: the
+    // sensei is stuck non-idle (no nudge) and makes no infra calls (no
+    // piggyback). Its ledger mark is how we tell the backstop's deliveries
+    // apart from the other two paths (attention phase 4).
+    _worker.ws.send(JSON.stringify({ type: 'reply', from: 'w1', text: 'watchdog fodder' }))
+
     // With pending non-empty and idle stuck false, the watchdog must still fire.
     let watchdog: DeliverMsg | undefined
     for (let i = 0; i < 40 && !watchdog; i++) {
@@ -79,6 +94,11 @@ describe('stall watchdog', () => {
     }
     expect(watchdog).toBeDefined()
     expect(watchdog?.text).toContain('idle')
+
+    const pending = (await (await fetch(`${BASE}/events`)).json()) as {
+      events: Array<{ data: { text?: string }; deliveredVia?: string }>
+    }
+    expect(pending.events.find((e) => e.data?.text === 'watchdog fodder')?.deliveredVia).toBe('heartbeat')
 
     // Drain pending; the watchdog must go quiet (clock clears on empty).
     const ack = await fetch(`${BASE}/events/ack`, {
@@ -94,5 +114,58 @@ describe('stall watchdog', () => {
     const countAfterDrain = sensei.messages.filter(isWatchdogNudge).length
     await Bun.sleep(STALL_MS * 3)
     expect(sensei.messages.filter(isWatchdogNudge).length).toBe(countAfterDrain)
+  })
+
+  test('STANDS DOWN while a human is waiting, even before that episode has fired its first wake', async () => {
+    // Review finding [H]. The stand-down used to key on blockingWakeCount > 0,
+    // which stopped covering the UNSTARTED case once failed deliveries stopped
+    // advancing the counter: blocking pending against a dead/absent sensei sits
+    // at count 0 while pendingSince ages past the watchdog window, so a sensei
+    // reconnecting in the gap between the watchdog's check and the blocking
+    // tick got a duplicate push — and the ledger credited 'heartbeat' for an
+    // event the blocking path owned. The guard now keys on pendingness.
+    //
+    // Timing here is the discriminator: the watchdog window (500ms) is a
+    // seventh of the blocking tick (3500ms), so on reconnect the watchdog is
+    // FIRST to the sensei by a wide margin — repeatedly. Against the pre-fix
+    // guard this test sees four watchdog pushes before the blocking path gets
+    // its first word in (verified by reverting the guard).
+    using human = await connectAgent(WS_URL, 'human', 'user')
+    human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'anyone there?' }))
+    await Bun.sleep(STALL_MS * 2) // blocking pending, no sensei to wake → episode stays unstarted, clock ages
+
+    using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
+    await Bun.sleep(STALL_MS * 2) // several watchdog windows elapse post-reconnect
+
+    // The backstop is silent — the blocking path owns delivery here…
+    expect(sensei.messages.filter(isWatchdogNudge).length).toBe(0)
+
+    // …and it delivers: the unstarted episode self-heals on the next blocking
+    // tick, well inside the watchdog's window. No starvation was traded for the
+    // stand-down.
+    let blockingWake: DeliverMsg | undefined
+    for (let i = 0; i < 100 && !blockingWake; i++) {
+      blockingWake = sensei.messages.find(
+        (m): m is DeliverMsg => m.type === 'deliver' && m.text.startsWith('A human is waiting'),
+      )
+      if (!blockingWake) await Bun.sleep(50)
+    }
+    expect(blockingWake).toBeDefined()
+    expect(blockingWake?.text).toContain('anyone there?')
+    expect(sensei.messages.filter(isWatchdogNudge).length).toBe(0) // still silent after it fired
+
+    // The ledger credits the path that actually delivered, not the backstop.
+    const pending = (await (await fetch(`${BASE}/events`)).json()) as {
+      events: Array<{ data: { text?: string }; deliveredVia?: string }>
+    }
+    expect(pending.events.find((e) => e.data?.text === 'anyone there?')?.deliveredVia).toBe('wake')
+
+    // And once the human is handled, the machine-side belt is armed again:
+    // this is the same server that force-nudged in the first test.
+    await fetch(`${BASE}/events/ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ upToId: 999999 }),
+    })
   })
 })
