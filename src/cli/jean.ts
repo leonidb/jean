@@ -139,9 +139,6 @@ async function main() {
     case 'send':
       await cmdSend(args[1], args.slice(2).join(' '))
       break
-    case 'ask':
-      await cmdAsk(args.slice(1))
-      break
     case 'status':
       await cmdStatus()
       break
@@ -540,94 +537,6 @@ function cmdPeerLink(otherPath?: string) {
   console.log(`${GREEN}Peer link established${RESET}`)
   console.log(`  ${myIdentity} ↔ ${otherIdentity}`)
   console.log(`${DIM}Restart both infras to load — and edit descriptions in each peers.json for clarity.${RESET}`)
-}
-
-/**
- * `jean ask <agent> "<question>"` — synchronous ask-and-wait.
- *
- * Registers on the dojo's WS as the `cli` identity with role USER, sends the
- * question, and stays connected until the reply arrives — then prints it and
- * exits. Riding the user role means the whole attention stack works for the
- * CLI: the question is a BLOCKING event (the sensei wakes immediately, mid-turn
- * if needed), and the agent's normal `send(to: "cli")` both delivers here AND
- * auto-clears the question (phase 3) — no ack ceremony on either side.
- *
- * This replaces two uglier channels: fishing replies out of history.jsonl, and
- * the sensei memorize-ing answers "for the cli to find" — which routed
- * engineering correspondence into the memory stream and thus the WIKI
- * (conversation is `send`, knowledge is `memorize`; this keeps them apart).
- *
- * Multi-part replies: agents often answer in several sends — after each
- * delivery we linger a grace window (default 8s, --grace <sec>) for the next
- * part before exiting. --timeout <sec> (default 300) bounds the total wait;
- * on timeout the question REMAINS queued (blocking, backoff re-wakes), so the
- * agent may still answer later — check `jean peek` or ask again.
- */
-async function cmdAsk(args: string[]) {
-  const positional = args.filter((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWith('--'))
-  const target = positional[0]
-  const text = positional.slice(1).join(' ').trim()
-  const timeoutS = Number(flagValue(args, '--timeout') ?? 300)
-  const graceS = Number(flagValue(args, '--grace') ?? 8)
-  if (!target || !text) {
-    console.error('Usage: jean ask <agent> "<question>" [--timeout <sec>] [--grace <sec>]')
-    process.exit(1)
-  }
-
-  const dataDir = resolve(findDojoRoot(), '.jean')
-  const { port } = readRuntimeFiles(dataDir)
-  if (port === null) {
-    console.error('Infrastructure is not running. Use "jean infra start".')
-    process.exit(1)
-  }
-
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
-  let gotReply = false
-  let graceTimer: ReturnType<typeof setTimeout> | undefined
-
-  const finish = (code: number) => {
-    try {
-      ws.close()
-    } catch {}
-    process.exit(code)
-  }
-
-  const overall = setTimeout(() => {
-    if (gotReply) finish(0) // replies arrived; grace logic just hadn't fired
-    console.error(
-      `${DIM}No reply within ${timeoutS}s. The question remains queued (blocking) — "${target}" may still answer; check with: jean peek ${target}${RESET}`,
-    )
-    finish(1)
-  }, timeoutS * 1000)
-  overall.unref?.()
-
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'register', agent: 'cli', role: 'user' }))
-  }
-  ws.onerror = () => {
-    console.error('Could not connect to the dojo WebSocket.')
-    finish(1)
-  }
-  ws.onmessage = (e) => {
-    const msg = JSON.parse(String(e.data)) as { type: string; from?: string; text?: string; message?: string }
-    if (msg.type === 'registered') {
-      ws.send(JSON.stringify({ type: 'reply', from: 'cli', text }))
-      console.log(
-        `${DIM}Asked ${target}; waiting for reply (Ctrl-C to stop waiting — the question stays queued)…${RESET}`,
-      )
-      return
-    }
-    if (msg.type === 'error') {
-      console.error(`Infra rejected the connection: ${msg.message ?? 'unknown error'} (another "jean ask" running?)`)
-      finish(1)
-    }
-    if (msg.type === 'deliver' && msg.text) {
-      gotReply = true
-      console.log(`\n${GREEN}${msg.from ?? target}:${RESET} ${msg.text}`)
-      if (graceTimer) clearTimeout(graceTimer)
-      graceTimer = setTimeout(() => finish(0), graceS * 1000)
-    }
-  }
 }
 
 async function cmdSend(agent?: string, text?: string) {
