@@ -23,24 +23,72 @@ export type EventStore = {
 
 export function createStore(backend: StoreBackend): EventStore {
   let nextId: number | null = null
+  /** In-flight first-call id load, shared so concurrent cold appends init once. */
+  let initializing: Promise<void> | null = null
+  /** Tail of the write chain. Appends queue behind it in id order. */
+  let writes: Promise<unknown> = Promise.resolve()
 
-  async function ensureId(): Promise<number> {
-    if (nextId === null) nextId = await backend.lastId()
-    return nextId
+  async function ensureInitialized(): Promise<void> {
+    if (nextId !== null) return
+    // Two concurrent first appends must not each load and each ASSIGN — the
+    // second assignment would clobber the first's reservation and hand both
+    // callers the same id. One load, shared.
+    initializing ??= backend.lastId().then((last) => {
+      nextId = last
+    })
+    await initializing
   }
 
   return {
+    /**
+     * Append one event: reserve an id, then write.
+     *
+     * Both halves are concurrency-critical, and both were broken (task 011,
+     * found during task-001 rate verification, 2026-07-25):
+     *
+     * RESERVATION had to become atomic. The old code did `const id = (await
+     * ensureId()) + 1`, where ensureId RETURNED the counter — so every caller
+     * that entered before the first one resumed captured the same value and
+     * computed the same id. Measured at the store's own API: 50 appends
+     * started in one tick returned ONE distinct id, 49 collisions. Reading and
+     * incrementing with no await between them is what makes it safe; the
+     * server's current call paths happened not to trigger it (frames land in
+     * separate macrotasks), but `void record(...)` makes it one careless line
+     * away.
+     *
+     * WRITES had to become ordered. `appendFile` uses O_APPEND, which makes
+     * each line atomic but says nothing about ORDER between concurrent
+     * writers, so a higher id could land first. Measured on a live server: 240
+     * concurrent sends produced 30 out-of-order pairs; a WS burst produced 27.
+     * That is not cosmetic — `jsonlBackend.lastId()` used to read the file's
+     * LAST LINE, so a log whose tail wasn't its max id made the next restart
+     * REISSUE a live id into history.jsonl, the one file this system never
+     * rewrites. (Every production dojo's log carries inversions today; they are
+     * benign only because none happens to sit at the tail. See lastId below,
+     * which no longer trusts position, and scripts/audit-history.ts.)
+     *
+     * Cost: none worth measuring. The writes were already serialized by the
+     * kernel; this just makes the order deterministic and the reservation
+     * honest.
+     */
     async append(event) {
-      const id = (await ensureId()) + 1
-      nextId = id // increment before async write to prevent concurrent duplicates
+      await ensureInitialized()
+      // Atomic reservation: no await between the read and the increment.
+      nextId = (nextId as number) + 1
       const stored: StoredEvent = {
-        id,
+        id: nextId,
         stream: event.stream,
         type: event.type,
         ts: new Date().toISOString(),
         data: event.data,
       }
-      await backend.append(stored)
+      // Queue behind whatever is already writing, so ids reach the log in the
+      // order they were issued. The chain swallows failures (`catch`) so one
+      // bad write can't wedge every later append; the caller still sees its own
+      // rejection by awaiting `write` directly.
+      const write = writes.then(() => backend.append(stored))
+      writes = write.catch(() => {})
+      await write
       return stored
     },
 
@@ -56,7 +104,10 @@ export function createStore(backend: StoreBackend): EventStore {
       return events
     },
 
-    lastId: () => ensureId(),
+    async lastId() {
+      await ensureInitialized()
+      return nextId as number
+    },
   }
 }
 
@@ -96,19 +147,38 @@ export function jsonlBackend(path: string): StoreBackend {
         .map((line) => JSON.parse(line) as StoredEvent)
     },
 
+    /**
+     * Highest id in the log — by VALUE, not by position.
+     *
+     * This used to read the last line and trust it. That is only correct if
+     * the log is ordered, which the append race broke (task 011): a log whose
+     * tail isn't its max id made a restart under-read and REISSUE a live id.
+     * Reproduced deterministically on a log of ids 1,3,2 — the next append got
+     * id 3, colliding with an existing event.
+     *
+     * Serialized writes stop new logs from going out of order, but every log
+     * written before the fix still can be, and this file is append-only — so
+     * recovery has to be read-side. Scanning is affordable: readAll() already
+     * parses the whole file, and this runs once per process at startup.
+     * Unparseable lines are skipped rather than fatal, matching readAll's
+     * tolerance — a truncated tail from a hard kill must not reset the counter
+     * to 0 and start overwriting the log's own history.
+     */
     async lastId() {
       const file = Bun.file(path)
       if (!(await file.exists())) return 0
       const text = await file.text()
-      const lines = text.trimEnd().split('\n')
-      const lastLine = lines.at(-1)
-      if (!lastLine) return 0
-      try {
-        const last = JSON.parse(lastLine) as StoredEvent
-        return last.id
-      } catch {
-        return 0
+      let max = 0
+      for (const line of text.trimEnd().split('\n')) {
+        if (line.length === 0) continue
+        try {
+          const { id } = JSON.parse(line) as StoredEvent
+          if (typeof id === 'number' && id > max) max = id
+        } catch {
+          // skip malformed line
+        }
       }
+      return max
     },
   }
 }
