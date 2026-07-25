@@ -14,6 +14,16 @@ import type { Subprocess } from 'bun'
 import type { DeliverMsg, OutboundMsg } from './protocol.ts'
 import { connectAgent } from './test-helpers.ts'
 
+// Timing-dominated tests: their runtime floor is a deliberate OBSERVATION
+// WINDOW (the assertion is "nothing happened for N seconds"), so bun's 5000ms
+// default is a ceiling they sit under rather than a budget they aim at, and
+// ambient machine load pushes them through it. An explicit timeout costs
+// nothing when the test passes — it is a ceiling, not a sleep — so these are
+// given real headroom. The windows themselves must NOT be shrunk: they are
+// what is being asserted. (task 001, 2026-07-25: connectAgent's greeting-wait
+// added ~500ms to every sensei connect and tipped the slowest one over.)
+const SLOW_TEST_MS = 15_000
+
 const TEST_PORT = 8823
 const DATA_DIR = '/tmp/jean-test-attention-nudge-backoff'
 const BACKOFF_MS = 900 // env-shrunk so an elapsed window is observable in-test
@@ -142,40 +152,44 @@ describe('attention phase 4 — machine-nudge episode backoff', () => {
     expect(sensei.messages.filter(isNudge).at(-1)?.text).toContain('"worker:reply": 2')
   })
 
-  test('BACKOFF ELAPSED: the same held queue earns one reminder per window, and a drain resets the episode', async () => {
-    using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
-    using worker = await connectAgent(WS_URL, 'w3', 'worker')
-    await Bun.sleep(150) // let the register events land before draining
-    await ackAll()
-    await postIdle('sensei')
-    await Bun.sleep(150)
-    const before = nudgeCount(sensei.messages)
+  test(
+    'BACKOFF ELAPSED: the same held queue earns one reminder per window, and a drain resets the episode',
+    async () => {
+      using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
+      using worker = await connectAgent(WS_URL, 'w3', 'worker')
+      await Bun.sleep(150) // let the register events land before draining
+      await ackAll()
+      await postIdle('sensei')
+      await Bun.sleep(150)
+      const before = nudgeCount(sensei.messages)
 
-    worker.ws.send(JSON.stringify({ type: 'reply', from: 'w3', text: 'held across a window' }))
-    await Bun.sleep(200)
-    expect(nudgeCount(sensei.messages)).toBe(before + 1)
+      worker.ws.send(JSON.stringify({ type: 'reply', from: 'w3', text: 'held across a window' }))
+      await Bun.sleep(200)
+      expect(nudgeCount(sensei.messages)).toBe(before + 1)
 
-    await postIdle('sensei') // inside the window — silent
-    await Bun.sleep(100)
-    expect(nudgeCount(sensei.messages)).toBe(before + 1)
+      await postIdle('sensei') // inside the window — silent
+      await Bun.sleep(100)
+      expect(nudgeCount(sensei.messages)).toBe(before + 1)
 
-    await Bun.sleep(BACKOFF_MS + 200) // window elapses…
-    await postIdle('sensei') // …so this turn-end earns the reminder
-    await Bun.sleep(150)
-    expect(nudgeCount(sensei.messages)).toBe(before + 2)
+      await Bun.sleep(BACKOFF_MS + 200) // window elapses…
+      await postIdle('sensei') // …so this turn-end earns the reminder
+      await Bun.sleep(150)
+      expect(nudgeCount(sensei.messages)).toBe(before + 2)
 
-    // Drain: the episode ends, so the NEXT arrival nudges immediately rather
-    // than inheriting the escalated backoff.
-    await ackAll()
-    await postIdle('sensei')
-    await Bun.sleep(150)
-    const afterDrain = nudgeCount(sensei.messages)
+      // Drain: the episode ends, so the NEXT arrival nudges immediately rather
+      // than inheriting the escalated backoff.
+      await ackAll()
+      await postIdle('sensei')
+      await Bun.sleep(150)
+      const afterDrain = nudgeCount(sensei.messages)
 
-    worker.ws.send(JSON.stringify({ type: 'reply', from: 'w3', text: 'fresh episode' }))
-    await Bun.sleep(250)
-    expect(nudgeCount(sensei.messages)).toBe(afterDrain + 1)
-    await ackAll()
-  })
+      worker.ws.send(JSON.stringify({ type: 'reply', from: 'w3', text: 'fresh episode' }))
+      await Bun.sleep(250)
+      expect(nudgeCount(sensei.messages)).toBe(afterDrain + 1)
+      await ackAll()
+    },
+    SLOW_TEST_MS,
+  )
 
   test('FAILED DELIVERY DOES NOT CONSUME THE EPISODE: an undelivered nudge leaves the queue re-announceable at the next turn-end', async () => {
     // Review finding [A]. Reaching a live registry entry whose transport is

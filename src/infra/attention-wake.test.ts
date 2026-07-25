@@ -9,6 +9,16 @@ import type { Subprocess } from 'bun'
 import type { DeliverMsg, OutboundMsg } from './protocol.ts'
 import { connectAgent } from './test-helpers.ts'
 
+// Timing-dominated tests: their runtime floor is a deliberate OBSERVATION
+// WINDOW (the assertion is "nothing happened for N seconds"), so bun's 5000ms
+// default is a ceiling they sit under rather than a budget they aim at, and
+// ambient machine load pushes them through it. An explicit timeout costs
+// nothing when the test passes — it is a ceiling, not a sleep — so these are
+// given real headroom. The windows themselves must NOT be shrunk: they are
+// what is being asserted. (task 001, 2026-07-25: connectAgent's greeting-wait
+// added ~500ms to every sensei connect and tipped the slowest one over.)
+const SLOW_TEST_MS = 15_000
+
 const TEST_PORT = 8807
 const DATA_DIR = '/tmp/jean-test-attention-wake'
 const BACKOFF_MS = 700 // env-shrunk so re-wakes are observable in-test
@@ -100,46 +110,50 @@ describe('attention phase 2 — blocking wake', () => {
     await ackAll() // clean slate for the next test
   })
 
-  test('burst coalescing: messages during an active episode do not multiply wakes; backoff re-wakes while unhandled; ack ends the episode', async () => {
-    using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
-    using human = await connectAgent(WS_URL, 'human', 'user')
+  test(
+    'burst coalescing: messages during an active episode do not multiply wakes; backoff re-wakes while unhandled; ack ends the episode',
+    async () => {
+      using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
+      using human = await connectAgent(WS_URL, 'human', 'user')
 
-    // Burst of three messages in quick succession → exactly ONE immediate wake.
-    human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'q1' }))
-    await Bun.sleep(80)
-    human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'q2' }))
-    human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'q3' }))
-    await Bun.sleep(250)
-    expect(sensei.messages.filter(isBlockingWake).length).toBe(1)
+      // Burst of three messages in quick succession → exactly ONE immediate wake.
+      human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'q1' }))
+      await Bun.sleep(80)
+      human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'q2' }))
+      human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'q3' }))
+      await Bun.sleep(250)
+      expect(sensei.messages.filter(isBlockingWake).length).toBe(1)
 
-    // Unhandled → the backoff loop re-wakes (env-shrunk schedule).
-    let rewakes = 0
-    for (let i = 0; i < 40; i++) {
-      rewakes = sensei.messages.filter(isBlockingWake).length
-      if (rewakes >= 2) break
-      await Bun.sleep(100)
-    }
-    expect(rewakes).toBeGreaterThanOrEqual(2)
-    // The re-wake carries the coalesced entry: count 3, oldest age, latest preview.
-    const last = sensei.messages.filter(isBlockingWake).at(-1)
-    expect(last?.text).toContain('"count": 3')
-    expect(last?.text).toContain('q3')
+      // Unhandled → the backoff loop re-wakes (env-shrunk schedule).
+      let rewakes = 0
+      for (let i = 0; i < 40; i++) {
+        rewakes = sensei.messages.filter(isBlockingWake).length
+        if (rewakes >= 2) break
+        await Bun.sleep(100)
+      }
+      expect(rewakes).toBeGreaterThanOrEqual(2)
+      // The re-wake carries the coalesced entry: count 3, oldest age, latest preview.
+      const last = sensei.messages.filter(isBlockingWake).at(-1)
+      expect(last?.text).toContain('"count": 3')
+      expect(last?.text).toContain('q3')
 
-    // Ack drains the episode → no further blocking wakes.
-    await ackAll()
-    await Bun.sleep(BACKOFF_MS + 400)
-    const afterAck = sensei.messages.filter(isBlockingWake).length
-    await Bun.sleep(BACKOFF_MS + 200)
-    expect(sensei.messages.filter(isBlockingWake).length).toBe(afterAck)
+      // Ack drains the episode → no further blocking wakes.
+      await ackAll()
+      await Bun.sleep(BACKOFF_MS + 400)
+      const afterAck = sensei.messages.filter(isBlockingWake).length
+      await Bun.sleep(BACKOFF_MS + 200)
+      expect(sensei.messages.filter(isBlockingWake).length).toBe(afterAck)
 
-    // A NEW human message after the drain starts a fresh episode: immediate wake.
-    human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'new question' }))
-    let fresh = afterAck
-    for (let i = 0; i < 20 && fresh === afterAck; i++) {
-      fresh = sensei.messages.filter(isBlockingWake).length
-      if (fresh === afterAck) await Bun.sleep(50)
-    }
-    expect(fresh).toBe(afterAck + 1)
-    await ackAll()
-  })
+      // A NEW human message after the drain starts a fresh episode: immediate wake.
+      human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'new question' }))
+      let fresh = afterAck
+      for (let i = 0; i < 20 && fresh === afterAck; i++) {
+        fresh = sensei.messages.filter(isBlockingWake).length
+        if (fresh === afterAck) await Bun.sleep(50)
+      }
+      expect(fresh).toBe(afterAck + 1)
+      await ackAll()
+    },
+    SLOW_TEST_MS,
+  )
 })

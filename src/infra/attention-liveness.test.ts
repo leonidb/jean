@@ -10,6 +10,16 @@ import { resolve } from 'node:path'
 import type { Subprocess } from 'bun'
 import { connectAgent } from './test-helpers.ts'
 
+// Timing-dominated tests: their runtime floor is a deliberate OBSERVATION
+// WINDOW (the assertion is "nothing happened for N seconds"), so bun's 5000ms
+// default is a ceiling they sit under rather than a budget they aim at, and
+// ambient machine load pushes them through it. An explicit timeout costs
+// nothing when the test passes — it is a ceiling, not a sleep — so these are
+// given real headroom. The windows themselves must NOT be shrunk: they are
+// what is being asserted. (task 001, 2026-07-25: connectAgent's greeting-wait
+// added ~500ms to every sensei connect and tipped the slowest one over.)
+const SLOW_TEST_MS = 15_000
+
 const TEST_PORT = 8822
 const DATA_DIR = '/tmp/jean-test-attention-liveness'
 const QUIET_MS = 700 // env-shrunk worker quiet threshold (default 45 min)
@@ -168,34 +178,38 @@ describe('attention phase 4 — GET /agents field split', () => {
 })
 
 describe('attention phase 4 — traffic-observed liveness', () => {
-  test('a silent session goes quiet past its role threshold and returns to active on ANY inbound traffic', async () => {
-    using worker = await connectAgent(WS_URL, 'quiet-worker', 'worker')
-    expect((await agentRow('quiet-worker'))?.session).toBe('active')
+  test(
+    'a silent session goes quiet past its role threshold and returns to active on ANY inbound traffic',
+    async () => {
+      using worker = await connectAgent(WS_URL, 'quiet-worker', 'worker')
+      expect((await agentRow('quiet-worker'))?.session).toBe('active')
 
-    await Bun.sleep(QUIET_MS + 250) // silence past the (shrunk) worker threshold
-    expect((await agentRow('quiet-worker'))?.session).toBe('quiet')
+      await Bun.sleep(QUIET_MS + 250) // silence past the (shrunk) worker threshold
+      expect((await agentRow('quiet-worker'))?.session).toBe('quiet')
 
-    // A WS frame is traffic.
-    worker.ws.send(JSON.stringify({ type: 'reply', from: 'quiet-worker', text: 'still here' }))
-    await Bun.sleep(100)
-    expect((await agentRow('quiet-worker'))?.session).toBe('active')
+      // A WS frame is traffic.
+      worker.ws.send(JSON.stringify({ type: 'reply', from: 'quiet-worker', text: 'still here' }))
+      await Bun.sleep(100)
+      expect((await agentRow('quiet-worker'))?.session).toBe('active')
 
-    await Bun.sleep(QUIET_MS + 250)
-    expect((await agentRow('quiet-worker'))?.session).toBe('quiet')
+      await Bun.sleep(QUIET_MS + 250)
+      expect((await agentRow('quiet-worker'))?.session).toBe('quiet')
 
-    // So is an HTTP call carrying x-jean-agent (a worker's `infra` tool read).
-    await fetch(`${BASE}/board`, { headers: { 'x-jean-agent': 'quiet-worker' } })
-    expect((await agentRow('quiet-worker'))?.session).toBe('active')
+      // So is an HTTP call carrying x-jean-agent (a worker's `infra` tool read).
+      await fetch(`${BASE}/board`, { headers: { 'x-jean-agent': 'quiet-worker' } })
+      expect((await agentRow('quiet-worker'))?.session).toBe('active')
 
-    await Bun.sleep(QUIET_MS + 250)
-    // …and so is the Stop hook, which now merely SHARPENS liveness.
-    await fetch(`${BASE}/agent-idle`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agent: 'quiet-worker' }),
-    })
-    expect((await agentRow('quiet-worker'))?.session).toBe('active')
-  })
+      await Bun.sleep(QUIET_MS + 250)
+      // …and so is the Stop hook, which now merely SHARPENS liveness.
+      await fetch(`${BASE}/agent-idle`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agent: 'quiet-worker' }),
+      })
+      expect((await agentRow('quiet-worker'))?.session).toBe('active')
+    },
+    SLOW_TEST_MS,
+  )
 
   test('FORGED x-jean-agent moves the hint and gates nothing (accepted risk, pinned)', async () => {
     // Review finding [E], ACCEPTED. The header is self-declared, so any local

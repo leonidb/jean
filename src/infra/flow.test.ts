@@ -37,6 +37,26 @@ afterAll(() => {
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 
+/** Wait until the event log stops growing, and return its length. The server
+ *  records some events asynchronously (notably `disconnect`, whenever it
+ *  processes a socket a previous test dropped), so any assertion that compares
+ *  two reads of history needs a quiesced log to compare against — otherwise the
+ *  suite's pacing, not the endpoint's behavior, decides the result. Throws
+ *  rather than proceeding if it never settles: a log that won't stop growing is
+ *  itself the finding. */
+async function historySettled(settleMs = 150, timeoutMs = 4000): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  let previous = -1
+  for (;;) {
+    const res = await fetch(`${BASE}/history`)
+    const { events } = (await res.json()) as { events: unknown[] }
+    if (events.length === previous) return events.length
+    previous = events.length
+    if (Date.now() > deadline) throw new Error(`history never settled (${events.length} events and counting)`)
+    await Bun.sleep(settleMs)
+  }
+}
+
 function waitForMessage<T extends OutboundMsg>(
   messages: OutboundMsg[],
   predicate: (m: OutboundMsg) => m is T,
@@ -337,6 +357,21 @@ describe('history', () => {
   })
 
   test('GET /history?last=N returns only last N events', async () => {
+    // Observed failing once in three full-suite runs (2026-07-25) and never in
+    // isolation. This compares two SEPARATE reads of a log that grows on its
+    // own — an earlier test's `using` disposal records its `disconnect` whenever
+    // the server gets round to it — and an event landing between the reads
+    // shifts the tail, failing the assertion on a perfectly correct endpoint.
+    //
+    // HONEST SCOPE: settling exhausts the known writer (the in-flight
+    // disconnects) before the comparison starts; nothing in this file records
+    // anything afterwards. It does NOT make a two-read comparison atomic — that
+    // would need the assertion rewritten around a contiguous-window contract,
+    // which is more machinery than an unproven residual risk deserves. Unlike
+    // the two races fixed alongside it, this mechanism is inferred from the
+    // failure shape, not reproduced on demand.
+    await historySettled()
+
     const allRes = await fetch(`${BASE}/history`)
     const allData = (await allRes.json()) as { events: Array<{ id: number }> }
     const total = allData.events.length
@@ -423,10 +458,13 @@ describe('WS send message', () => {
     })
     const task = (await createRes.json()) as { id: string }
 
-    // Connect as sensei; note baseline message count after register
+    // Connect as sensei; note baseline message count after register.
+    // (The 'You just connected' greeting is already consumed by connectAgent —
+    // it waits for that message rather than a guessed sleep. This used to sleep
+    // 150ms and claim to consume it, which it did not: the greeting lands at
+    // +500ms. Harmless here only because the assertion below matches on
+    // 'Events pending'.)
     using agent = await connectAgent(WS_URL, 'comment-origin-sensei', 'sensei')
-    // Consume the 'You just connected' message so our baseline is stable
-    await Bun.sleep(150)
     const baseline = agent.messages.length
 
     agent.ws.send(

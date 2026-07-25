@@ -205,6 +205,35 @@ async function clearPendingEvents() {
   }
 }
 
+/**
+ * Drain, then CONFIRM the queue stayed empty — a plain drain doesn't establish
+ * an empty queue.
+ *
+ * A previous test's `using` disposal closes its sockets, and the server records
+ * the resulting `disconnect` events asynchronously: they can land in pending
+ * AFTER a drain that ran before they arrived. The next test then nudges for
+ * somebody else's leftover and reads it as its own unexpected deliver — a race
+ * whose outcome is decided purely by suite pacing (it passed on one machine and
+ * failed 3/3 on another, costing a merge cycle: task 001, 2026-07-25).
+ *
+ * Retrying until a settle window passes with nothing new makes the precondition
+ * real. If it never settles we throw, so the failure names the actual problem
+ * instead of surfacing as a mysterious extra nudge three assertions later.
+ */
+async function drainUntilQuiet(settleMs = 250, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    await clearPendingEvents()
+    await Bun.sleep(settleMs)
+    const res = await fetch(`${BASE}/events`)
+    const { events } = (await res.json()) as { events: Array<{ id: number; type: string }> }
+    if (events.length === 0) return
+    if (Date.now() > deadline) {
+      throw new Error(`pending never settled: ${events.map((e) => `${e.id}:${e.type}`).join(', ')}`)
+    }
+  }
+}
+
 describe('sensei nudge', () => {
   test('sensei receives nudge when idle + events pending', async () => {
     using sensei = await connectAgent(WS_URL, 'nudge-sensei', 'sensei')
@@ -244,7 +273,11 @@ describe('sensei nudge', () => {
   })
 
   test('sensei going idle does not create actionable event', async () => {
-    await clearPendingEvents()
+    // The claim is "the sensei's OWN idle post enqueues nothing and wakes
+    // nobody", so an empty queue is the precondition, not an assumption: any
+    // leftover event would legitimately nudge on the idle post below and be
+    // indistinguishable from the bug this test exists to catch.
+    await drainUntilQuiet()
 
     using sensei = await connectAgent(WS_URL, 'self-loop-sensei', 'sensei')
 
@@ -264,7 +297,7 @@ describe('sensei nudge', () => {
     // No new nudges after connect (only the connect nudge in baseline)
     const postConnect = sensei.messages.slice(sensei.baselineCount)
     const nudges = postConnect.filter((m) => m.type === 'deliver' && m.from === 'infra')
-    expect(nudges.length).toBe(0)
+    expect(nudges.map((m) => (m as { text: string }).text)).toEqual([])
 
     // But the event IS in history (informational)
     const histRes = await fetch(`${BASE}/history`)

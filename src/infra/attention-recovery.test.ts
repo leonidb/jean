@@ -10,6 +10,16 @@ import type { Subprocess } from 'bun'
 import type { DeliverMsg, OutboundMsg } from './protocol.ts'
 import { connectAgent } from './test-helpers.ts'
 
+// Timing-dominated tests: their runtime floor is a deliberate OBSERVATION
+// WINDOW (the assertion is "nothing happened for N seconds"), so bun's 5000ms
+// default is a ceiling they sit under rather than a budget they aim at, and
+// ambient machine load pushes them through it. An explicit timeout costs
+// nothing when the test passes — it is a ceiling, not a sleep — so these are
+// given real headroom. The windows themselves must NOT be shrunk: they are
+// what is being asserted. (task 001, 2026-07-25: connectAgent's greeting-wait
+// added ~500ms to every sensei connect and tipped the slowest one over.)
+const SLOW_TEST_MS = 15_000
+
 const TEST_PORT = 8806
 const DATA_DIR = '/tmp/jean-test-attention-recovery'
 const BACKOFF_MS = 500
@@ -127,19 +137,23 @@ describe('attention phase 2 — self-healing recovery', () => {
     expect(after).toBe(before + 1)
   })
 
-  test('WATCHDOG STANDDOWN: no Watchdog fire while a blocking episode is active', async () => {
-    // Watchdog window shrunk BELOW the blocking backoff — without the
-    // standdown it would double-fire alongside the episode's re-wakes.
-    stopServer()
-    await startServer({ JEAN_STALL_NUDGE_MS: '900', JEAN_BLOCKING_BACKOFF_MS: '1500' })
-    using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
-    using human = await connectAgent(WS_URL, 'human', 'user')
-    human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'urgent!' }))
-    await waitForBlockingWake(sensei)
+  test(
+    'WATCHDOG STANDDOWN: no Watchdog fire while a blocking episode is active',
+    async () => {
+      // Watchdog window shrunk BELOW the blocking backoff — without the
+      // standdown it would double-fire alongside the episode's re-wakes.
+      stopServer()
+      await startServer({ JEAN_STALL_NUDGE_MS: '900', JEAN_BLOCKING_BACKOFF_MS: '1500' })
+      using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
+      using human = await connectAgent(WS_URL, 'human', 'user')
+      human.ws.send(JSON.stringify({ type: 'reply', from: 'human', text: 'urgent!' }))
+      await waitForBlockingWake(sensei)
 
-    await Bun.sleep(3_800) // several watchdog windows + ≥1 full backoff period elapse
-    const watchdogs = sensei.messages.filter((m) => m.type === 'deliver' && m.text.startsWith('Watchdog:')).length
-    expect(watchdogs).toBe(0) // backoff re-wakes own delivery during the episode
-    expect(sensei.messages.filter(isBlockingWake).length).toBeGreaterThanOrEqual(2) // and they DID re-wake
-  })
+      await Bun.sleep(3_800) // several watchdog windows + ≥1 full backoff period elapse
+      const watchdogs = sensei.messages.filter((m) => m.type === 'deliver' && m.text.startsWith('Watchdog:')).length
+      expect(watchdogs).toBe(0) // backoff re-wakes own delivery during the episode
+      expect(sensei.messages.filter(isBlockingWake).length).toBeGreaterThanOrEqual(2) // and they DID re-wake
+    },
+    SLOW_TEST_MS,
+  )
 })
