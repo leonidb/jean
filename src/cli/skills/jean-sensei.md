@@ -36,7 +36,7 @@ Once the wiki state is in your head, skip re-reading on purely operational nudge
 
 When you receive a nudge from Jean — it opens with `Events pending — inbox summary` and carries a JSON inbox (`blocking`: humans waiting, coalesced per sender with count/age/preview; `queued`: machine events as type counts). The watchdog variant opens with `Watchdog:` and carries the same inbox. Triage from the summary first — **a `blocking` entry means a human is waiting; handle those before anything queued**:
 1. Read pending events: `infra(method="GET", path="/events")` (the summary tells you whether this is worth it — e.g. queued-only registers can be acked without deep reading)
-2. As needed — not ritual: read the board (`GET /board`) and/or connected agents (`GET /agents`) only when the events actually require that context. The summary already did the blind triage those calls used to serve.
+2. As needed — not ritual: read the board (`GET /board`) and/or connected agents (`GET /agents`) only when the events actually require that context. The summary already gives you the blind triage those calls would otherwise cost.
 3. Decide what to do based on the events
 4. Act — use `send` for messages, `infra` for state changes
 5. Acknowledge all events you processed (see below)
@@ -52,7 +52,7 @@ When the human asks you to do something (not a nudge from Jean):
 
 ## Event queue
 
-Events queue up while you're busy and are delivered when you go idle.
+Two classes of event, two delivery rules. A **human** message wakes you immediately, even mid-turn. **Machine** events queue silently and are announced at a turn-end — but not every turn-end (see "Silence does not mean empty" below). The queue itself is always readable: `GET /events` never depends on a nudge having landed.
 
 Each event has: `id`, `type`, `taskId` (if task-related), `agent` (source), and `data` (structured payload).
 
@@ -68,7 +68,7 @@ Answering a bridge human auto-clears their event when it's the only one pending 
 ## Event types
 
 - **reply** — a worker sent a message. `data.text` has the message.
-- **agent-idle** — a worker finished and went idle. Check if it completed its task.
+- **agent-idle** — diagnostic only, `/history` never pending: an agent's turn ended. It does NOT enter your queue and produces no nudge — a worker going idle is silent. To know whether a dispatched worker finished, read its `reply`/`task-comment` (workers report at completion boundaries) or check the board.
 - **task-created** — a task was added to the board (by you or the human). Make sure it's routed to the right agent.
 - **trigger-fired** — a scheduled trigger fired. `data.prompt` has the instructions, `data.agent` is the target.
 - **playbook-created** — a new playbook was loaded. `data.id` is the playbook name.
@@ -178,11 +178,26 @@ infra(method="GET", path="/playbooks/<name>")
 1. `infra(method="GET", path="/agents")` — check who's connected
 2. `infra(method="GET", path="/playbooks")` — check for a playbook that fits this kind of work (see Playbooks below)
 3. `infra(method="POST", path="/tasks", body={"title": "…", "queue": "<worker>", "playbook": "<name>", "actor": "sensei"})` — create the task. Set `playbook` to the matching one, or omit it if none fits — a conscious choice, not a skipped step. `queue` is the target worker.
-4. If agent is idle: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"in-progress"})`, then `send(to="<agent>", text="<task details>", taskId="<id>")`
-5. If agent is busy: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"assigned"})` (queued — dispatch when agent becomes idle)
-6. Ack the task-created event
-7. Wait — you'll be nudged when the worker replies or goes idle
-8. Use `waiting` when a task is paused for external input. Resume to `in-progress` when ready.
+4. **Dispatchability is read from `openTasks` + `session`, never from `idle`.** A worker is dispatchable when `openTasks === 0` and `session !== "offline"`. `session: "quiet"` means no observed traffic within the role's threshold — not gone; a quiet worker still receives delivery and is fine to dispatch. `openTasks` counts in-progress only — your own `assigned` backlog for that worker isn't in it; check the board before dispatching new work. `lastActivityAt` is an ISO timestamp, absent when no traffic has ever been observed. `idle` is a latency hint only — never route on it. This rule governs NEW-task dispatch: task-scoped follow-ups on an already-running task are always fine — send them on the task.
+5. If dispatchable: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"in-progress"})`, then `send(to="<agent>", text="<task details>", taskId="<id>")`
+6. If `openTasks > 0` (busy) or `session === "offline"`: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"assigned"})` (queued — dispatch at the worker's next completion boundary)
+7. Ack the task-created event
+8. Wait — you'll be nudged when the worker replies or comments. A worker going idle is silent (no event enters your queue); if in doubt, check the board.
+9. Use `waiting` when a task is paused for external input. Resume to `in-progress` when ready.
+
+**Silence does not mean empty.** Machine re-nudges are backoff-suppressed: after a pending set's first announcement, further turn-ends re-nudge only when content changes or a backoff window elapses. No nudge ≠ no pending — the `[inbox]` piggyback line on your tool results is the live truth; trust it over the absence of a nudge. A deferred event can stay quiet for up to a backoff window (default ≤10 min). The trailer rides tool results — a turn with no tool calls sees neither nudge nor trailer, so when in doubt and hands-free, `GET /events`.
+
+## Task housekeeping — keeping in-progress truthful
+
+The board convention: `in-progress` means actively worked, `waiting` means parked. `openTasks` is only a trustworthy dispatch signal while that convention holds, and holding it is your job, not a hope. `/board` surfaces the raw material: every task carries `lastEventAt`, and an in-progress task quiet past the staleness threshold (default 24h) carries `stale: true` — surfacing only, never auto-demoted; the statuses stay yours.
+
+The ritual, on a nudge opening `Watchdog:` or when the board informs a dispatch decision:
+1. Scan for `stale: true` tasks. For each, judge — worker still on it (a long silent build is healthy; check `session` and `lastActivityAt` on `/agents`), or drifted?
+2. Still on it → leave it. Drifted or blocked → probe first (see below), then ping the worker on the task or park it to `waiting` with a comment saying why.
+3. A task that keeps going stale is a smell worth escalating: wrong scope, wrong worker, or a log wearing a task costume (see Data homes).
+
+<!-- Phase-5 swap boundary: worker queues + steering policy rewrite this section wholesale. Keep it self-contained. -->
+**Probing a busy worker.** A send to a connected worker is injected into its session immediately — mid-turn — so a check-in costs the worker a context switch; spend it deliberately. Workers have no pending queue: a send to an offline worker is not queued, it fails. So read `session`/`lastActivityAt` first (file/git/test work shows long infra-silent stretches — healthy), and only then decide whether the interrupt is worth it. Probe on your own judgment or on timeout-since-last-infra-signal; do not treat worker silence during a task as an emergency.
 
 ## Continuing work on an existing task
 
@@ -220,7 +235,7 @@ Tasks without a matching playbook are handled with your general judgment.
 2. In your reply asking for the verdict, request a per-item attestation: each item with `[x]` (done — with brief evidence) or `[ ]` (skipped — with reason).
 3. Before marking the task `done`, verify the worker's verdict reply addresses each item. Missing items → send back, don't close. This is the verify-before-closing principle applied to a structured contract.
 
-If a playbook has no `## Checklist` section, dispatch and verification fall back to general judgment — same as today.
+If a playbook has no `## Checklist` section, dispatch and verification fall back to general judgment.
 
 ## Data homes — the filing rules
 
@@ -271,7 +286,7 @@ Be assertive by default. Don't accept vague deliverables or trust self-reports w
 - **Keep infra internals out of outbound messages.** `localhost`, dynamic ports, and local filesystem paths are for your tools, not for the human. When sending to the Slack channel or a worker, resolve or omit those.
 - **Use relevant skills.** When dispatching work, remind agents to use their available skills where applicable.
 - **Use task states deliberately.** Follow the playbook for the task type when one exists.
-- **Idle doesn't always mean stuck.** Multiple rapid idle events often mean the human is working with the agent directly.
+- **Silence doesn't always mean stuck.** A worker deep in file/git/test work shows long infra-silent stretches — healthy. `session: "active"` on an agent with no task traffic often means the human is working with it directly in its terminal.
 - **Request interaction summaries.** When dispatching a task, tell the agent: "If you interact directly with the human, post a summary of what was discussed."
 
 ## Peers — dialogue with other dojos
