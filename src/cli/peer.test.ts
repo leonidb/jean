@@ -23,10 +23,25 @@ function runJean(cwd: string, ...args: string[]) {
 
 describe('jean peer', () => {
   let tmp: string
+  let prevReg: string | undefined
   beforeEach(() => {
     tmp = mkdtempSync(resolve(tmpdir(), 'jean-peer-test-'))
+    // Point the machine-global registry at a throwaway file so `dojo init`'s port
+    // allocation never touches the real ~/.jean/dojos.json (same pattern as
+    // dojo-init.test.ts; `runJean` already forwards process.env to the child).
+    //
+    // Without this, these tests claim ports 8800-8818 in the USER's registry, and
+    // any infra test whose server registers the same path (`/private/tmp`) makes
+    // `dojo init --port <n>` fail with "already registered to …" — the cause of
+    // the ~3001ms connect-timeout flake class seen across unrelated files on
+    // 2026-07-25 (10 failures in one full-suite run, 3 in the next). It also
+    // leaked real entries into the user's machine state.
+    prevReg = process.env.JEAN_REGISTRY_PATH
+    process.env.JEAN_REGISTRY_PATH = resolve(tmp, 'dojos.json')
   })
   afterEach(() => {
+    if (prevReg === undefined) delete process.env.JEAN_REGISTRY_PATH
+    else process.env.JEAN_REGISTRY_PATH = prevReg
     rmSync(tmp, { recursive: true, force: true })
   })
 
