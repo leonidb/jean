@@ -306,6 +306,69 @@ describe('createStore — concurrent appends (task 011)', () => {
     expect(after.id).toBe(3) // the failed append still consumed its id — gaps beat reuse
     expect((await store.read()).map((e) => e.type)).toEqual(['ok', 'after'])
   })
+
+  test('a FAILED id load does not poison the store — the next append retries', async () => {
+    // Review finding (2026-07-27), found independently by two readers. The
+    // shared init promise is assigned with `??=` and was never cleared on
+    // rejection, so one failed `lastId()` — a transient FS error, an EMFILE
+    // under load — handed that same rejected promise to every later append for
+    // the rest of the process's life. The pre-fix code retried on the next call
+    // because it kept no promise; this asserts that behaviour is back.
+    let failNextLoad = true
+    const events: StoredEvent[] = []
+    const backend: StoreBackend = {
+      async append(event) {
+        events.push(event)
+      },
+      async readAll() {
+        return [...events]
+      },
+      async lastId() {
+        if (failNextLoad) {
+          failNextLoad = false
+          throw new Error('lastId unavailable')
+        }
+        return events.at(-1)?.id ?? 0
+      },
+    }
+    const store = createStore(backend)
+
+    // The caller that triggers the failed load must still SEE the failure…
+    await expect(store.append({ stream: 's', type: 'first', data: {} })).rejects.toThrow('lastId unavailable')
+    // …and the store must not be dead afterwards.
+    const recovered = await store.append({ stream: 's', type: 'second', data: {} })
+    expect(recovered.id).toBe(1)
+    expect((await store.read()).map((e) => e.type)).toEqual(['second'])
+  })
+
+  test('an append QUEUED BEHIND an in-flight failure still lands, in order', async () => {
+    // The existing failed-write test awaits the rejection before issuing the
+    // next append, so it only proves recovery AFTER the failure is observed.
+    // This one issues both in the same tick, so the second is already sitting
+    // on the chain when the first rejects — the case where a non-swallowing
+    // chain would wedge every later append.
+    const events: StoredEvent[] = []
+    const backend: StoreBackend = {
+      async append(event) {
+        if (event.type === 'doomed') throw new Error('disk full')
+        events.push(event)
+      },
+      async readAll() {
+        return [...events]
+      },
+      async lastId() {
+        return events.at(-1)?.id ?? 0
+      },
+    }
+    const store = createStore(backend)
+    await store.append({ stream: 's', type: 'ok', data: {} })
+
+    const doomed = store.append({ stream: 's', type: 'doomed', data: {} })
+    const queued = store.append({ stream: 's', type: 'queued', data: {} })
+    await expect(doomed).rejects.toThrow('disk full')
+    expect((await queued).id).toBe(3)
+    expect((await store.read()).map((e) => e.type)).toEqual(['ok', 'queued'])
+  })
 })
 
 describe('jsonlBackend.lastId — recovery for logs written before task 011', () => {

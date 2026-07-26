@@ -33,9 +33,22 @@ export function createStore(backend: StoreBackend): EventStore {
     // Two concurrent first appends must not each load and each ASSIGN — the
     // second assignment would clobber the first's reservation and hand both
     // callers the same id. One load, shared.
-    initializing ??= backend.lastId().then((last) => {
-      nextId = last
-    })
+    initializing ??= backend
+      .lastId()
+      .then((last) => {
+        nextId = last
+      })
+      .catch((err) => {
+        // A FAILED load must not be cached (review, 2026-07-27). `??=` would
+        // hand the same rejected promise to every later append for the rest of
+        // the process's life, turning a transient FS error — an EMFILE under
+        // load, a permissions blip — into a permanent one. The pre-fix code
+        // retried on the next call because it kept no promise; clearing here
+        // restores that. The caller still sees this failure: the rethrow keeps
+        // the rejection flowing to whoever awaited.
+        initializing = null
+        throw err
+      })
     await initializing
   }
 
