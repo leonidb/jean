@@ -90,6 +90,29 @@ describe('core boundary', () => {
     expect(offenders).toEqual([])
   })
 
+  test('every delivery goes through the deliver port — no path reaches an entry directly', async () => {
+    // Codex's finding, made mechanical. The port's claim is "it captures ALL
+    // delivery paths", and a port covering a third of delivery is worse than
+    // none because it reads as complete. Prose in a doc comment cannot hold
+    // that; a grep that runs on every commit can.
+    // Matched by ALLOWLIST, not by parsing the receiver. The first version of
+    // this test pulled the receiver out with `(\w+(?:\.\w+)*)\.deliver\(` and
+    // exempted `ports` — which the mutation harness immediately walked through
+    // via `agents.get(sender)?.deliver({`, because an optional-chained call on
+    // a method result matches no such pattern. A guard that only catches the
+    // tidy spellings of the thing it forbids is not a guard.
+    const source = await read(SERVER)
+    const offenders = source
+      .split('\n')
+      .filter((line) => line.includes('.deliver('))
+      .filter((line) => !line.includes('ports.deliver('))
+      // The ONE permitted direct call: the default implementation of the port
+      // itself, which is what every other site now routes through.
+      .filter((line) => !line.includes('return entry.deliver(msg)'))
+      .map((line) => line.trim())
+    expect(offenders).toEqual([])
+  })
+
   test('both timer callbacks are a single core.tick call with no branching', async () => {
     const source = await read(SERVER)
     const callbacks = [...source.matchAll(/setInterval\((\(\) => [^,]+),/g)].map((m) => m[1] as string)

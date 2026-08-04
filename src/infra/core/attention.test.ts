@@ -430,6 +430,40 @@ describe('hydrate', () => {
     expect(deliveries(h)).toBe(1)
   })
 
+  test('ACCEPTED DELTA — a sensei reconnecting under a DIFFERENT name starts a fresh episode', () => {
+    // Keying episodes by agent name is the D4 reshape (ruled 2026-08-04). The
+    // pre-refactor globals were name-agnostic, so this is a real behaviour
+    // change: accepted, and therefore pinned rather than left to drift.
+    //
+    // Why it is benign, asserted rather than asserted-about: the reset lands in
+    // `blockingWakeCount: 0`, which is the "unstarted episode" state the
+    // blocking tick self-heals — so the cost is at most one extra wake on the
+    // next tick, never a missed one.
+    const h = harness()
+    const w: World = { now: 0, agent: 'sensei-a', idle: false, pending: [[1, true]] }
+    h.arrive(w, 1, false)
+    h.drain()
+
+    // Same episode, same name: coalesced by the backoff ladder.
+    h.tick({ ...w, now: BLOCK_1 - 1 })
+    expect(deliveries(h)).toBe(0)
+
+    // Renamed. The new key has no episode, so the ladder restarts — one extra
+    // wake, immediately, instead of waiting out the rung.
+    h.tick({ ...w, now: BLOCK_1 - 1, agent: 'sensei-b' })
+    expect(deliveries(h)).toBe(1)
+    h.drain()
+
+    // And it is ONE extra, not a loop: the new key's episode is now live and
+    // the ladder applies to it exactly as it did to the old one.
+    h.tick({ ...w, now: BLOCK_1, agent: 'sensei-b' })
+    expect(deliveries(h)).toBe(0)
+
+    // The old name's episode is untouched — nothing was migrated or lost.
+    expect(h.listener.state.agents.get('sensei-a')?.blockingWakeCount).toBe(1)
+    expect(h.listener.state.agents.get('sensei-b')?.blockingWakeCount).toBe(1)
+  })
+
   test('an empty queue at boot leaves the stall clock disarmed', () => {
     const h = harness()
     h.hydrate({ now: 5_000, agent: null, idle: false, pending: [] })

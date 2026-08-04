@@ -285,6 +285,19 @@ import type { Bridge } from '../bridge.ts'`,
     ],
   },
   {
+    guard: 'boundary D',
+    what: 'bypass the deliver port and reach an agent entry directly',
+    test: BOUNDARY,
+    filter: 'every delivery goes through the deliver port',
+    edits: [
+      {
+        file: SERVER,
+        from: `    ports.deliver(sender, {`,
+        to: `    agents.get(sender)?.deliver({`,
+      },
+    ],
+  },
+  {
     guard: 'boundary C',
     what: 'put branching back into a timer callback',
     test: BOUNDARY,

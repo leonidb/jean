@@ -89,6 +89,22 @@ export function createAttentionListener(exec: Executor): AttentionListener {
       // self-heals, so an undelivered wake retries on the next tick rather than
       // after a whole backoff window.
       if (!landed) continue
+      // ── ONE MEASURED DELTA, and it is here ──
+      //
+      // The committed timestamps come from `view.now`, read BEFORE this
+      // delivery. The pre-refactor code read `ports.now()` AFTER it, on each of
+      // the three paths. Surfaced by review; the answer is that the position
+      // rule (ports.ts) is about AWAIT boundaries, and there is no await in the
+      // window — `exec.deliver` bottoms out in `ws.send(JSON.stringify(msg))`,
+      // synchronous, and the sensei is always a WS agent (peers register as
+      // 'peer', the bridge as 'user').
+      //
+      // Measured rather than argued: 2000 sends of a full 1.9 KB wake payload
+      // over a real socket, worst case 1 ms of wall clock (1.36 ms hi-res, a GC
+      // pause). So a committed timestamp can be up to ~1 ms EARLIER than it
+      // would have been — never later — against thresholds of 30 s and up. It
+      // also collapses what were TWO separate `ports.now()` reads per push into
+      // one coherent instant.
       state = {
         ...state,
         agents: new Map(state.agents).set(effect.to, effect.onLanded.episode),

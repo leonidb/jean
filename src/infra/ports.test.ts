@@ -129,7 +129,12 @@ describe('injected ports are honoured', () => {
     }
   })
 
-  test('deliver — every push routes through the port, and its answer is what "delivered" means', async () => {
+  // NOTE ON SCOPE, after a review finding: this proves the port is CALLED and
+  // that its answer is what `delivered` means. It does NOT prove every delivery
+  // path routes through it — it exercises one (`/send`). That claim is
+  // structural, and core/boundary.test.ts asserts it structurally: no `.deliver(`
+  // in server.ts outside the port's own default implementation.
+  test('deliver — the port is called, and its answer is what "delivered" means', async () => {
     const dataDir = freshDir('deliver')
     const seen: { to: string; text: string }[] = []
     const handle = await createInfraServer({
