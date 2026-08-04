@@ -32,7 +32,12 @@ const SENSEI = 'sensei'
  *  registry and the pending projection; here it is just data. */
 type World = {
   now: number
+  /** WHOSE mailbox — survives the owner's disconnects. */
   agent: string | null
+  /** Whether there is a live transport. Defaults to "there is an owner", which
+   *  is what `agent` meant before the mailbox reshape, so every pre-existing
+   *  case below keeps exactly its old meaning. */
+  deliverable?: boolean
   idle: boolean
   /** Pending queue as (id, is-this-a-human-waiting) pairs. */
   pending: [id: number, blocking: boolean][]
@@ -53,6 +58,7 @@ function viewOf(w: World): AttentionView {
   return {
     now: w.now,
     agent: w.agent,
+    deliverable: w.deliverable ?? w.agent !== null,
     idle: w.idle,
     pendingIds: w.pending.map(([id]) => id),
     blockingPendingIds: w.pending.filter(([, b]) => b).map(([id]) => id),
@@ -413,6 +419,84 @@ describe('RACE GUARD 4 — a refused delivery advances nothing', () => {
   })
 })
 
+describe('mailbox ownership — owner is not deliverable', () => {
+  // The two cases the mailbox reshape turns on, both required by the ruling on
+  // task 040 Q1. Neither is reachable from the integration suite: both
+  // stall-watchdog cases connect the sensei BEFORE the event, and the
+  // sensei-absent recovery case uses a human message, which self-heals through
+  // the blocking tick rather than the watchdog.
+
+  test('PRESERVED — an arrival while the owner is DISCONNECTED still starts the stall window', () => {
+    const h = harness()
+    // Owner known (a sensei registered at some point), nobody attached now.
+    const offline: World = { now: 0, agent: SENSEI, deliverable: false, idle: false, pending: [[1, false]] }
+
+    h.arrive(offline, 1, false)
+    expect(h.trace).toEqual([]) // nothing to push to
+    // ...but the clock IS armed. This is the whole point of separating owner
+    // from deliverable: pre-reshape the global clock armed here, and keying it
+    // on "the connected sensei" would have silently lost that.
+    expect(h.listener.state.agents.get(SENSEI)?.pendingSince).toBe(0)
+
+    // A full window later the owner attaches. The watchdog fires IMMEDIATELY,
+    // because the window was measured from the ARRIVAL — not restarted from the
+    // reconnect.
+    h.tick({ ...offline, now: STALL_AFTER, deliverable: true })
+    expect(h.trace).toContain('nudge:{"pendingCount":1,"forced":true}')
+  })
+
+  test('ACCEPTED CORNER — a never-registered dojo has no owner, so nothing is armed', () => {
+    // Sanctioned 2026-08-04 (task 040 Q1, option (c) for this corner alone):
+    // with no sensei ever registered there is no name to own the mailbox, and
+    // inventing one would be worse than the delay. Pinned so the delta is a
+    // decision on the record rather than a surprise later.
+    const h = harness()
+    h.arrive({ now: 0, agent: null, idle: false, pending: [[1, false]] }, 1, false)
+    expect(h.listener.state.agents.size).toBe(0)
+
+    // A full window after that arrival, with an owner now present: silent,
+    // because its clock has not started. Pre-reshape this fired.
+    h.tick({ now: STALL_AFTER, agent: SENSEI, idle: false, pending: [[1, false]] })
+    expect(h.trace).toEqual([])
+
+    // It self-heals on the next arrival — the clock starts then, and the
+    // watchdog follows a full window later. Bounded, not lost.
+    h.arrive(
+      {
+        now: STALL_AFTER,
+        agent: SENSEI,
+        idle: false,
+        pending: [
+          [1, false],
+          [2, false],
+        ],
+      },
+      2,
+      false,
+    )
+    h.drain()
+    h.tick({
+      now: STALL_AFTER * 2,
+      agent: SENSEI,
+      idle: false,
+      pending: [
+        [1, false],
+        [2, false],
+      ],
+    })
+    expect(h.trace).toContain('nudge:{"pendingCount":2,"forced":true}')
+  })
+
+  test('a non-deliverable mailbox never nudges — `idle` implies `deliverable`', () => {
+    // The adapter reports idle:false whenever the mailbox is not deliverable,
+    // which is why decideNudge needs no separate check. Pinned here so that
+    // coupling is a tested invariant rather than an accident of construction.
+    const h = harness()
+    h.nudge({ now: 0, agent: SENSEI, deliverable: false, idle: true, pending: [[1, false]] })
+    expect(h.trace).toEqual([])
+  })
+})
+
 describe('hydrate', () => {
   test('reproduces the pre-refactor boot state: counters zeroed, stall clock armed from the queue', () => {
     const h = harness()
@@ -423,8 +507,11 @@ describe('hydrate', () => {
     // event's timestamp, and blockingWakeCount 0 against a non-empty blocking
     // queue is the unstarted episode the tick self-heals.
     h.hydrate(w)
-    expect(h.listener.state.agents.size).toBe(0)
-    expect(h.listener.state.pendingSince).toBe(5_000)
+    // STATE-INTERNAL UPDATE (mailbox reshape): the clock is the OWNER's now, so
+    // hydrate creates exactly one key rather than leaving the map empty with a
+    // global clock beside it. The behaviour asserted below is unchanged.
+    expect([...h.listener.state.agents.keys()]).toEqual([SENSEI])
+    expect(h.listener.state.agents.get(SENSEI)?.pendingSince).toBe(5_000)
 
     h.tick({ ...w, now: 6_000 })
     expect(deliveries(h)).toBe(1)
@@ -466,8 +553,10 @@ describe('hydrate', () => {
 
   test('an empty queue at boot leaves the stall clock disarmed', () => {
     const h = harness()
-    h.hydrate({ now: 5_000, agent: null, idle: false, pending: [] })
-    expect(h.listener.state.pendingSince).toBeNull()
+    h.hydrate({ now: 5_000, agent: SENSEI, idle: false, pending: [] })
+    // STATE-INTERNAL UPDATE: an empty mailbox invents NO key — "keys appear as
+    // agents' events do" — where the pre-reshape shape carried a null global.
+    expect(h.listener.state.agents.size).toBe(0)
 
     // Nothing pending and no clock: a tick far in the future is silent.
     h.tick({ now: 5_000 + STALL_AFTER * 10, agent: SENSEI, idle: false, pending: [] })

@@ -34,6 +34,7 @@ import {
   decideEventApplied,
   decideNudge,
   decideTick,
+  freshEpisode,
   initialState,
 } from './attention.ts'
 
@@ -105,11 +106,11 @@ export function createAttentionListener(exec: Executor): AttentionListener {
       // would have been — never later — against thresholds of 30 s and up. It
       // also collapses what were TWO separate `ports.now()` reads per push into
       // one coherent instant.
-      state = {
-        ...state,
-        agents: new Map(state.agents).set(effect.to, effect.onLanded.episode),
-        pendingSince: effect.onLanded.pendingSince,
-      }
+      //
+      // ONE assignment, since the mailbox reshape moved the stall clock into
+      // the episode: `onLanded.episode` is now the whole commit for this
+      // mailbox, and it can no longer touch another agent's.
+      state = { ...state, agents: new Map(state.agents).set(effect.to, effect.onLanded.episode) }
       exec.markBusy(effect.to)
       exec.stamp(effect.onLanded.stampAs)
       exec.emitNudge(effect.onLanded.nudge)
@@ -127,16 +128,24 @@ export function createAttentionListener(exec: Executor): AttentionListener {
       run(decideNudge(state, view))
     },
     hydrate(view) {
-      // Verbatim reproduction of the three pre-refactor initializations:
-      // pendingSince from the replayed queue's emptiness (server.ts:1072), and
-      // both counter sets at zero (:861-862, :1109-1112) — i.e. an empty map.
+      // Counters at zero, and the stall clock armed from the replayed mailbox's
+      // emptiness — the same two facts as before the mailbox reshape, now keyed
+      // by owner instead of global.
       //
-      // The lossiness is deliberate and load-bearing: the stall clock starts at
-      // BOOT rather than at the original event's timestamp, and
-      // `blockingWakeCount: 0` against a non-empty blocking queue is the
-      // "unstarted episode" the backoff tick self-heals within one tick. That
-      // is the behaviour attention-recovery.test.ts exists to pin.
-      state = { agents: new Map(), pendingSince: view.pendingIds.length > 0 ? view.now : null }
+      // NO KEY IS INVENTED. An empty mailbox map at boot is the correct state:
+      // keys appear as agents' events do. So an empty queue leaves the map
+      // empty, and a dojo where no sensei has ever registered has no owner to
+      // key at all (the accepted corner — see core/attention.ts's header).
+      //
+      // The lossiness is deliberate and load-bearing: the clock starts at BOOT
+      // rather than at the original event's timestamp, and `blockingWakeCount:
+      // 0` against a non-empty blocking queue is the "unstarted episode" the
+      // backoff tick self-heals within one tick. That is the behaviour
+      // attention-recovery.test.ts exists to pin, and it stays unmodified.
+      state = initialState()
+      if (view.agent && view.pendingIds.length > 0) {
+        state = { agents: new Map([[view.agent, { ...freshEpisode(), pendingSince: view.now }]]) }
+      }
     },
     get state() {
       return state

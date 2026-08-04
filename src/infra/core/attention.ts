@@ -28,22 +28,50 @@
  * carried as `onLanded` data rather than folded into `next` — the shape itself
  * is the guard.
  *
- * ── STATE SHAPE, AND ONE REFINEMENT OF D4 ──
+ * ── STATE SHAPE: PER-AGENT MAILBOXES (protocol build commit 1, task 040) ──
  *
- * D4 specified `Map<agent, EpisodeState>` with the sensei as the only populated
- * key, and that is what `agents` is. But `pendingSince` is NOT per-agent here,
- * and the reason is concrete: it is the stall clock for the PENDING QUEUE
- * ("when pending last went non-empty, or the last push fired, whichever is
- * later"), the queue is global today, and it is hydrated at boot — when no
- * sensei is connected and there is therefore no agent key to hydrate. Putting
- * it in the map would mean inventing a key that does not exist yet.
+ * Everything is keyed by agent, including `pendingSince` — which the previous
+ * version of this header promised would move here "when phase 5 gives every
+ * agent its own mailbox". This is that commit. Sensei is still the only agent
+ * anything fires for; worker keys are structurally reachable and inert.
  *
- * When phase 5 gives every agent its own mailbox, the queue becomes per-agent
- * and `pendingSince` moves into the per-agent state with it. That is the same
- * reshape, arriving when there is something to key it by.
+ * ── OWNER IS NOT DELIVERABLE, AND THE DIFFERENCE IS LOAD-BEARING ──
  *
- * ACCEPTED DELTA (D4, ruled on 2026-08-04): keying episodes by agent name means
- * a sensei that reconnects under a DIFFERENT name starts a fresh episode, where
+ * `view.agent` is WHOSE MAILBOX this is. `view.deliverable` is WHETHER THERE IS
+ * A LIVE TRANSPORT to push to. The pre-reshape view conflated them (`agent` was
+ * `findSensei()?.name ?? null`), which was harmless while the stall clock was
+ * global and fatal the moment it became per-agent:
+ *
+ * Measured on the pre-reshape core — an arrival with NO sensei connected armed
+ * the global clock (`pendingSince = 0`) and created ZERO episode keys, so a
+ * sensei connecting ten minutes later got the watchdog IMMEDIATELY, its window
+ * measured from the arrival. Key that clock on "the connected sensei" and the
+ * window has nothing to arm: it would silently restart from the connect.
+ *
+ * No test in the suite could see that. Both stall-watchdog cases connect the
+ * sensei before the event, and the sensei-absent recovery case uses a human
+ * message, which self-heals through the blocking tick rather than the watchdog.
+ * It is pinned now — see attention.test.ts, "arrival while disconnected".
+ *
+ * So: state bookkeeping keys on the OWNER (which survives disconnects); pushes
+ * gate on DELIVERABLE. The owner is resolved by the adapter as the connected
+ * sensei, else the most-recently-registered persisted sensei name.
+ *
+ * ACCEPTED CORNER (sanctioned 2026-08-04, task 040 Q1): on a dojo where no
+ * sensei has EVER registered there is no name to own the mailbox, so `agent` is
+ * null and nothing is armed until one registers. Pinned rather than papered
+ * over — see attention.test.ts, "never-registered dojo".
+ *
+ * ── THE SENSEI'S MAILBOX IS THE WHOLE QUEUE ──
+ *
+ * Ruled on the merits (task 040 Q2): the orchestrator's "everything it needs to
+ * know" IS the whole pending queue, so worker mailboxes OVERLAP the sensei's
+ * rather than partitioning it. A partition would mean the sensei stops seeing
+ * worker-owned events — a different system, and not foreclosed, but not this.
+ * The slicing lives in the adapter's view construction; nothing here knows.
+ *
+ * ACCEPTED DELTA (D4, ruled 2026-08-04): keying episodes by agent name means a
+ * sensei that reconnects under a DIFFERENT name starts a fresh episode, where
  * the old file-scope globals were name-agnostic. The reset lands in
  * `blockingWakeCount: 0` — the "unstarted episode" state the blocking tick
  * self-heals — so the cost is at most one extra wake within one tick.
@@ -53,7 +81,7 @@ import type { StoredEvent } from '../../es/index.ts'
 import { type Inbox, renderInboxWake } from '../inbox.ts'
 import type { DeliveredVia, NudgeData } from '../reducers.ts'
 
-/** Per-agent episode bookkeeping. Sensei is the only populated key today. */
+/** One agent's mailbox bookkeeping. Sensei is the only populated key today. */
 export type EpisodeState = {
   /** Wakes fired in the current blocking episode (resets when blocking drains). */
   blockingWakeCount: number
@@ -62,27 +90,36 @@ export type EpisodeState = {
   lastNudgeAt: number
   /** Highest pending event id this agent has already been told about. */
   maxNudgedPendingId: number
+  /** Stall clock for THIS MAILBOX: when its queue last went non-empty, or when
+   *  the last push to it fired, whichever is later. Null while it is empty.
+   *  Armed by arrivals regardless of whether the owner is connected — see the
+   *  header on owner-vs-deliverable. */
+  pendingSince: number | null
 }
 
 export type AttentionState = {
   agents: Map<string, EpisodeState>
-  /** Stall clock for the pending queue — see the header for why it is not
-   *  per-agent yet. Null while pending is empty. */
-  pendingSince: number | null
 }
 
-/** What the decisions are allowed to see of the world. Constructed fresh by the
- *  adapter at every decision point — never cached, which is what keeps the
- *  delivered inbox and the recorded `pendingCount` in agreement. */
+/** What the decisions are allowed to see of the world — ONE agent's mailbox,
+ *  constructed fresh by the adapter at every decision point. Never cached,
+ *  which is what keeps the delivered inbox and the recorded `pendingCount` in
+ *  agreement. */
 export type AttentionView = {
   now: number
-  /** The agent these decisions are about — the connected sensei, or null when
-   *  there is nobody to push to. Also the key into `state.agents`. */
+  /** WHOSE MAILBOX this is, and the key into `state.agents`. Survives the
+   *  owner's disconnects. Null only on a dojo where no sensei has ever
+   *  registered — see the accepted corner in the header. */
   agent: string | null
-  /** The agent's idle flag. Only the machine-nudge path gates on it. */
+  /** WHETHER THERE IS A LIVE TRANSPORT to push to right now. Every push gates
+   *  on this; no state bookkeeping does. */
+  deliverable: boolean
+  /** The owner's idle flag. Only the machine-nudge path gates on it, and the
+   *  adapter reports `false` whenever the mailbox is not deliverable — so
+   *  `idle` implies `deliverable`, which is why the nudge path needs no
+   *  separate check. Pinned in attention.test.ts. */
   idle: boolean
-  /** Ids currently in the pending queue, and the blocking (human-waiting)
-   *  subset of them. */
+  /** Ids in THIS MAILBOX, and the blocking (human-waiting) subset of them. */
   pendingIds: number[]
   blockingPendingIds: number[]
   /** The inbox as of `now`, or null when empty. */
@@ -97,8 +134,6 @@ export type OnLanded = {
   /** The agent's episode state after a successful push. Precomputed; applied by
    *  the listener iff the delivery returned true. */
   episode: EpisodeState
-  /** Re-arm the stall clock. */
-  pendingSince: number
   /** How the delivery ledger should record this push. */
   stampAs: DeliveredVia
   /** The `nudge` event to append. Recorded only on a landed push — an event
@@ -121,11 +156,18 @@ export type Decision = {
 }
 
 export function freshEpisode(): EpisodeState {
-  return { blockingWakeCount: 0, lastBlockingWakeAt: 0, nudgeCount: 0, lastNudgeAt: 0, maxNudgedPendingId: 0 }
+  return {
+    blockingWakeCount: 0,
+    lastBlockingWakeAt: 0,
+    nudgeCount: 0,
+    lastNudgeAt: 0,
+    maxNudgedPendingId: 0,
+    pendingSince: null,
+  }
 }
 
 export function initialState(): AttentionState {
-  return { agents: new Map(), pendingSince: null }
+  return { agents: new Map() }
 }
 
 /** Episode for `agent`, defaulting to a fresh one. Reading never mutates the
@@ -141,12 +183,12 @@ function withEpisode(state: AttentionState, agent: string, episode: EpisodeState
   return { ...state, agents }
 }
 
-/** Map over every populated episode. The queue is global today, so the
- *  queue-driven resets apply to every agent that has one. */
-function mapEpisodes(state: AttentionState, fn: (e: EpisodeState) => EpisodeState): AttentionState {
-  const agents = new Map<string, EpisodeState>()
-  for (const [name, episode] of state.agents) agents.set(name, fn(episode))
-  return { ...state, agents }
+/** Apply `fn` to ONE mailbox's episode. Replaces the pre-reshape `mapEpisodes`,
+ *  which walked every key because the queue was global: a queue-driven reset is
+ *  now scoped to the mailbox that drained, which is the mailbox the view
+ *  describes. Identical while the sensei is the only populated key. */
+function updateEpisode(state: AttentionState, agent: string, fn: (e: EpisodeState) => EpisodeState): AttentionState {
+  return withEpisode(state, agent, fn(episodeOf(state, agent)))
 }
 
 const backoffAt = (schedule: number[], count: number): number =>
@@ -158,7 +200,7 @@ const maxId = (ids: number[]): number => ids.reduce((hi, id) => (id > hi ? id : 
  *  entirely. Null when there is nobody to deliver to; the piggyback and a
  *  future connect carry the news instead. */
 function blockingWake(state: AttentionState, view: AttentionView): Effect | null {
-  if (!view.agent) return null
+  if (!view.agent || !view.deliverable) return null
   const episode = episodeOf(state, view.agent)
   return {
     kind: 'deliver',
@@ -171,8 +213,9 @@ function blockingWake(state: AttentionState, view: AttentionView): Effect | null
         ...episode,
         lastBlockingWakeAt: view.now,
         blockingWakeCount: episode.blockingWakeCount + 1,
+        // Re-arms this mailbox's stall clock — a landed push counts as activity.
+        pendingSince: view.now,
       },
-      pendingSince: view.now,
       stampAs: 'wake',
       nudge: { pendingCount: view.pendingIds.length, blocking: true },
     },
@@ -226,7 +269,8 @@ export function decideBlockingArrival(
  */
 export function decideBlockingTick(state: AttentionState, view: AttentionView): Decision {
   if (view.blockingPendingIds.length === 0) {
-    return { next: mapEpisodes(state, (e) => ({ ...e, blockingWakeCount: 0 })), effects: [] }
+    if (!view.agent) return { next: state, effects: [] }
+    return { next: updateEpisode(state, view.agent, (e) => ({ ...e, blockingWakeCount: 0 })), effects: [] }
   }
   if (!view.agent) return { next: state, effects: [] }
   const episode = episodeOf(state, view.agent)
@@ -267,7 +311,12 @@ export function decideNudge(state: AttentionState, view: AttentionView): Decisio
   // THE IDLE GATE IS CHECKED BEFORE ANY EPISODE BOOKKEEPING (race guard 5). A
   // suppressed-because-busy call must not consume the content-changed signal,
   // or an event that arrived mid-turn would never be announced at turn-end.
-  if (!view.agent || !view.idle) return { next: state, effects: [] }
+  //
+  // `deliverable` is checked EXPLICITLY rather than leaning on the adapter's
+  // `idle ⇒ deliverable` construction. The coupling holds today, but a view
+  // built by hand could violate it, and the failure would be a push at a
+  // mailbox with no transport. Cheap to state, so stated.
+  if (!view.agent || !view.deliverable || !view.idle) return { next: state, effects: [] }
   if (view.pendingIds.length === 0) return { next: state, effects: [] }
   const episode = episodeOf(state, view.agent)
   if (!shouldNudge(episode, view)) return { next: state, effects: [] }
@@ -286,8 +335,8 @@ export function decideNudge(state: AttentionState, view: AttentionView): Decisio
             nudgeCount: episode.nudgeCount + 1,
             lastNudgeAt: view.now,
             maxNudgedPendingId: Math.max(episode.maxNudgedPendingId, maxId(view.pendingIds)),
+            pendingSince: view.now,
           },
-          pendingSince: view.now,
           stampAs: 'wake',
           nudge: { pendingCount: view.pendingIds.length },
         },
@@ -303,8 +352,10 @@ export function decideNudge(state: AttentionState, view: AttentionView): Decisio
  * one that ignores the idle flag.
  */
 export function decideStallTick(state: AttentionState, view: AttentionView): Decision {
-  if (state.pendingSince === null) return { next: state, effects: [] }
-  if (view.now - state.pendingSince < view.stallAfterMs) return { next: state, effects: [] }
+  if (!view.agent) return { next: state, effects: [] } // no mailbox, no clock
+  const pendingSince = episodeOf(state, view.agent).pendingSince
+  if (pendingSince === null) return { next: state, effects: [] }
+  if (view.now - pendingSince < view.stallAfterMs) return { next: state, effects: [] }
   // While ANY blocking event is pending, the blocking path owns delivery and
   // the watchdog stands down — its re-wakes ARE the delivery attempts, and at
   // the backoff cap the two clocks run at identical periods and would
@@ -314,7 +365,10 @@ export function decideStallTick(state: AttentionState, view: AttentionView): Dec
   // since guard 4 stopped failed deliveries from advancing blockingWakeCount,
   // an unstarted episode sits at count 0, which a `count > 0` guard would miss.
   if (view.blockingPendingIds.length > 0) return { next: state, effects: [] }
-  if (!view.agent) return { next: state, effects: [] } // clock stays armed for when one connects
+  // Nobody to wake — the clock stays armed for when one connects. This is the
+  // line the owner/deliverable split preserves: pre-reshape it read `!view.agent`
+  // and meant "no sensei connected"; the mailbox now outlives the connection.
+  if (!view.deliverable) return { next: state, effects: [] }
 
   const minutes = Math.max(1, Math.round(view.stallAfterMs / 60_000))
   return {
@@ -327,8 +381,9 @@ export function decideStallTick(state: AttentionState, view: AttentionView): Dec
           `Watchdog: events pending for over ${minutes} min. (Sent regardless of your idle state — your Stop hook may have misfired.)\n` +
           `${view.inbox ? renderInboxWake(view.inbox) : 'Check the board.'}`,
         onLanded: {
-          episode: episodeOf(state, view.agent),
-          pendingSince: view.now,
+          // The watchdog advances no counters — it only re-arms the window, so
+          // a wedged owner gets one reminder per window rather than a flood.
+          episode: { ...episodeOf(state, view.agent), pendingSince: view.now },
           stampAs: 'heartbeat',
           nudge: { pendingCount: view.pendingIds.length, forced: true },
         },
@@ -350,22 +405,30 @@ export function decideEventApplied(
   event: StoredEvent,
   hadBlockingBefore: boolean,
 ): Decision {
-  // Stall clock: starts when pending becomes non-empty, clears when drained. A
-  // drained queue also ends the machine-nudge episode — the next arrival on an
-  // empty queue is genuinely new news and nudges immediately.
-  let next: AttentionState =
+  // No mailbox owner yet (a dojo where no sensei has ever registered) — nothing
+  // to key any of this on. The accepted corner; see the header.
+  if (!view.agent) return { next: state, effects: [] }
+  const agent = view.agent
+
+  // Stall clock: starts when this mailbox becomes non-empty, clears when it
+  // drains. A drained mailbox also ends its machine-nudge episode — the next
+  // arrival on an empty queue is genuinely new news and nudges immediately.
+  //
+  // NOTE the arming is NOT gated on `deliverable`: an arrival during an owner's
+  // outage still starts the clock, so the watchdog measures from the arrival
+  // rather than from the reconnect. That is the pre-reshape behaviour the
+  // owner/deliverable split exists to preserve.
+  let next: AttentionState = updateEpisode(state, agent, (e) =>
     view.pendingIds.length === 0
-      ? {
-          ...mapEpisodes(state, (e) => ({ ...e, nudgeCount: 0, lastNudgeAt: 0, maxNudgedPendingId: 0 })),
-          pendingSince: null,
-        }
-      : { ...state, pendingSince: state.pendingSince ?? view.now }
+      ? { ...e, nudgeCount: 0, lastNudgeAt: 0, maxNudgedPendingId: 0, pendingSince: null }
+      : { ...e, pendingSince: e.pendingSince ?? view.now },
+  )
 
   // The blocking episode ends the moment blocking drains, here rather than only
   // on the tick, so a new human message right after a drain gets its immediate
   // wake instead of tripping guard 3's stale-episode check.
   if (view.blockingPendingIds.length === 0) {
-    next = mapEpisodes(next, (e) => ({ ...e, blockingWakeCount: 0 }))
+    next = updateEpisode(next, agent, (e) => ({ ...e, blockingWakeCount: 0 }))
   }
 
   // Did THIS event enter pending? Checked directly by id (race guard 2) — a

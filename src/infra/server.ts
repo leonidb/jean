@@ -410,7 +410,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // `hadBlockingBefore` is the pre-append capture from record() (race guard
     // 1) — it rides the publish context because no subscriber can reconstruct
     // it after the fact.
-    apply: (e, ctx) => attention.onEvent(e, viewNow(ports.now()), ctx.hadBlockingPending),
+    apply: (e, ctx) => attention.onEvent(e, senseiView(ports.now()), ctx.hadBlockingPending),
   })
 
   // Replay folds the projections DIRECTLY and never touches the bus — the
@@ -743,10 +743,18 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
    *  userAgentNames. The sensei's HTTP sends keep working during a WS drop, and
    *  auto-clear-on-reply must not silently stand down then (review finding). */
   const senseiNames = new Set<string>()
+  /** The sensei name seen MOST RECENTLY in a register — history order at boot,
+   *  then live registers. It is what owns the sensei mailbox while no sensei is
+   *  connected, so the mailbox's clocks keep running across an outage. A Set
+   *  cannot answer this: re-registering an existing name does not move it. */
+  let lastRegisteredSenseiName: string | undefined
   for (const e of await store.read({ types: ['register'] })) {
     const d = e.data as RegisterData
     if (d.role === 'user' && d.agent) userAgentNames.add(d.agent)
-    if (d.role === 'sensei' && d.agent) senseiNames.add(d.agent)
+    if (d.role === 'sensei' && d.agent) {
+      senseiNames.add(d.agent)
+      lastRegisteredSenseiName = d.agent
+    }
   }
 
   /** Role lookup: live registry first, then the persisted user set. ONE
@@ -875,7 +883,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   // with no branching on state, which is the acceptance check for the
   // extraction: if a timer callback still branches, it isn't done.
   const blockingTickMs = Math.min(15_000, ...BLOCKING_BACKOFF_MS)
-  const blockingTick = setInterval(() => attention.tick(viewNow(ports.now())), blockingTickMs)
+  const blockingTick = setInterval(() => attention.tick(senseiView(ports.now())), blockingTickMs)
 
   /** Attach the compact inbox line as a response header when the request came
    *  from the sensei's channel plugin (`x-jean-agent`). Header-only — response
@@ -1085,32 +1093,94 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
    * pre-refactor paths — all three called `senseiInboxNow()` only after their
    * own `findSensei()` check had passed.
    */
-  function viewNow(now: number): AttentionView {
-    const sensei = findSensei()
-    const pending = pendingProjection.state
+  /**
+   * WHOSE MAILBOX the attention machinery acts on. The sensei's, today.
+   *
+   * OWNER IS NOT DELIVERABLE. The owner outlives the connection, because the
+   * mailbox's clocks have to keep running while nobody is attached: an arrival
+   * during a sensei outage must still start the stall window, so a sensei
+   * connecting ten minutes later gets the watchdog immediately rather than a
+   * fresh window. That was measured on the pre-reshape core and is pinned in
+   * attention.test.ts.
+   *
+   * Resolution order, as ruled (task 040 Q1): the connected sensei, else the
+   * most-recently-registered persisted sensei name. `undefined` only on a dojo
+   * where no sensei has EVER registered — the accepted corner, where nothing is
+   * armed until one does.
+   */
+  function senseiMailboxOwner(): string | undefined {
+    return findSensei()?.name ?? lastRegisteredSenseiName
+  }
+
+  /**
+   * An agent's mailbox: the slice of pending it owns.
+   *
+   * THE SENSEI'S MAILBOX IS THE WHOLE QUEUE (ruled on the merits, task 040 Q2):
+   * the orchestrator's "everything it needs to know" IS the whole queue, so
+   * worker slices OVERLAP it rather than partitioning it. A partition would
+   * mean the sensei stops seeing worker-owned events — a different system, not
+   * foreclosed, but not this commit.
+   *
+   * Worker slices are reachable today and nothing calls them: `viewFor('w1',
+   * now)` builds a real per-worker mailbox view, which is what the per-agent
+   * scenario tests needed and could not have.
+   */
+  function mailboxOf(agent: string): StoredEvent[] {
+    return senseiNames.has(agent) ? [...pendingProjection.state] : pendingEvents(agent)
+  }
+
+  /**
+   * One mailbox, as the attention decisions are allowed to see it — built FRESH
+   * at every decision point, never cached.
+   *
+   * That freshness is a guard, not a style choice: the delivered inbox and the
+   * `pendingCount` recorded on the `nudge` event both come out of this one
+   * snapshot, so they cannot disagree. A cached inbox is exactly the bug
+   * scenario 6 pins (counts 1 → 2 → 1 — the falling leg is what a stale
+   * snapshot gets wrong).
+   *
+   * `now` is a PARAMETER rather than a `ports.now()` call inside, so the clock
+   * is read at the call site: the position rule from stage 2 (see ports.ts).
+   *
+   * `idle` is reported FALSE whenever the mailbox is not deliverable, so `idle`
+   * implies `deliverable` and the machine-nudge path needs no separate check.
+   * The inbox is likewise built only when there is someone to push to, matching
+   * the pre-refactor paths, which all called `senseiInboxNow()` only after their
+   * own `findSensei()` check had passed.
+   */
+  function viewFor(agent: string | undefined, now: number): AttentionView {
+    const live = findSensei()
+    const deliverable = agent !== undefined && live?.name === agent
+    const pending = agent === undefined ? [] : mailboxOf(agent)
     return {
       now,
-      agent: sensei?.name ?? null,
-      idle: sensei?.entry.idle ?? false,
+      agent: agent ?? null,
+      deliverable,
+      idle: deliverable ? (live?.entry.idle ?? false) : false,
       pendingIds: pending.map((e) => e.id),
       blockingPendingIds: pending.filter(isBlockingEvent).map((e) => e.id),
-      inbox: sensei ? senseiInboxNow() : null,
+      inbox: deliverable ? inboxFor(pending, taskOwner, { now, roleOf }) : null,
       blockingBackoffMs: BLOCKING_BACKOFF_MS,
       nudgeBackoffMs: NUDGE_BACKOFF_MS,
       stallAfterMs: STALL_NUDGE_AFTER_MS,
     }
   }
 
+  /** The sensei mailbox's view — what all three attention entry points use. */
+  function senseiView(now: number): AttentionView {
+    return viewFor(senseiMailboxOwner(), now)
+  }
+
   // Boot state, once, AFTER catch-up and never during it: counters at zero and
   // the stall clock armed from the replayed queue. The listener has no replay
   // path — see core/bus.ts, "REPLAY NEVER PUBLISHES".
-  attention.hydrate(viewNow(ports.now()))
+  attention.hydrate(senseiView(ports.now()))
 
   // The second of the two timer callbacks, and like the first it is one call
   // with no branching on state. Both drive the SAME `core.tick`; the stall
   // check therefore also runs on the blocking interval's faster grid, which can
   // only shorten the latency AFTER its threshold, never fire before it.
-  const stallTick = setInterval(() => attention.tick(viewNow(ports.now())), Math.min(STALL_NUDGE_AFTER_MS, 60_000))
+  const stallTick = setInterval(() => attention.tick(senseiView(ports.now())), Math.min(STALL_NUDGE_AFTER_MS, 60_000))
 
   // ── Trigger scheduler ───────────────────────────────────────────
 
@@ -2135,7 +2205,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData)
 
       if (role === 'sensei') {
-        attention.nudge(viewNow(ports.now()))
+        attention.nudge(senseiView(ports.now()))
       }
 
       return Response.json({ ok: true })
@@ -2736,7 +2806,10 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
               })
               wsSend(ws, { type: 'registered', agent: msg.agent, role })
               if (role === 'user') userAgentNames.add(msg.agent)
-              if (role === 'sensei') senseiNames.add(msg.agent)
+              if (role === 'sensei') {
+                senseiNames.add(msg.agent)
+                lastRegisteredSenseiName = msg.agent
+              }
               void record('register', agentStream(msg.agent), {
                 agent: msg.agent,
                 role,

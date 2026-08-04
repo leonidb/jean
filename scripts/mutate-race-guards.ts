@@ -79,8 +79,8 @@ const MUTATIONS: Mutation[] = [
     edits: [
       {
         file: SERVER,
-        from: `    apply: (e, ctx) => attention.onEvent(e, viewNow(ports.now()), ctx.hadBlockingPending),`,
-        to: `    apply: (e) => attention.onEvent(e, viewNow(ports.now()), hasBlockingPending()),`,
+        from: `    apply: (e, ctx) => attention.onEvent(e, senseiView(ports.now()), ctx.hadBlockingPending),`,
+        to: `    apply: (e) => attention.onEvent(e, senseiView(ports.now()), hasBlockingPending()),`,
       },
     ],
   },
@@ -124,9 +124,9 @@ const MUTATIONS: Mutation[] = [
       },
       {
         file: SERVER,
-        from: `    apply: (e, ctx) => attention.onEvent(e, viewNow(ports.now()), ctx.hadBlockingPending),`,
+        from: `    apply: (e, ctx) => attention.onEvent(e, senseiView(ports.now()), ctx.hadBlockingPending),`,
         to: `    apply: (e, ctx) =>
-      attention.onEvent(e, viewNow(ports.now()), ctx.hadBlockingPending, (ctx as never as { mutantLenBefore: number }).mutantLenBefore),`,
+      attention.onEvent(e, senseiView(ports.now()), ctx.hadBlockingPending, (ctx as never as { mutantLenBefore: number }).mutantLenBefore),`,
       },
       {
         file: LISTENER,
@@ -154,8 +154,8 @@ const MUTATIONS: Mutation[] = [
     edits: [
       {
         file: ATTENTION,
-        from: `  if (!view.agent || !view.idle) return { next: state, effects: [] }`,
-        to: `  if (!view.agent) return { next: state, effects: [] }
+        from: `  if (!view.agent || !view.deliverable || !view.idle) return { next: state, effects: [] }`,
+        to: `  if (!view.agent || !view.deliverable) return { next: state, effects: [] }
   if (!view.idle) {
     const busy = episodeOf(state, view.agent)
     return {
@@ -294,16 +294,16 @@ const MUTATIONS: Mutation[] = [
     edits: [
       {
         file: SERVER,
-        from: `  function viewNow(now: number): AttentionView {
-    const sensei = findSensei()`,
+        from: `  function viewFor(agent: string | undefined, now: number): AttentionView {
+    const live = findSensei()`,
         to: `  let mutantCachedInbox: ReturnType<typeof senseiInboxNow> | undefined
-  function viewNow(now: number): AttentionView {
-    const sensei = findSensei()`,
+  function viewFor(agent: string | undefined, now: number): AttentionView {
+    const live = findSensei()`,
       },
       {
         file: SERVER,
-        from: `      inbox: sensei ? senseiInboxNow() : null,`,
-        to: `      inbox: sensei ? (mutantCachedInbox ??= senseiInboxNow()) : null,`,
+        from: `      inbox: deliverable ? inboxFor(pending, taskOwner, { now, roleOf }) : null,`,
+        to: `      inbox: deliverable ? (mutantCachedInbox ??= inboxFor(pending, taskOwner, { now, roleOf })) : null,`,
       },
     ],
   },
@@ -395,9 +395,9 @@ import type { Bridge } from '../bridge.ts'`,
     edits: [
       {
         file: SERVER,
-        from: `  const stallTick = setInterval(() => attention.tick(viewNow(ports.now())), Math.min(STALL_NUDGE_AFTER_MS, 60_000))`,
+        from: `  const stallTick = setInterval(() => attention.tick(senseiView(ports.now())), Math.min(STALL_NUDGE_AFTER_MS, 60_000))`,
         to: `  const stallTick = setInterval(() => {
-    if (pendingProjection.state.length > 0) attention.tick(viewNow(ports.now()))
+    if (pendingProjection.state.length > 0) attention.tick(senseiView(ports.now()))
   }, Math.min(STALL_NUDGE_AFTER_MS, 60_000))`,
       },
     ],

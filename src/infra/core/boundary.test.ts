@@ -179,7 +179,7 @@ describe('core boundary', () => {
     for (const cb of callbacks) {
       // One call, one clock read, nothing else. A `{` here would mean a body,
       // and a body is where branching on state comes back.
-      expect(cb).toBe('() => attention.tick(viewNow(ports.now()))')
+      expect(cb).toBe('() => attention.tick(senseiView(ports.now()))')
     }
   })
 })
