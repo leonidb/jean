@@ -35,8 +35,21 @@ import { createSourceConnector, sourceContext } from './connectors/source.ts'
 import type { AttentionView } from './core/attention.ts'
 import { createAttentionListener } from './core/attention-listener.ts'
 import { createEventBus } from './core/bus.ts'
+import { createDeliveryLedger } from './core/ledger.ts'
+import { claimAckIds, confirmAutoClear, decideAutoClear } from './core/pre-append.ts'
+import {
+  inboxFor,
+  blockingPendingFrom as queueBlockingPendingFrom,
+  hasBlockingPending as queueHasBlockingPending,
+  isBlockingEvent as queueIsBlockingEvent,
+  pendingByAgent as queuePendingByAgent,
+  pendingEvents as queuePendingEvents,
+  resolveAgent as queueResolveAgent,
+  type RoleOf,
+  type TaskOwner,
+} from './core/queue.ts'
 import { planTriggers } from './core/triggers.ts'
-import { buildInbox, isUserSender, renderInboxLine } from './inbox.ts'
+import { renderInboxLine } from './inbox.ts'
 import { commitConsolidation, type LibrarianPhase, recoverWikiLayout } from './librarian.ts'
 import { type AgentSession, classifySession, envMs } from './liveness.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
@@ -55,7 +68,6 @@ import {
 import {
   type AckData,
   type AgentIdleData,
-  agentFromEvent,
   agentStream,
   boardReducer,
   type ClearedBy,
@@ -561,21 +573,21 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     taskId?: string
     attachments?: string[]
   }): Promise<boolean> {
-    // Auto-clear candidate — snapshot at ENTRY, before any await (review
-    // finding): only an event already visible when this reply was INITIATED may
-    // be auto-cleared. Without the snapshot, a follow-up/proactive send could
-    // ack a brand-new message that arrived mid-flight and was never seen.
-    // Sender check falls back to persisted sensei names — the sensei's HTTP send
-    // works during a WS drop, and auto-clear must not silently stand down then.
-    const autoClearId: number | null = (() => {
-      const senderRole = agents.get(args.from)?.role ?? (senseiNames.has(args.from) ? 'sensei' : undefined)
-      if (senderRole !== 'sensei') return null
-      if (agents.get(args.to)?.role !== 'user') return null
-      const blocked = pendingProjection.state.filter(
-        (e) => isBlockingEvent(e) && (e.data as { agent?: unknown }).agent === args.to,
-      )
-      return blocked.length === 1 ? (blocked[0] as StoredEvent).id : null
-    })()
+    // ── THE WELD (guard 7, entry half) ── Evaluated at ENTRY, before any
+    // await: only an event already visible when this reply was INITIATED may be
+    // auto-cleared. Without that, a follow-up or proactive send could ack a
+    // brand-new message that arrived mid-flight and was never seen. The rule is
+    // core/pre-append.ts's `decideAutoClear`; what must stay here is that
+    // NOTHING AWAITS between this and the function's first statement.
+    // core/boundary.test.ts asserts it structurally.
+    const autoClearId: number | null = decideAutoClear({
+      // Sender role falls back to persisted sensei names — the sensei's HTTP
+      // send keeps working during a WS drop, and auto-clear must not silently
+      // stand down then (review finding).
+      senderRole: agents.get(args.from)?.role ?? (senseiNames.has(args.from) ? 'sensei' : undefined),
+      targetRole: agents.get(args.to)?.role,
+      blockingFromTarget: blockingPendingFrom(args.to),
+    })
 
     const delivered = ports.deliver(args.to, {
       type: 'deliver',
@@ -623,13 +635,8 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // still counts as delivered, so the ack can clear a reminder for a reply the
     // human never received. Bounded: the human re-messages → fresh blocking
     // event → wake. Proper fix = bridge outcome reporting (ledger).
-    if (delivered && autoClearId !== null) {
-      const stillBlocking = pendingProjection.state.filter(
-        (e) => isBlockingEvent(e) && (e.data as { agent?: unknown }).agent === args.to,
-      )
-      if (stillBlocking.length === 1 && (stillBlocking[0] as StoredEvent).id === autoClearId) {
-        await recordAck([autoClearId], 'auto-clear')
-      }
+    if (delivered && autoClearId !== null && confirmAutoClear(autoClearId, blockingPendingFrom(args.to))) {
+      await recordAck([autoClearId], 'auto-clear')
     }
     return delivered
   }
@@ -695,29 +702,23 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     return String(boardProjection.state.tasks.length + 1).padStart(3, '0')
   }
 
+  // ── Queue queries ────────────────────────────────────────────────
+  //
+  // The answers live in core/queue.ts; these are the bindings that hand it the
+  // two lookups it needs. Kept as named shims rather than inlined at ~10 call
+  // sites: the bindings are the whole of what is adapter-specific here.
+
+  /** The board lookup, as core/queue.ts's `TaskOwner`. */
+  const taskOwner: TaskOwner = (taskId) => boardProjection.state.tasks.find((t) => t.id === taskId)
+
   function resolveAgent(event: StoredEvent): string | undefined {
-    const agent = agentFromEvent(event)
-    if (agent) return agent
-    const taskId = taskIdFromStream(event.stream)
-    if (taskId) {
-      const task = boardProjection.state.tasks.find((t) => t.id === taskId)
-      return task?.agent ?? task?.queue
-    }
-    return undefined
+    return queueResolveAgent(event, taskOwner)
   }
-
   function pendingEvents(agent?: string): StoredEvent[] {
-    if (!agent) return [...pendingProjection.state]
-    return pendingProjection.state.filter((e) => resolveAgent(e) === agent)
+    return queuePendingEvents(pendingProjection.state, taskOwner, agent)
   }
-
   function pendingByAgent(): Record<string, number> {
-    const counts: Record<string, number> = {}
-    for (const e of pendingProjection.state) {
-      const agent = resolveAgent(e)
-      if (agent) counts[agent] = (counts[agent] ?? 0) + 1
-    }
-    return counts
+    return queuePendingByAgent(pendingProjection.state, taskOwner)
   }
 
   // ── Inbox summary (attention phase 1 — docs/attention.md §2) ─────
@@ -741,50 +742,33 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     if (d.role === 'sensei' && d.agent) senseiNames.add(d.agent)
   }
 
+  /** Role lookup: live registry first, then the persisted user set. ONE
+   *  binding, shared by the blocking classification and the inbox, so the two
+   *  cannot drift apart — which is the whole point of `isUserSender` being
+   *  shared in the first place. */
+  const roleOf: RoleOf = (n) => agents.get(n)?.role ?? (userAgentNames.has(n) ? 'user' : undefined)
+
+  /** The sensei's inbox as of now. `agent` is left undefined — the pending
+   *  queue IS the sensei's queue today, so its inbox is the whole of it. */
   function senseiInboxNow() {
-    return buildInbox(pendingEvents(), {
-      now: ports.now(),
-      roleOf: (n) => agents.get(n)?.role ?? (userAgentNames.has(n) ? 'user' : undefined),
-    })
+    return inboxFor(pendingProjection.state, taskOwner, { now: ports.now(), roleOf })
   }
 
   // ── Delivery ledger (attention phase 4 — docs/attention.md "Observability") ──
   //
-  // Two facts per event, no more: HOW it reached the agent (`deliveredVia`) and
-  // WHAT cleared it (`clearedBy`). Deliberately minimal — the fuller ledger in the
-  // design (wake attempted/landed/failed, per-path counters, a query endpoint) is
-  // scope creep until a measured need shows up. Live state is in-memory; it
-  // MATERIALIZES onto the `ack` event, which is the durable record (the phase-3
-  // `auto: 'reply'` tag is the precedent this generalizes — the goals dojo's
-  // phase-3 QA leaned on it as its only ledger-like evidence).
-  //
-  // In-memory means a restart forgets in-flight delivery marks: an event pending
-  // across a restart acks with no `deliveredVia`. Honest and bounded — absence
-  // reads as "unknown", never as a wrong path.
+  // The ledger itself is core/ledger.ts. What stays here is the one binding it
+  // cannot have: "everything currently pending" as the default stamp set.
 
-  /** eventId → how it first reached the agent. First delivery wins: a wake
-   *  followed by ten piggybacks stays 'wake'. (The design's `at` timestamp is
-   *  deliberately not kept — nothing surfaces it, and the ack event's own ts is
-   *  the clear time.) See DeliveredVia in reducers.ts for what each value does
-   *  and does NOT claim. */
-  const deliveryLedger = new Map<number, DeliveredVia>()
-
-  /** A pending event as the API renders it, plus how it reached the agent (absent
-   *  until something has actually delivered it). */
-  function withDeliveredVia(event: StoredEvent) {
-    const deliveredVia = deliveryLedger.get(event.id)
-    return { ...toApiEvent(event), ...(deliveredVia && { deliveredVia }) }
-  }
+  const deliveryLedger = createDeliveryLedger()
+  const withDeliveredVia = deliveryLedger.withDeliveredVia
 
   /** THE one stamp site. Every delivery path routes through here (first-delivery-
-   *  wins lives inside it), so phase 5 can swap the in-memory map for
+   *  wins lives inside the ledger), so phase 5 can swap the in-memory map for
    *  mailbox-derived custody state at a single seam instead of hunting inline
    *  writes. `ids` defaults to everything currently pending — i.e. exactly what
    *  the inbox just handed over. */
   function stampDelivery(via: DeliveredVia, ids?: number[]): void {
-    for (const id of ids ?? pendingProjection.state.map((e) => e.id)) {
-      if (!deliveryLedger.has(id)) deliveryLedger.set(id, via)
-    }
+    deliveryLedger.stamp(via, ids ?? pendingProjection.state.map((e) => e.id))
   }
 
   /** Ids an in-flight recordAck has claimed but not yet written. Reserved
@@ -810,22 +794,16 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
    * lie.)
    */
   async function recordAck(eventIds: number[], clearedBy: ClearedBy): Promise<number[]> {
-    const pendingIds = new Set(pendingProjection.state.map((e) => e.id))
-    // Dedupe the input: no caller can pass a repeat today (both /events/ack forms
-    // funnel through a Set or a pending filter), but the reservation below is
-    // populated AFTER this filter, so a repeated id would slip past it and land
-    // twice in the recorded `eventIds`. Making the guarantee local beats relying
-    // on every present and future caller staying well-behaved.
-    const claimed = [...new Set(eventIds)].filter((id) => pendingIds.has(id) && !ackInFlight.has(id))
+    // ── THE WELD (guard 6) ── The decision and the reservation are one
+    // synchronous step. `claimAckIds` is pure and lives in core/pre-append.ts,
+    // but the property that makes it a guard is right here: NO AWAIT may appear
+    // between this line and the `ackInFlight.add` below, or two writers can
+    // both claim the same id. core/boundary.test.ts asserts that structurally.
+    const claimed = claimAckIds(eventIds, new Set(pendingProjection.state.map((e) => e.id)), ackInFlight)
     if (claimed.length === 0) return [] // already cleared, or another writer owns it
     for (const id of claimed) ackInFlight.add(id)
     try {
-      const ledger: NonNullable<AckData['ledger']> = {}
-      for (const id of claimed) {
-        const deliveredVia = deliveryLedger.get(id)
-        ledger[String(id)] = { ...(deliveredVia && { deliveredVia }), clearedBy }
-        deliveryLedger.delete(id)
-      }
+      const ledger = deliveryLedger.takeFor(claimed, clearedBy)
       await record('ack', SYSTEM_STREAM, {
         eventIds: claimed,
         // `auto: 'reply'` predates the ledger and stays — phase-3 QA (and the
@@ -853,18 +831,21 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   // trap the goals sensei flagged; full machine reclassification lands with the
   // turn-end drain discipline in later phases).
 
-  /** Is this event a human waiting? MUST agree with the inbox's classification
-   *  (shared `isUserSender`, incl. the `chat-` prefix fallback) — divergence
-   *  means a wake whose own payload contradicts it (review finding, 2026-07-24). */
+  /** Is this event a human waiting? Decided in core/queue.ts; the binding is
+   *  the shared `roleOf` above, which is what keeps this in step with the
+   *  inbox's own classification. */
   function isBlockingEvent(event: StoredEvent): boolean {
-    if (event.type !== 'reply') return false
-    const sender = (event.data as { agent?: unknown }).agent
-    if (typeof sender !== 'string') return false
-    return isUserSender(sender, (n) => agents.get(n)?.role ?? (userAgentNames.has(n) ? 'user' : undefined))
+    return queueIsBlockingEvent(event, roleOf)
   }
 
+  /** Guard 1's input, read immediately before every append. */
   function hasBlockingPending(): boolean {
-    return pendingProjection.state.some(isBlockingEvent)
+    return queueHasBlockingPending(pendingProjection.state, roleOf)
+  }
+
+  /** Guard 7 asks this twice — at entry and at the tail — and compares. */
+  function blockingPendingFrom(sender: string): number[] {
+    return queueBlockingPendingFrom(pendingProjection.state, roleOf, sender)
   }
 
   /** Re-wake delays AFTER the immediate arrival wake: 2m, 5m, then every 10m.

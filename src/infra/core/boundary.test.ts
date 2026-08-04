@@ -16,6 +16,12 @@
  *  3. TIMER CALLBACKS DON'T BRANCH. Leonid's acceptance check for the
  *     extraction, stated as a rule: "if a timer callback still branches on
  *     state, the extraction is not done."
+ *  4. THE PRE-APPEND WELDS (stage 4). Guards 6 and 7 are pure functions now,
+ *     and moving them did NOT move the property that makes them guards: no
+ *     `await` may separate the decision from the write it protects. That is the
+ *     entire risk of stage 4, it is invisible to every behavioural test in the
+ *     suite — the integration tests run a transport that never interleaves at
+ *     that granularity — and it is a two-line source check.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -29,19 +35,48 @@ async function read(path: string): Promise<string> {
   return await Bun.file(path).text()
 }
 
-/** Source slice of `functionName`'s body, by brace matching from its opening
- *  `{`. Good enough here: the anchor is unambiguous and any drift shows up as a
- *  loud "anchor not found" rather than a quiet pass. */
+/**
+ * Source slice of a function's body, by brace matching.
+ *
+ * THE PARAMETER LIST IS SKIPPED FIRST, and that is not incidental: `routeSend`
+ * declares an inline object type for its argument, so "the first `{` after the
+ * anchor" is the parameter type's brace and matching from there returns the
+ * SIGNATURE instead of the body. The weld assertion below then searched a
+ * region that could not contain what it was looking for — it failed loudly
+ * here, but a differently-shaped check would have passed vacuously.
+ *
+ * Anchors are unambiguous, and drift shows up as a thrown "anchor not found"
+ * rather than a quiet pass.
+ */
 function bodyOf(source: string, anchor: string): string {
   const start = source.indexOf(anchor)
   if (start === -1) throw new Error(`anchor not found: ${anchor}`)
-  const open = source.indexOf('{', start)
+  let i = source.indexOf('(', start)
+  for (let parens = 0; i < source.length; i++) {
+    if (source[i] === '(') parens++
+    else if (source[i] === ')' && --parens === 0) break
+  }
+  const open = source.indexOf('{', i)
   let depth = 0
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === '{') depth++
-    else if (source[i] === '}' && --depth === 0) return source.slice(open, i + 1)
+  for (let j = open; j < source.length; j++) {
+    if (source[j] === '{') depth++
+    else if (source[j] === '}' && --depth === 0) return source.slice(open, j + 1)
   }
   throw new Error(`unbalanced braces after ${anchor}`)
+}
+
+/**
+ * Strip comments before looking for code.
+ *
+ * The weld checks search for the word `await`, and the welds are the most
+ * heavily commented lines in the file — the first version of this test failed
+ * on its own explanatory prose ("NO AWAIT may appear between..."). Left
+ * unstripped, the check would have been permanently red for a reason that has
+ * nothing to do with the property, and the tempting fix — loosening the
+ * pattern — is how a guard quietly stops guarding.
+ */
+function code(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
 }
 
 describe('core boundary', () => {
@@ -111,6 +146,30 @@ describe('core boundary', () => {
       .filter((line) => !line.includes('return entry.deliver(msg)'))
       .map((line) => line.trim())
     expect(offenders).toEqual([])
+  })
+
+  test('GUARD 6 WELD — no await between claiming ack ids and reserving them', async () => {
+    const body = code(bodyOf(await read(SERVER), 'async function recordAck('))
+    const from = body.indexOf('claimAckIds(')
+    const to = body.indexOf('ackInFlight.add')
+    expect(from).toBeGreaterThan(-1)
+    expect(to).toBeGreaterThan(from)
+    // If anything awaits in this window, two writers can both see an id as
+    // unclaimed and both write an ack for it — the 20-way interleave that
+    // produced 20 ack events. The pure function cannot enforce this; only its
+    // caller can, so this is where it is checked.
+    expect(body.slice(from, to)).not.toMatch(/\bawait\b/)
+  })
+
+  test('GUARD 7 WELD — no await between routeSend entry and the auto-clear snapshot', async () => {
+    const body = code(bodyOf(await read(SERVER), 'async function routeSend('))
+    const decision = body.indexOf('decideAutoClear(')
+    expect(decision).toBeGreaterThan(-1)
+    // Everything before the snapshot must be synchronous, so that only an event
+    // already visible when the reply was INITIATED can be cleared. An await
+    // here lets a message that arrived mid-flight — and was never seen — be
+    // acked as though it had been answered.
+    expect(body.slice(0, decision)).not.toMatch(/\bawait\b/)
   })
 
   test('both timer callbacks are a single core.tick call with no branching', async () => {

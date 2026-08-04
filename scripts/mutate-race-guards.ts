@@ -34,9 +34,11 @@
 const SERVER = 'src/infra/server.ts'
 const ATTENTION = 'src/infra/core/attention.ts'
 const LISTENER = 'src/infra/core/attention-listener.ts'
+const PRE_APPEND = 'src/infra/core/pre-append.ts'
 
 const RACE_GUARDS = 'src/infra/race-guards.test.ts'
 const CORE_TESTS = 'src/infra/core/attention.test.ts'
+const PRE_APPEND_TESTS = 'src/infra/core/pre-append.test.ts'
 const BOUNDARY = 'src/infra/core/boundary.test.ts'
 
 type Edit = { file: string; from: string; to: string }
@@ -188,44 +190,99 @@ const MUTATIONS: Mutation[] = [
     filter: 'stall watchdog: the window is not re-armed',
     edits: [DROP_LANDED_GUARD],
   },
+  // ── THE TWO-ROW RULE (035) ────────────────────────────────────────
+  //
+  // Guards 6 and 7 moved into pure functions in stage 4. A moved guard with one
+  // row proves LESS than it did before the move: the integration row shows the
+  // wiring still holds, the pure row shows the rule itself is still right, and
+  // neither implies the other. Both rows stay for as long as the guards live.
   {
-    guard: 'guard 6',
-    what: 'drop the in-flight reservation from recordAck',
+    guard: 'guard 6 (i)',
+    what: 'drop the in-flight reservation — integration row',
     test: RACE_GUARDS,
     filter: 'claims ids synchronously',
     edits: [
       {
-        file: SERVER,
-        from: `    const claimed = [...new Set(eventIds)].filter((id) => pendingIds.has(id) && !ackInFlight.has(id))`,
-        to: `    const claimed = [...new Set(eventIds)].filter((id) => pendingIds.has(id))`,
+        file: PRE_APPEND,
+        from: `  return [...new Set(requested)].filter((id) => pendingIds.has(id) && !inFlight.has(id))`,
+        to: `  return [...new Set(requested)].filter((id) => pendingIds.has(id))`,
       },
     ],
   },
   {
-    guard: 'guard 7',
-    what: 'compute the auto-clear candidate at the TAIL instead of at entry',
+    guard: 'guard 6 (p)',
+    what: 'drop the in-flight reservation — pure row',
+    test: PRE_APPEND_TESTS,
+    filter: 'drops ids another writer already owns',
+    edits: [
+      {
+        file: PRE_APPEND,
+        from: `  return [...new Set(requested)].filter((id) => pendingIds.has(id) && !inFlight.has(id))`,
+        to: `  return [...new Set(requested)].filter((id) => pendingIds.has(id))`,
+      },
+    ],
+  },
+  {
+    guard: 'guard 6 (d)',
+    what: 'drop the local input dedupe — the half no caller currently exercises',
+    test: PRE_APPEND_TESTS,
+    filter: 'DEDUPES ITS INPUT',
+    edits: [
+      {
+        file: PRE_APPEND,
+        from: `  return [...new Set(requested)].filter((id) => pendingIds.has(id) && !inFlight.has(id))`,
+        to: `  return requested.filter((id) => pendingIds.has(id) && !inFlight.has(id))`,
+      },
+    ],
+  },
+  {
+    guard: 'guard 7 (i)',
+    what: 'compute the auto-clear candidate at the TAIL instead of at entry — integration row',
     test: RACE_GUARDS,
     filter: 'snapshots the auto-clear candidate at ENTRY',
+    // Still expressed at the CALL SITE, because that is where the entry-vs-tail
+    // property lives — the pure function cannot be wrong about a position it
+    // does not control.
     edits: [
       {
         file: SERVER,
-        from: `    if (delivered && autoClearId !== null) {
-      const stillBlocking = pendingProjection.state.filter(
-        (e) => isBlockingEvent(e) && (e.data as { agent?: unknown }).agent === args.to,
-      )
-      if (stillBlocking.length === 1 && (stillBlocking[0] as StoredEvent).id === autoClearId) {
-        await recordAck([autoClearId], 'auto-clear')
-      }
+        from: `    if (delivered && autoClearId !== null && confirmAutoClear(autoClearId, blockingPendingFrom(args.to))) {
+      await recordAck([autoClearId], 'auto-clear')
     }`,
         to: `    if (delivered) {
-      const mutantSenderRole = agents.get(args.from)?.role ?? (senseiNames.has(args.from) ? 'sensei' : undefined)
-      const stillBlocking = pendingProjection.state.filter(
-        (e) => isBlockingEvent(e) && (e.data as { agent?: unknown }).agent === args.to,
-      )
-      if (mutantSenderRole === 'sensei' && agents.get(args.to)?.role === 'user' && stillBlocking.length === 1) {
-        await recordAck([(stillBlocking[0] as StoredEvent).id], 'auto-clear')
-      }
+      const mutantTail = decideAutoClear({
+        senderRole: agents.get(args.from)?.role ?? (senseiNames.has(args.from) ? 'sensei' : undefined),
+        targetRole: agents.get(args.to)?.role,
+        blockingFromTarget: blockingPendingFrom(args.to),
+      })
+      if (mutantTail !== null) await recordAck([mutantTail], 'auto-clear')
     }`,
+      },
+    ],
+  },
+  {
+    guard: 'guard 7 (p)',
+    what: 'let the tail check confirm a DIFFERENT id than the entry candidate — pure row',
+    test: PRE_APPEND_TESTS,
+    filter: 'never clears a DIFFERENT event',
+    edits: [
+      {
+        file: PRE_APPEND,
+        from: `  return blockingFromTarget.length === 1 && blockingFromTarget[0] === candidate`,
+        to: `  return blockingFromTarget.length === 1`,
+      },
+    ],
+  },
+  {
+    guard: 'guard 7 (x)',
+    what: 'drop the exactly-one rule — auto-clear a burst',
+    test: PRE_APPEND_TESTS,
+    filter: 'THE EXACTLY-ONE RULE',
+    edits: [
+      {
+        file: PRE_APPEND,
+        from: `  return view.blockingFromTarget.length === 1 ? (view.blockingFromTarget[0] as number) : null`,
+        to: `  return view.blockingFromTarget.length >= 1 ? (view.blockingFromTarget[0] as number) : null`,
       },
     ],
   },
@@ -281,6 +338,39 @@ const MUTATIONS: Mutation[] = [
         from: `import type { StoredEvent } from '../../es/index.ts'`,
         to: `import type { StoredEvent } from '../../es/index.ts'
 import type { Bridge } from '../bridge.ts'`,
+      },
+    ],
+  },
+  {
+    guard: 'weld 6',
+    what: 'slip an await between the ack claim and the reservation',
+    test: BOUNDARY,
+    filter: 'GUARD 6 WELD',
+    // The failure stage 4 exists to not cause. No behavioural test in the suite
+    // sees this — the integration tests run a transport that never interleaves
+    // at this granularity — so the structural check is the only witness.
+    edits: [
+      {
+        file: SERVER,
+        from: `    if (claimed.length === 0) return [] // already cleared, or another writer owns it
+    for (const id of claimed) ackInFlight.add(id)`,
+        to: `    if (claimed.length === 0) return []
+    await Promise.resolve()
+    for (const id of claimed) ackInFlight.add(id)`,
+      },
+    ],
+  },
+  {
+    guard: 'weld 7',
+    what: 'slip an await before the auto-clear entry snapshot',
+    test: BOUNDARY,
+    filter: 'GUARD 7 WELD',
+    edits: [
+      {
+        file: SERVER,
+        from: `    const autoClearId: number | null = decideAutoClear({`,
+        to: `    await Promise.resolve()
+    const autoClearId: number | null = decideAutoClear({`,
       },
     ],
   },
