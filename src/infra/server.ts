@@ -594,6 +594,11 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     const event = await store.append({ stream, type, data })
     boardProjection.apply(event)
     pendingProjection.apply(event)
+    // `lastTaskContext` was folded at startup but never applied live (fixed
+    // 2026-08, stage 3 commit 0.5). Position matches catchUp()'s order; nothing
+    // between the applies reads it, so the slot is a matter of consistency
+    // rather than semantics.
+    lastTaskContext.apply(event)
     taskActivity.apply(event)
     triggerProjection.apply(event)
     playbookProjection.apply(event)
