@@ -81,7 +81,6 @@ A framework for multi-agent execution where autonomous coding agents work in par
 - Event store: append-only JSONL log, all state changes are events
 - Projections: board (task state) and pending (events for sensei to act on), derived from event stream
 - Stop hook receiver: agents' stop hooks signal here, forwarded to sensei
-- SSE endpoint: `GET /stream` for real-time event broadcast
 - Chat bridge: optional, registers an external surface as a `user` role agent. Transport-agnostic (`src/infra/bridge.ts`) — **Telegram is the default** (its own bot per dojo, since Telegram allows one `getUpdates` poller per token — but a bot is a seconds-long BotFather step, no app/scopes/URL), **Slack** is retained as a legacy option (one app per dojo — Socket Mode can't be shared, and far more setup)
 - No LLM — fast, reliable plumbing
 

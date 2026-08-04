@@ -69,11 +69,8 @@ describe('inbox piggyback', () => {
     expect(inboxRes.inbox?.blocking[0]?.preview).toBe('what about the wine?')
     expect(inboxRes.line).toContain('blocking')
 
-    // SSE must NOT be rebuilt/decorated — the stream endpoint stays streamy.
-    const sse = await fetch(`${BASE}/stream`, { headers: { 'x-jean-agent': 'sensei' } })
-    expect(sse.headers.get('content-type') ?? '').toContain('text/event-stream')
-    expect(sse.headers.get('x-jean-inbox')).toBeNull()
-    await sse.body?.cancel()
+    // (A `GET /stream` case lived here until 2026-08: SSE was removed with zero
+    // consumers, and with it the content-type skip this asserted.)
 
     // Error responses still carry the piggyback (deliberate: cannot-not-know).
     const notFound = await fetch(`${BASE}/definitely-not-a-route`, { headers: { 'x-jean-agent': 'sensei' } })

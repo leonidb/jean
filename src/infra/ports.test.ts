@@ -4,10 +4,10 @@
  *
  * WHY, in stage 1's own words: an injection point nothing exercises is dead code
  * that breaks silently the moment a later stage leans on it. After stage 2 every
- * OTHER test in the suite runs the ambient path, so `now`, `broadcast` and
- * `store` are exercised only through their defaults — a typo'd `??`, or a call
- * site the substitution missed, would keep the whole suite green and surface in
- * stage 3 as a fake clock that mysteriously does nothing.
+ * OTHER test in the suite runs the ambient path, so `now` and `store` are
+ * exercised only through their defaults — a typo'd `??`, or a call site the
+ * substitution missed, would keep the whole suite green and surface in stage 3
+ * as a fake clock that mysteriously does nothing.
  *
  * Each test overrides ONE port and asserts an observable that could not be
  * produced any other way. Two ports are covered elsewhere or not at all:
@@ -106,24 +106,8 @@ describe('injected ports are honoured', () => {
   // logic. It is never relied on, it carries no contract, and nothing branches on
   // it, so an assertion here would pin an implementation detail rather than a
   // behaviour. The port stays threaded (harmless, and it lets a caller capture
-  // output if it ever wants to); it just needs no proof. Going into stage 3 the
-  // core's effect set is six emissions, not seven — `log` stays ambient.
-
-  test('broadcast — recorded events reach the injected sink instead of SSE', async () => {
-    const dataDir = freshDir('broadcast')
-    const seen: StoredEvent[] = []
-    const handle = await createInfraServer({
-      ...baseOpts(dataDir),
-      ports: { spawn: neverSpawn, broadcast: (e) => void seen.push(e) },
-    })
-    try {
-      // `start` is recorded during startup via `void record(...)`, so it may
-      // land just after the factory resolves.
-      expect(await eventually(() => seen.some((e) => e.type === 'start'))).toBe(true)
-    } finally {
-      await handle.stop()
-    }
-  })
+  // output if it ever wants to); it just needs no proof. `log` is not one of the
+  // core's four effects — see ports.ts for how that set was arrived at.
 
   test('store — events land in the injected store, and the default path is never written', async () => {
     const dataDir = freshDir('store')

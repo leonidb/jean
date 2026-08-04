@@ -28,7 +28,7 @@
  * refactor here is a wrong one.
  */
 
-import type { EventStore, StoredEvent } from '../es/index.ts'
+import type { EventStore } from '../es/index.ts'
 import { spawnHeadless } from './librarian.ts'
 
 export type InfraPorts = {
@@ -45,20 +45,15 @@ export type InfraPorts = {
    *  harmless and lets a caller capture output if it ever wants to, but do not
    *  write assertions against it; that would pin an implementation detail.
    *
-   *  Consequently `log` is NOT one of the core's effects — the effect set going
-   *  into stage 3 is six emissions, not seven, and logging stays ambient
-   *  wherever it is convenient. (D1 typed this as `log{level, message}`; the
-   *  level never arrives, for the same reason.) */
+   *  Consequently `log` is NOT one of the core's effects. The effect set going
+   *  into stage 3 is FOUR emissions — `event` (append), `deliver`,
+   *  `schedule`/`unschedule`, `spawn` — arrived at by three rulings against D1's
+   *  original seven: `log` cut here (logging is not logic); `inboxChanged` cut
+   *  because the inbox is core STATE (pull it with a query, push it with a
+   *  `deliver`); `broadcast` cut with the SSE endpoint itself. Logging stays
+   *  ambient wherever it is convenient. (D1 typed this as `log{level, message}`;
+   *  the level never arrives, for the same reason.) */
   log: (message: string) => void
-  /** Publish a stored event to this instance's SSE subscribers.
-   *
-   *  NOTE, because it is the one port whose default is NOT ambient: the default
-   *  is per-instance — it closes over that server's own subscriber set — so the
-   *  factory supplies it rather than `ambientPorts`. Injecting a replacement
-   *  therefore REPLACES the SSE fan-out for that instance; `/stream` will see
-   *  nothing. That is the intended shape (a test wants the emissions, not the
-   *  socket), but it is worth knowing before you override it. */
-  broadcast: (event: StoredEvent) => void
   /** Spawn a headless Claude run.
    *
    *  Injectable since stage 1, and it must stay that way: startup trigger
@@ -75,9 +70,8 @@ export type InfraPorts = {
 /**
  * The ambient defaults: real clock, real stderr, real spawner.
  *
- * `broadcast` and `store` are absent on purpose. Both have per-instance
- * defaults (the SSE subscriber set, and a store bound to that dojo's
- * history.jsonl), so only the factory can build them.
+ * `store` is absent on purpose: its default is per-instance (a store bound to
+ * that dojo's history.jsonl), so only the factory can build it.
  */
 export const ambientPorts: Pick<InfraPorts, 'now' | 'log' | 'spawn'> = {
   now: () => Date.now(),

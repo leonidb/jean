@@ -14,6 +14,8 @@
 
 **Completed** (Mar–Apr). Event-sourced board with JSONL backend. Board is a projection derived from events (task-created, task-status, task-updated). Pending events projection tracks what sensei needs to act on. Full HTTP API for task CRUD, status transitions, event acknowledgment. `jean board` CLI renders kanban view. SSE endpoint (`GET /stream`) for real-time event broadcast. History endpoint with filtering.
 
+> `GET /stream` was **removed 2026-08** (refactor stage 3, commit 0). It was built for a live event feed whose client never materialized — the design went the WS deliver/nudge route instead — and a repo-wide search found zero consumers in `src/cli`, `src/channel` or `scripts`. Recorded here rather than edited out: the milestone did ship it.
+
 ---
 
 ## Milestone 2.5: Agent Management & Dojo Setup ✓

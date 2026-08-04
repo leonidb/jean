@@ -221,15 +221,12 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   // the startup catch-up block both declare their own `const now`, and a
   // factory-scope `now` would be shadowed by one and collide with the other.
   //
-  // `broadcast` defaults to this instance's own SSE fan-out (a function
-  // declaration, so it is hoisted and safe to reference here); `store` defaults
-  // to this dojo's history.jsonl. Both are per-instance, which is why neither
-  // lives in `ambientPorts`.
+  // `store` defaults to this dojo's history.jsonl — per-instance, which is why
+  // it does not live in `ambientPorts`.
   const ports: InfraPorts = {
     now: opts.ports?.now ?? ambientPorts.now,
     log: opts.ports?.log ?? ambientPorts.log,
     spawn: opts.ports?.spawn ?? ambientPorts.spawn,
-    broadcast: opts.ports?.broadcast ?? broadcastSSE,
     store: opts.ports?.store ?? createStore(jsonlBackend(HISTORY_PATH)),
   }
 
@@ -588,23 +585,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     }
   }
 
-  // ── SSE subscribers ──────────────────────────────────────────────
-
-  const sseSubscribers = new Set<{ write: (data: string) => void; close: () => void }>()
-
-  /** The DEFAULT implementation of the `broadcast` port — see ports.ts. Callers
-   *  go through `ports.broadcast`, which is this unless something was injected. */
-  function broadcastSSE(event: StoredEvent) {
-    const json = JSON.stringify(toApiEvent(event))
-    for (const sub of sseSubscribers) {
-      try {
-        sub.write(`data: ${json}\n\n`)
-      } catch {
-        sseSubscribers.delete(sub)
-      }
-    }
-  }
-
   // ── Record event (append + project + side effects) ───────────────
 
   async function record(type: string, stream: string, data: unknown): Promise<StoredEvent> {
@@ -622,8 +602,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     const taskId = taskIdFromStream(stream)
     const agent = (data as Record<string, unknown>)?.agent as string | undefined
     ports.log(`[jean] ${type}${agent ? ` agent=${agent}` : ''}${taskId ? ` task=${taskId}` : ''}\n`)
-
-    ports.broadcast(event)
 
     // Stall-watchdog clock: starts when pending becomes non-empty, clears when drained.
     // A drained queue also ends the machine-nudge episode (attention phase 4): the
@@ -928,8 +906,8 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
   /** Attach the compact inbox line as a response header when the request came
    *  from the sensei's channel plugin (`x-jean-agent`). Header-only — response
-   *  bodies are never mutated, so no consumer's JSON shape can break. Skips SSE
-   *  and non-sensei callers; empty inbox = no header (the empty case costs 0). */
+   *  bodies are never mutated, so no consumer's JSON shape can break. Skips
+   *  non-sensei callers; empty inbox = no header (the empty case costs 0). */
   /** The agent behind an HTTP request, per its `x-jean-agent` header. The channel
    *  plugin percent-encodes the name (HTTP headers are Latin-1-only; a non-ASCII
    *  agent name would otherwise arrive mojibake'd and never match). */
@@ -947,7 +925,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     const caller = callerFromHeader(req)
     if (!caller) return res
     if (agents.get(caller)?.role !== 'sensei') return res
-    if ((res.headers.get('content-type') ?? '').includes('text/event-stream')) return res
     const inbox = senseiInboxNow()
     if (!inbox) return res
     // ATTACH-LEVEL, NOT CONFIRMED READ (review finding [D]). Marking these
@@ -2631,35 +2608,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         if (!includeDiagnostics) events = events.filter((e) => e.type !== 'permission-request')
         if (last) events = events.slice(-Number(last))
         return Response.json({ events: raw ? events : events.map(toApiEvent) })
-      })()
-    }
-
-    // ── SSE stream ──────────────────────────────────────────────
-
-    if (path === '/stream') {
-      return (async () => {
-        const lastId = await store.lastId()
-        const stream = new ReadableStream({
-          start(controller) {
-            const encoder = new TextEncoder()
-            const sub = {
-              write: (data: string) => controller.enqueue(encoder.encode(data)),
-              close: () => controller.close(),
-            }
-            sub.write(`data: ${JSON.stringify({ type: 'connected', lastEventId: lastId })}\n\n`)
-            sseSubscribers.add(sub)
-            req.signal.addEventListener('abort', () => {
-              sseSubscribers.delete(sub)
-            })
-          },
-        })
-        return new Response(stream, {
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            Connection: 'keep-alive',
-          },
-        })
       })()
     }
 
