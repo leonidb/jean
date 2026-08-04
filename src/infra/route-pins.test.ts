@@ -122,6 +122,32 @@ describe('GET /permissions', () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ permissions: {} })
   })
+
+  test('AGGREGATES across requests, and the agent filter selects', async () => {
+    // Added after a review pass pointed out the pin above only ever sees
+    // `count: 1` — so a broken aggregation would have passed it. Counting
+    // repeats is what this route is FOR; a pin that never exercises it is
+    // pinning the shape and not the behaviour.
+    for (const agent of ['w2', 'w2', 'w3']) {
+      await fetch(`${base}/permissions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agent, tool: 'Write' }),
+      })
+    }
+
+    const all = (await (await fetch(`${base}/permissions`)).json()) as Permissions
+    expect(all.permissions.w2?.Write?.count).toBe(2)
+    expect(all.permissions.w3?.Write?.count).toBe(1)
+
+    const filtered = (await (await fetch(`${base}/permissions?agent=w2`)).json()) as Permissions
+    expect(filtered.permissions.w2?.Write?.count).toBe(2)
+    expect(filtered.permissions.w3).toBeUndefined()
+
+    // NOT pinned, on purpose: the 5-sample cap. That is an internal the
+    // protocol build may well reshape, and pinning it would be inventing a
+    // contract rather than recording one.
+  })
 })
 
 describe('GET /playbooks', () => {
