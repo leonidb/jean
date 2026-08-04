@@ -140,11 +140,18 @@ describe('S3 — below the threshold, counts update silently', () => {
 })
 
 describe('S3 — the threshold is a per-role dial', () => {
-  test('DIAL: worker = 1, sensei = 2 (config today, not a requirement)', () => {
-    // 013: "Config values (interval, thresholds, priority heuristic) are
-    // deliberately NOT requirements — they're dials." The ORDER is the
-    // requirement, and it is asserted on the next line rather than on literals.
+  test('REQUIREMENT — a worker’s threshold is lower than the sensei’s', () => {
+    // The requirement is the ORDER: a worker is interrupted by more than the
+    // orchestrator is, because the orchestrator is the one with a queue to
+    // triage. The literals are not part of it.
     expect(thresholdFor('worker')).toBeLessThan(thresholdFor('sensei'))
+  })
+
+  test('DIAL — today’s config is worker = 1, sensei = 2 (config, not requirement)', () => {
+    // 013: "Config values (interval, thresholds, priority heuristic) are
+    // deliberately NOT requirements — they're dials." Split out after Codex
+    // found the original case claiming exactly that and then asserting the
+    // literals anyway. Re-tuning a threshold must break THIS case alone.
     expect(thresholdFor('worker')).toBe(1)
     expect(thresholdFor('sensei')).toBe(2)
   })

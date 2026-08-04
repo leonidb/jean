@@ -24,6 +24,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { Cron } from 'croner'
 import type { InfraPorts } from '../infra/ports.ts'
 import { createInfraServer, type InfraHandle } from '../infra/server.ts'
 import { type ConnectedAgent, connectAgent } from '../infra/test-helpers.ts'
@@ -91,6 +92,26 @@ afterAll(async () => {
 const triggers = async (): Promise<TriggerRow[]> =>
   ((await (await fetch(`${base}/triggers`)).json()) as { triggers: TriggerRow[] }).triggers
 
+/** Gap between a cron's next two firings, in ms. Uses the scheduler's own
+ *  parser rather than a regex over the expression, so `0 9 * * *` and
+ *  `@daily` and anything else croner accepts are judged by what they DO. */
+function cadenceMs(expr: string): number {
+  const cron = new Cron(expr)
+  const first = cron.nextRun()
+  const second = first ? cron.nextRun(first) : null
+  if (!first || !second) throw new Error(`cron never fires twice: ${expr}`)
+  return second.getTime() - first.getTime()
+}
+
+/** Wait for `check` to hold, up to `budgetMs`. Replaces a fixed `Bun.sleep`:
+ *  a sleep long enough to be safe is a slow suite, and one short enough to be
+ *  fast is a flake. Codex's finding — the trigger path is fire-and-forget, so
+ *  there is nothing to await, but there IS something to poll. */
+async function until(check: () => boolean, budgetMs = 3000): Promise<void> {
+  const deadline = Date.now() + budgetMs
+  while (!check() && Date.now() < deadline) await Bun.sleep(10)
+}
+
 describe('S9 — the digest rides the regular trigger scheduler (O1)', () => {
   test('a DAILY digest trigger exists, addressed to the sensei', async () => {
     // The whole of DEVIATION-5 in one assertion: the mechanism was chosen and
@@ -98,10 +119,15 @@ describe('S9 — the digest rides the regular trigger scheduler (O1)', () => {
     const rows = await triggers()
     const digest = rows.find((t) => /digest|parked/i.test(t.id) || /parked|blocked/i.test(t.prompt))
     expect(digest).toBeDefined()
-    // Daily, not a delivery timer — a `cron` schedule, on the same path as every
-    // other calendar-like job.
-    expect(digest?.cron).toBeTruthy()
     expect(digest?.agent).toBe(SENSEI)
+
+    // DAILY IS ASSERTED, NOT JUST "SCHEDULED". Codex's finding: `cron` being
+    // truthy admits hourly and monthly alike, and both break the requirement in
+    // opposite directions — hourly is the interruption S9 forbids, monthly is
+    // the silence it forbids. Judged by the gap between two firings rather than
+    // by the expression's text, so any spelling croner accepts is fair.
+    expect(digest?.cron).toBeTruthy()
+    expect(cadenceMs(digest?.cron as string)).toBe(24 * 60 * 60_000)
   })
 
   test('firing it delivers the parked list to the sensei', async () => {
@@ -114,8 +140,9 @@ describe('S9 — the digest rides the regular trigger scheduler (O1)', () => {
     expect(fired.status).toBe(200)
 
     // The delivery is the scheduler's normal one — no new transport, no second
-    // clock. Give the socket a moment; the trigger path is fire-and-forget.
-    await Bun.sleep(200)
+    // clock. Polled rather than slept on: the trigger path is fire-and-forget,
+    // so there is nothing to await, but a fixed sleep is either slow or flaky.
+    await until(() => sensei.messages.length > before)
     const arrived = sensei.messages.slice(before)
     expect(arrived.length).toBeGreaterThan(0)
     expect(JSON.stringify(arrived)).toMatch(/waiting on the vendor/)
@@ -143,6 +170,11 @@ describe('S9 — the digest rides the regular trigger scheduler (O1)', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ status: 'waiting', actor: 'builder', blockedOn: 'external', blockedNote: 'also vendor' }),
     })
+    // A FIXED WAIT SURVIVES HERE, and only here: this asserts an ABSENCE, and
+    // polling cannot establish one — `until` would return the instant the
+    // condition it is waiting for stays false, which is immediately. The
+    // trade-off is the honest one for a negative: a window long enough that a
+    // push would have arrived within it, at the cost of 200ms.
     await Bun.sleep(200)
     const arrived = sensei.messages.slice(before)
     expect(JSON.stringify(arrived)).not.toMatch(/also parked/)

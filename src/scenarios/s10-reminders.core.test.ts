@@ -81,8 +81,14 @@ describe('S10 — the ladder: reminder, reminder, escalate', () => {
     // in exactly the situation the escalation exists to disambiguate.
     const { r, supervisor } = driver()
     runSilent(supervisor, T0, T0 + 6 * REMINDER_AFTER, T0)
-    const afterEscalation = recipients(r).slice(recipients(r).indexOf(SENSEI))
-    expect(afterEscalation).not.toContain(WORKER)
+
+    // THE PREMISE IS ASSERTED FIRST. Codex's finding: without this line,
+    // `indexOf(SENSEI)` returns -1 when no escalation ever happened,
+    // `slice(-1)` yields the last element, and an implementation that NEVER
+    // escalates passes a test named "after escalation".
+    const who = recipients(r)
+    expect(who).toContain(SENSEI)
+    expect(who.slice(who.indexOf(SENSEI))).not.toContain(WORKER)
   })
 
   test('nothing at all happens inside the first window', () => {

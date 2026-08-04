@@ -137,22 +137,30 @@ describe('S1 — /inbox answers for the CALLER, not for the sensei', () => {
     // carrier was never worth adding. This is the surface that unblocks it.
     const ask = async (caller: string) =>
       (await (await fetch(`${base}/inbox`, { headers: { 'x-jean-agent': caller } })).json()) as {
-        inbox: unknown
+        inbox: { queued: { count: number } } | null
         line: string | null
       }
 
-    // `scribe` has nothing addressed to it; the sensei's queue is not empty.
-    // Different filters over one list (ruling (c)), so the answers must differ.
-    const mine = await ask('scribe')
-    const senseis = await ask(SENSEI)
-    expect(senseis.inbox).not.toBeNull()
-    expect(mine.inbox).toBeNull()
+    const busy = await ask(WORKER) // has the seeded task-created addressed to it
+    const idle = await ask('scribe') // has nothing addressed to it
+    const senseis = await ask(SENSEI) // sees everything it did not produce
 
-    // ASSERTED ON MEMBERSHIP, NOT ON DEEP EQUALITY. An earlier draft compared
-    // the two whole responses with `not.toEqual` and passed two runs in three —
-    // the inbox carries `waitedMs`/`oldestMs` computed from the wall clock, so
-    // two successive calls differ by a millisecond or two and the assertion held
-    // for a reason that had nothing to do with the requirement. A red suite that
-    // flickers green is worse than one that is honestly red.
+    // BOTH DIRECTIONS, and the positive one is the point. Codex's finding: the
+    // first draft asserted only that an idle worker does NOT get the sensei's
+    // queue, which an implementation returning `null` for every worker passes —
+    // it would prove the carrier is broken rather than that it is per-agent.
+    expect(idle.inbox).toBeNull()
+    expect(busy.inbox).not.toBeNull()
+    expect(busy.inbox?.queued.count).toBe(1)
+    // ...and the sensei's mailbox is a different filter of the same list, so it
+    // holds strictly more (the registrations, at minimum).
+    expect(senseis.inbox?.queued.count).toBeGreaterThan(busy.inbox?.queued.count as number)
+
+    // ASSERTED ON COUNTS, NOT ON DEEP EQUALITY. An earlier draft compared two
+    // whole responses with `not.toEqual` and passed two runs in three — the
+    // inbox carries `waitedMs`/`oldestMs` off the wall clock, so successive
+    // calls differ by a millisecond and the assertion held for a reason that had
+    // nothing to do with the requirement. A red suite that flickers green is
+    // worse than one that is honestly red.
   })
 })

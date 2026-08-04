@@ -23,7 +23,7 @@ it runs. A bare `bun test` runs everything, including this.
 The board comment on task 044 is the authoritative count. In the files, each test
 declares its kind in its own title when it is not simply red:
 
-- **RED** (the default, 157 of 167) — the requirement is not met. Two flavours,
+- **RED** (the default, 161 of 169) — the requirement is not met. Two flavours,
   and the difference matters when you are deciding what to build next:
   - *red by stub*: it calls a `src/infra/target/` surface that throws
     `NotImplemented: <surface> — required by <scenario>`. The failure names the

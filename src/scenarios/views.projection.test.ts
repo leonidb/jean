@@ -67,8 +67,14 @@ describe('CONTRACT — every mailbox is a consistent filter of one pending list'
     // projection wearing a filter's clothes, which is exactly what ruling (c)
     // says not to build.
     for (const e of mine) expect(pending).toContain(e)
-    // Order preserved — ids ascend as they do in the source list.
-    expect(mine.map((e) => e.id)).toEqual([...mine].sort((a, b) => a.id - b.id).map((e) => e.id))
+
+    // ORDER PRESERVED, STATED AGAINST THE SOURCE LIST. The first draft compared
+    // `mine`'s ids to `mine`'s own ids SORTED — which proves `mine` is sorted,
+    // not that it preserves `pending`'s order. The two coincide only because
+    // this fixture happens to be built in ascending id order, so the assertion
+    // would have kept passing over a mailbox that had reordered the queue.
+    // Codex's finding; the requirement is a filter, and a filter cannot reorder.
+    expect(mine.map((e) => e.id)).toEqual(pending.filter((e) => mine.includes(e)).map((e) => e.id))
   })
 
   test('an event is in a mailbox IFF that agent’s rule admits it — no second condition', () => {
@@ -183,15 +189,22 @@ describe('the three views — the triage ladder (S4, S5)', () => {
 // ── OPAQUE PRIORITY ──────────────────────────────────────────────────
 
 describe('priority is an opaque number — order only, no semantics anywhere agent-facing', () => {
-  test('DIAL: external channel outranks everything else (today: 2 vs 1)', () => {
-    // The 2-and-1 are config, not requirement (013: "Config values … are
-    // deliberately NOT requirements"). What IS required is the ORDER, asserted
-    // on the next line rather than on the literals.
-    const human = priorityOf(humanSays(HUMAN), ctx)
-    const worker = priorityOf(workerSays(WORKER), ctx)
-    expect(human).toBeGreaterThan(worker)
-    expect(human).toBe(2)
-    expect(worker).toBe(1)
+  test('REQUIREMENT — an external channel outranks everything else', () => {
+    // The requirement is the ORDER and nothing else: "agents know only that
+    // higher outranks lower". Split from the literals below after Codex found
+    // the contradiction — the original case said the numbers were not a
+    // requirement and then asserted them, which is precisely the
+    // over-specification the suite's own rule forbids.
+    expect(priorityOf(humanSays(HUMAN), ctx)).toBeGreaterThan(priorityOf(workerSays(WORKER), ctx))
+  })
+
+  test('DIAL — today’s heuristic is 2 for external, 1 otherwise (config, not requirement)', () => {
+    // Kept, but quarantined in its own case: 013 says config values "are
+    // deliberately NOT requirements", so re-tuning the heuristic must break THIS
+    // test and nothing else. If a dial change turns any other case red, the
+    // change was not a dial.
+    expect(priorityOf(humanSays(HUMAN), ctx)).toBe(2)
+    expect(priorityOf(workerSays(WORKER), ctx)).toBe(1)
   })
 
   test('every event gets a number — the heuristic is total', () => {
