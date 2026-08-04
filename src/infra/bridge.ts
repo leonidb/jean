@@ -113,12 +113,18 @@ export type BridgeHealth = {
 
 /** A poll gap beyond this is reported. Telegram holds getUpdates ~50s and the
  *  fetch aborts at 55s, so a healthy loop always cycles inside ~55s; 2 minutes
- *  is clear of that without being slack. */
-const POLL_GAP_WARN_MS = Number(process.env.JEAN_BRIDGE_POLL_GAP_MS ?? 120_000)
+ *  is clear of that without being slack.
+ *
+ *  READ AT CALL TIME, not at import (refactor stage 2). Frozen at import, these
+ *  two could only be varied per-PROCESS — fine for the spawn suite, which sets
+ *  `JEAN_*` per subprocess, but unusable from an in-process test, where every
+ *  file shares one process and one module instance. */
+const pollGapWarnMs = () => Number(process.env.JEAN_BRIDGE_POLL_GAP_MS ?? 120_000)
 /** An inbound arriving older than this is reported. Normal is sub-second; the
  *  incident was 9m27s. PROVISIONAL — pending the stderr scrollback for the
- *  08:47–08:56Z window, which is what would tell us the real jitter floor. */
-const INBOUND_LAG_WARN_MS = Number(process.env.JEAN_BRIDGE_LAG_MS ?? 60_000)
+ *  08:47–08:56Z window, which is what would tell us the real jitter floor.
+ *  Read at call time, same reason as above. */
+const inboundLagWarnMs = () => Number(process.env.JEAN_BRIDGE_LAG_MS ?? 60_000)
 
 /**
  * Health tracker for a polling bridge. Clock is always injected so the whole
@@ -153,8 +159,9 @@ export function createBridgeHealth() {
       } else {
         consecutiveFailures++
       }
-      if (gap !== null && gap > POLL_GAP_WARN_MS) {
-        return `poll gap ${Math.round(gap / 1000)}s (threshold ${Math.round(POLL_GAP_WARN_MS / 1000)}s) — the poll loop was stalled, not the chat`
+      const threshold = pollGapWarnMs()
+      if (gap !== null && gap > threshold) {
+        return `poll gap ${Math.round(gap / 1000)}s (threshold ${Math.round(threshold / 1000)}s) — the poll loop was stalled, not the chat`
       }
       return null
     },
@@ -174,8 +181,9 @@ export function createBridgeHealth() {
       const lag = Math.max(0, now - sentAt)
       lastInboundLagMs = lag
       if (maxInboundLagMs === null || lag > maxInboundLagMs) maxInboundLagMs = lag
-      if (lag > INBOUND_LAG_WARN_MS) {
-        return `inbound lagged ${Math.round(lag / 1000)}s from send to receipt (threshold ${Math.round(INBOUND_LAG_WARN_MS / 1000)}s) — the surface held it, our poll loop was healthy`
+      const threshold = inboundLagWarnMs()
+      if (lag > threshold) {
+        return `inbound lagged ${Math.round(lag / 1000)}s from send to receipt (threshold ${Math.round(threshold / 1000)}s) — the surface held it, our poll loop was healthy`
       }
       return null
     },

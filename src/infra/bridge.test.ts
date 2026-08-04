@@ -84,6 +84,28 @@ describe('createBridgeHealth — poll liveness', () => {
     expect(warn).toContain('poll loop was stalled')
   })
 
+  test('the threshold is read at CALL time, so it can be varied per test', () => {
+    // Refactor stage 2: this env var used to be frozen into a module constant at
+    // import, which meant it could only be varied per PROCESS — workable for the
+    // spawn suite (a fresh subprocess each) and impossible in-process, where all
+    // files share one module instance. Pinning the call-time read here so it
+    // cannot quietly regress to an import-time constant.
+    const saved = process.env.JEAN_BRIDGE_POLL_GAP_MS
+    try {
+      process.env.JEAN_BRIDGE_POLL_GAP_MS = String(s(10))
+      const h = createBridgeHealth()
+      h.recordPoll(true, T0)
+      // 60s: far inside the 120s default, well beyond the 10s override. Under
+      // the old import-time constant this returned null.
+      const warn = h.recordPoll(true, T0 + s(60))
+      expect(warn).toContain('poll gap 60s')
+      expect(warn).toContain('threshold 10s')
+    } finally {
+      if (saved === undefined) delete process.env.JEAN_BRIDGE_POLL_GAP_MS
+      else process.env.JEAN_BRIDGE_POLL_GAP_MS = saved
+    }
+  })
+
   test('failures accumulate and a success resets them; lastPollOkAt tracks only successes', () => {
     const h = createBridgeHealth()
     h.recordPoll(true, T0)

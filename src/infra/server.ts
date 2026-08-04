@@ -33,15 +33,10 @@ import { resolveConnectors } from './connectors/config.ts'
 import { SourceQueue } from './connectors/queue.ts'
 import { createSourceConnector, sourceContext } from './connectors/source.ts'
 import { buildInbox, isUserSender, renderInboxLine, renderInboxWake } from './inbox.ts'
-import {
-  commitConsolidation,
-  type LibrarianPhase,
-  probeAnthropicAPI,
-  recoverWikiLayout,
-  spawnHeadless,
-} from './librarian.ts'
+import { commitConsolidation, type LibrarianPhase, probeAnthropicAPI, recoverWikiLayout } from './librarian.ts'
 import { type AgentSession, classifySession, envMs } from './liveness.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
+import { ambientPorts, type InfraPorts } from './ports.ts'
 import {
   AGENT_ROLES,
   type AgentRole,
@@ -134,11 +129,15 @@ export type CreateInfraServerOptions = {
    *  machine-global registry. Default `true` — the CLI's behaviour. In-process
    *  callers want `false`; that registry is shared by every dojo on the box. */
   writeRuntimeFiles?: boolean
-  /** How a headless trigger spawns Claude. Defaults to the real spawner.
-   *  Injectable because startup trigger catch-up fires overdue headless triggers
-   *  straight out of whatever history it finds — an in-process caller with a
-   *  stale fixture must not be able to launch real `claude` processes. */
-  spawnHeadless?: typeof spawnHeadless
+  /** Override any subset of the port set — the ambient effects this server
+   *  reaches for (clock, stderr, SSE fan-out, headless spawn, event store).
+   *  Anything omitted keeps its default, and every default IS today's ambient
+   *  behaviour, so `{}` and "not passed at all" are the same server. See
+   *  ports.ts, including the position rule that governs `now`.
+   *
+   *  Replaces stage 1's standalone `spawnHeadless` option: one injection
+   *  mechanism, not two. `ports.spawn` is the same knob under its port name. */
+  ports?: Partial<InfraPorts>
   /** Fired at ONE precise moment: after the store and projections are up, and
    *  immediately before the single-instance check. That is exactly where the
    *  pre-refactor module body registered its process.on('exit'|'SIGINT'|
@@ -202,7 +201,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   // inner functions take their own `opts` parameter (runHeadlessAttempt,
   // runPhaseWithRetries) and shadow this one — reading `opts.x` deeper in the
   // body would silently read the wrong object.
-  const spawnHeadlessImpl = opts.spawnHeadless ?? spawnHeadless
   const shouldEnforceSingleInstance = opts.enforceSingleInstance !== false
   const shouldWriteRuntimeFiles = opts.writeRuntimeFiles !== false
   const portOverride = opts.port
@@ -213,13 +211,35 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   const HISTORY_PATH = resolve(DATA_DIR, 'history.jsonl')
   const SNAPSHOT_DIR = DATA_DIR
 
+  // ── Ports ────────────────────────────────────────────────────────
+  //
+  // Bound ONCE, here, and thereafter called as `ports.x()` at each original
+  // call site. Binding the functions early and calling them late is the whole
+  // trick: the reference is captured at construction, but every VALUE is still
+  // read at the moment the old ambient call read it. Deliberately NOT
+  // destructured into bare `now`/`log` locals — `record()`'s route handler and
+  // the startup catch-up block both declare their own `const now`, and a
+  // factory-scope `now` would be shadowed by one and collide with the other.
+  //
+  // `broadcast` defaults to this instance's own SSE fan-out (a function
+  // declaration, so it is hoisted and safe to reference here); `store` defaults
+  // to this dojo's history.jsonl. Both are per-instance, which is why neither
+  // lives in `ambientPorts`.
+  const ports: InfraPorts = {
+    now: opts.ports?.now ?? ambientPorts.now,
+    log: opts.ports?.log ?? ambientPorts.log,
+    spawn: opts.ports?.spawn ?? ambientPorts.spawn,
+    broadcast: opts.ports?.broadcast ?? broadcastSSE,
+    store: opts.ports?.store ?? createStore(jsonlBackend(HISTORY_PATH)),
+  }
+
   // Chat bridge (Telegram / Slack, optional) — selected from config, wired at
   // startup by initBridge(). Null when no surface is configured.
   const bridge: Bridge | null = selectBridge(config)
 
   // ── Event store & projections ────────────────────────────────────
 
-  const store: EventStore = createStore(jsonlBackend(HISTORY_PATH))
+  const store: EventStore = ports.store
 
   const boardProjection = createProjection<Board>({
     name: 'board',
@@ -385,7 +405,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       })
     }
     if (peers.size > 0) {
-      process.stderr.write(`[jean] loaded ${peers.size} peer(s): ${[...peers.keys()].join(', ')}\n`)
+      ports.log(`[jean] loaded ${peers.size} peer(s): ${[...peers.keys()].join(', ')}\n`)
     }
   }
 
@@ -432,7 +452,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   function touchAgent(name: string | null | undefined): void {
     if (!name) return
     const entry = agents.get(name)
-    if (entry) entry.lastActivityAt = Date.now()
+    if (entry) entry.lastActivityAt = ports.now()
   }
 
   /** Session class at read time. A disconnected agent is normally absent from the
@@ -444,7 +464,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         ...(entry.lastActivityAt !== undefined && { lastActivityAt: entry.lastActivityAt }),
         ...(entry.isLive && { transportLive: entry.isLive() }),
       },
-      Date.now(),
+      ports.now(),
     )
   }
 
@@ -572,6 +592,8 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
   const sseSubscribers = new Set<{ write: (data: string) => void; close: () => void }>()
 
+  /** The DEFAULT implementation of the `broadcast` port — see ports.ts. Callers
+   *  go through `ports.broadcast`, which is this unless something was injected. */
   function broadcastSSE(event: StoredEvent) {
     const json = JSON.stringify(toApiEvent(event))
     for (const sub of sseSubscribers) {
@@ -599,9 +621,9 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
     const taskId = taskIdFromStream(stream)
     const agent = (data as Record<string, unknown>)?.agent as string | undefined
-    process.stderr.write(`[jean] ${type}${agent ? ` agent=${agent}` : ''}${taskId ? ` task=${taskId}` : ''}\n`)
+    ports.log(`[jean] ${type}${agent ? ` agent=${agent}` : ''}${taskId ? ` task=${taskId}` : ''}\n`)
 
-    broadcastSSE(event)
+    ports.broadcast(event)
 
     // Stall-watchdog clock: starts when pending becomes non-empty, clears when drained.
     // A drained queue also ends the machine-nudge episode (attention phase 4): the
@@ -609,7 +631,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     if (pendingProjection.state.length === 0) {
       pendingSince = null
       resetNudgeEpisode()
-    } else pendingSince ??= Date.now()
+    } else pendingSince ??= ports.now()
 
     // Blocking episode ends the moment blocking drains (ack) — reset here, not
     // only on the backoff tick, so a new human message right after a drain gets
@@ -693,7 +715,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
   function senseiInboxNow() {
     return buildInbox(pendingEvents(), {
-      now: Date.now(),
+      now: ports.now(),
       roleOf: (n) => agents.get(n)?.role ?? (userAgentNames.has(n) ? 'user' : undefined),
     })
   }
@@ -853,9 +875,9 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // wake is retried on the next tick (≤15s) instead of after a backoff window
     // — the same treatment the no-sensei-at-all case already gets above.
     if (!landed) return
-    pendingSince = Date.now()
+    pendingSince = ports.now()
     sensei.idle = false
-    lastBlockingWakeAt = Date.now()
+    lastBlockingWakeAt = ports.now()
     blockingWakeCount++
     stampDelivery('wake')
     void record('nudge', SYSTEM_STREAM, {
@@ -874,7 +896,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // hadBlockingBefore=false across record()'s await — without this check the
     // second would fire a duplicate immediate wake. A very recent blocking wake
     // means the episode is already live; the backoff loop owns any re-wake.
-    if (blockingWakeCount > 0 && Date.now() - lastBlockingWakeAt < 30_000) return
+    if (blockingWakeCount > 0 && ports.now() - lastBlockingWakeAt < 30_000) return
     blockingWakeCount = 0 // fresh episode — reset any stale backoff state
     wakeSenseiBlocking()
   }
@@ -901,7 +923,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       return
     }
     const delay = BLOCKING_BACKOFF_MS[Math.min(blockingWakeCount - 1, BLOCKING_BACKOFF_MS.length - 1)] as number
-    if (Date.now() - lastBlockingWakeAt >= delay) wakeSenseiBlocking()
+    if (ports.now() - lastBlockingWakeAt >= delay) wakeSenseiBlocking()
   }, blockingTickMs)
 
   /** Attach the compact inbox line as a response header when the request came
@@ -1044,7 +1066,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
   // Stall-watchdog clock: when pending last went non-empty, or when the last
   // nudge (either kind) fired — whichever is later. Null while pending is empty.
-  let pendingSince: number | null = pendingProjection.state.length > 0 ? Date.now() : null
+  let pendingSince: number | null = pendingProjection.state.length > 0 ? ports.now() : null
 
   // ── Machine-nudge episode backoff (attention phase 4) ────────────
   //
@@ -1106,7 +1128,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     if (nudgeCount === 0) return true
     if (pendingHasNewContent()) return true
     const delay = NUDGE_BACKOFF_MS[Math.min(nudgeCount - 1, NUDGE_BACKOFF_MS.length - 1)] as number
-    return Date.now() - lastNudgeAt >= delay
+    return ports.now() - lastNudgeAt >= delay
   }
 
   function nudgeSenseiIfIdle() {
@@ -1130,10 +1152,10 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // nudgeCount/lastNudgeAt here would suppress re-announcement for a whole
     // backoff window — pre-phase-4, the next /agent-idle simply re-nudged.
     if (!landed) return
-    pendingSince = Date.now()
+    pendingSince = ports.now()
     sensei.idle = false
     nudgeCount++
-    lastNudgeAt = Date.now()
+    lastNudgeAt = ports.now()
     for (const e of pendingProjection.state) {
       if (e.id > maxNudgedPendingId) maxNudgedPendingId = e.id
     }
@@ -1184,7 +1206,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // window (that would silence the backstop for another full period) or leave a
     // `nudge` event claiming a reminder was sent. It simply retries next tick.
     if (!landed) return
-    pendingSince = Date.now()
+    pendingSince = ports.now()
     sensei.idle = false
     stampDelivery('heartbeat')
     void record('nudge', SYSTEM_STREAM, {
@@ -1195,7 +1217,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
   const stallTick = setInterval(
     () => {
-      if (pendingSince !== null && Date.now() - pendingSince >= STALL_NUDGE_AFTER_MS) fireStallWatchdog()
+      if (pendingSince !== null && ports.now() - pendingSince >= STALL_NUDGE_AFTER_MS) fireStallWatchdog()
     },
     Math.min(STALL_NUDGE_AFTER_MS, 60_000),
   )
@@ -1220,7 +1242,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       desc = `(at ${trigger.at})`
     }
     cronJobs.set(trigger.id, job)
-    process.stderr.write(`[jean] trigger ${trigger.id} scheduled ${desc}\n`)
+    ports.log(`[jean] trigger ${trigger.id} scheduled ${desc}\n`)
   }
 
   function stopTriggerJob(id: string) {
@@ -1240,7 +1262,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       if (cronJobs.has(trigger.id)) continue
 
       // One-off trigger whose time has passed — fire immediately
-      if (trigger.at && new Date(trigger.at).getTime() <= Date.now()) {
+      if (trigger.at && new Date(trigger.at).getTime() <= ports.now()) {
         void fireTrigger(trigger)
         continue
       }
@@ -1299,9 +1321,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       const probe = await probeAnthropicAPI()
       probeLatencyMs = probe.latencyMs
       if (!probe.ok) {
-        process.stderr.write(
-          `[jean] trigger ${trigger.id}${attemptTag} probe failed (${probe.latencyMs}ms): ${probe.error}\n`,
-        )
+        ports.log(`[jean] trigger ${trigger.id}${attemptTag} probe failed (${probe.latencyMs}ms): ${probe.error}\n`)
         void record('headless-completed', TRIGGERS_STREAM, {
           triggerId: trigger.id,
           role,
@@ -1315,20 +1335,20 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         } satisfies HeadlessCompletedData)
         return { succeeded: false }
       }
-      process.stderr.write(`[jean] trigger ${trigger.id}${attemptTag} probe ok (${probe.latencyMs}ms)\n`)
+      ports.log(`[jean] trigger ${trigger.id}${attemptTag} probe ok (${probe.latencyMs}ms)\n`)
     }
 
-    process.stderr.write(
+    ports.log(
       `[jean] trigger ${trigger.id}${attemptTag}${phaseLog} fired → headless ${role}${model ? ` (${model})` : ''}\n`,
     )
     // Tee stdout to a per-run JSONL so a killed run still leaves a trace
     // showing which tool call stalled.
-    const startIso = new Date().toISOString().replace(/[:.]/g, '-')
+    const startIso = new Date(ports.now()).toISOString().replace(/[:.]/g, '-')
     const streamSinkPath = phase
       ? `.jean/.headless/${role}-${trigger.id}-${phase.tag}-${startIso}.jsonl`
       : `.jean/.headless/${role}-${trigger.id}-${startIso}.jsonl`
     try {
-      const result = await spawnHeadlessImpl({
+      const result = await ports.spawn({
         dojoRoot,
         role,
         prompt: phase?.promptOverride ?? trigger.prompt,
@@ -1351,13 +1371,13 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         ...(probeLatencyMs !== undefined && { probeLatencyMs }),
         streamPath: streamSinkPath,
       } satisfies HeadlessCompletedData)
-      process.stderr.write(
+      ports.log(
         `[jean] trigger ${trigger.id}${attemptTag} headless ${role} done: exit=${result.exitCode} duration=${result.durationMs}ms${result.timedOut ? ' TIMED-OUT' : ''}${result.parsed?.sessionId ? ` session=${result.parsed.sessionId}` : ''}\n`,
       )
       return { succeeded: result.exitCode === 0 }
     } catch (err) {
       recordHeadlessFailure(trigger.id, role, String(err), totalAttempts > 1 ? attempt : undefined)
-      process.stderr.write(`[jean] trigger ${trigger.id}${attemptTag} headless ${role} spawn failed: ${err}\n`)
+      ports.log(`[jean] trigger ${trigger.id}${attemptTag} headless ${role} spawn failed: ${err}\n`)
       return { succeeded: false }
     }
   }
@@ -1408,7 +1428,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       })
       if (succeeded && (postCheck === undefined || postCheck())) return true
       if (attempt < totalAttempts) {
-        process.stderr.write(
+        ports.log(
           `[jean] trigger ${trigger.id} ${phase.tag} retrying in ${HEADLESS_RETRY_BACKOFF_MS}ms (${attempt + 1}/${totalAttempts})\n`,
         )
         await Bun.sleep(HEADLESS_RETRY_BACKOFF_MS)
@@ -1443,7 +1463,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       postCheck: () => existsSync(planPath),
     })
     if (!draftOk) {
-      process.stderr.write(`[jean] trigger ${trigger.id} draft phase failed all attempts; aborting\n`)
+      ports.log(`[jean] trigger ${trigger.id} draft phase failed all attempts; aborting\n`)
       return
     }
 
@@ -1461,7 +1481,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       // are load-bearing. Sweep plan.json so the next run starts clean;
       // pre-spawn recoverWikiLayout handles staging/.
       rmSync(planPath, { force: true })
-      process.stderr.write(`[jean] trigger ${trigger.id} review phase failed; not committing\n`)
+      ports.log(`[jean] trigger ${trigger.id} review phase failed; not committing\n`)
       return
     }
 
@@ -1472,11 +1492,11 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         recordEvent: (data) => record('wiki-consolidated', SYSTEM_STREAM, data),
       })
       const anomalyCount = result.emitted.anomalies?.length ?? 0
-      process.stderr.write(
+      ports.log(
         `[jean] trigger ${trigger.id} commit done — swapped=${result.swapped} pages=${result.pageCount} anomalies=${anomalyCount}\n`,
       )
     } catch (err) {
-      process.stderr.write(`[jean] trigger ${trigger.id} commit failed: ${err}\n`)
+      ports.log(`[jean] trigger ${trigger.id} commit failed: ${err}\n`)
     }
   }
 
@@ -1488,11 +1508,11 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       try {
         const rec = recoverWikiLayout(dojoRoot)
         if (rec.recovered !== 'none') {
-          process.stderr.write(`[jean] librarian wiki layout recovered (${rec.recovered})\n`)
+          ports.log(`[jean] librarian wiki layout recovered (${rec.recovered})\n`)
         }
       } catch (err) {
         recordHeadlessFailure(trigger.id, role, `wiki layout recovery failed: ${err}`)
-        process.stderr.write(`[jean] librarian aborted: ${err}\n`)
+        ports.log(`[jean] librarian aborted: ${err}\n`)
         return
       }
       // The wiki-consolidation trigger is the only headless librarian flow we
@@ -1523,7 +1543,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       })
       if (succeeded) return
       if (attempt < totalAttempts) {
-        process.stderr.write(
+        ports.log(
           `[jean] trigger ${trigger.id} retrying in ${HEADLESS_RETRY_BACKOFF_MS}ms (attempt ${attempt + 1}/${totalAttempts})\n`,
         )
         await Bun.sleep(HEADLESS_RETRY_BACKOFF_MS)
@@ -1535,8 +1555,8 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
    *  Used by the startup catch-up loop to sequentialize spawns and avoid
    *  parallel-Claude stampede. Polls every 1s up to 15 minutes. */
   async function waitForHeadlessCompletion(triggerId: string, timeoutMs = 15 * 60 * 1000): Promise<void> {
-    const start = Date.now()
-    while (Date.now() - start < timeoutMs) {
+    const start = ports.now()
+    while (ports.now() - start < timeoutMs) {
       const events = await store.read({ stream: TRIGGERS_STREAM })
       const completion = events.find(
         (e) =>
@@ -1547,7 +1567,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       if (completion) return
       await Bun.sleep(1000)
     }
-    process.stderr.write(`[jean] catch-up: gave up waiting for ${triggerId} after ${timeoutMs}ms\n`)
+    ports.log(`[jean] catch-up: gave up waiting for ${triggerId} after ${timeoutMs}ms\n`)
   }
 
   async function fireTrigger(trigger: Trigger) {
@@ -1585,7 +1605,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       delivered,
     } satisfies SendData)
 
-    process.stderr.write(`[jean] trigger ${trigger.id} fired → ${trigger.agent}\n`)
+    ports.log(`[jean] trigger ${trigger.id} fired → ${trigger.agent}\n`)
   }
 
   // ── Playbook file watcher ────────────────────────────────────────
@@ -1619,7 +1639,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     try {
       if (!existsSync(PLAYBOOKS_DIR)) {
         mkdirSync(PLAYBOOKS_DIR, { recursive: true })
-        process.stderr.write(`[jean] created ${PLAYBOOKS_DIR}\n`)
+        ports.log(`[jean] created ${PLAYBOOKS_DIR}\n`)
       }
 
       const dir = readdirSync(PLAYBOOKS_DIR)
@@ -1642,7 +1662,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         const existing = known.get(id)
         if (!existing) {
           await record('playbook-created', PLAYBOOKS_STREAM, { id, content, hash } satisfies PlaybookCreatedData)
-          process.stderr.write(`[jean] playbook created: ${id}\n`)
+          ports.log(`[jean] playbook created: ${id}\n`)
         } else if (existing.hash !== hash) {
           await record('playbook-updated', PLAYBOOKS_STREAM, {
             id,
@@ -1650,7 +1670,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
             hash,
             prevHash: existing.hash,
           } satisfies PlaybookUpdatedData)
-          process.stderr.write(`[jean] playbook updated: ${id}\n`)
+          ports.log(`[jean] playbook updated: ${id}\n`)
         }
       }
 
@@ -1660,7 +1680,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
             id,
             lastHash: playbook.hash,
           } satisfies PlaybookRemovedData)
-          process.stderr.write(`[jean] playbook removed: ${id}\n`)
+          ports.log(`[jean] playbook removed: ${id}\n`)
         }
       }
     } finally {
@@ -1687,7 +1707,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         void reconcilePlaybooks()
       }, 200)
     })
-    process.stderr.write(`[jean] watching ${PLAYBOOKS_DIR} for changes\n`)
+    ports.log(`[jean] watching ${PLAYBOOKS_DIR} for changes\n`)
   }
 
   // ── Chat bridge (Telegram / Slack, optional) ──────────────────────
@@ -1736,7 +1756,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       saveAttachment: (data, filename) => {
         mkdirSync(INBOX_DIR, { recursive: true })
         const safe = filename.replace(/[^\w.-]/g, '_')
-        const dest = resolve(INBOX_DIR, `${Date.now()}-${safe}`)
+        const dest = resolve(INBOX_DIR, `${ports.now()}-${safe}`)
         writeFileSync(dest, data)
         return dest
       },
@@ -1754,19 +1774,19 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     for (const cfg of resolveConnectors(config).filter((c) => c.role === 'source')) {
       const connector = createSourceConnector(cfg)
       if (!connector) {
-        process.stderr.write(`[jean] source "${cfg.instance}" (${cfg.kind}): no implementation yet — skipped\n`)
+        ports.log(`[jean] source "${cfg.instance}" (${cfg.kind}): no implementation yet — skipped\n`)
         continue
       }
       const queue = new SourceQueue(DATA_DIR, cfg.instance)
       const attachDir = resolve(DATA_DIR, 'sources', cfg.instance, 'attachments')
       const saveAttachment = (data: Uint8Array, name: string): string => {
         mkdirSync(attachDir, { recursive: true })
-        const dest = resolve(attachDir, `${Date.now()}-${name.replace(/[^\w.-]/g, '_')}`)
+        const dest = resolve(attachDir, `${ports.now()}-${name.replace(/[^\w.-]/g, '_')}`)
         writeFileSync(dest, data)
         return dest
       }
       void connector.start(sourceContext(queue, saveAttachment))
-      process.stderr.write(`[jean] source started: ${cfg.instance} (${cfg.kind})\n`)
+      ports.log(`[jean] source started: ${cfg.instance} (${cfg.kind})\n`)
     }
   }
 
@@ -1814,7 +1834,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         `[jean] error: port ${PORT} is in use by another process\n` +
         `       run 'jean config set port <other>' to change\n`
     }
-    process.stderr.write(message)
+    ports.log(message)
     throw new InfraStartError(message)
   }
 
@@ -1835,7 +1855,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // Port is free. Any leftover pid/port files are stale from a crash.
     const { pid: stalePid } = readRuntimeFiles(DATA_DIR)
     if (stalePid !== null) {
-      process.stderr.write(`[jean] cleaning up stale pid/port files (pid ${stalePid})\n`)
+      ports.log(`[jean] cleaning up stale pid/port files (pid ${stalePid})\n`)
       try {
         unlinkSync(PID_FILE)
       } catch {}
@@ -2168,7 +2188,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
           )
         }
         logRetrieval({
-          at: new Date().toISOString(),
+          at: new Date(ports.now()).toISOString(),
           from: url.searchParams.get('from') ?? undefined,
           query: q,
           scope,
@@ -2221,7 +2241,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         const entry = agents.get(agentName)
 
         if (sessionId && entry?.sessionId && sessionId !== entry.sessionId) {
-          process.stderr.write(
+          ports.log(
             `[jean] WARNING: agent-idle for "${agentName}" from stale session ${sessionId} (current: ${entry.sessionId})\n`,
           )
           void record('agent-idle', agentStream(agentName), {
@@ -2235,7 +2255,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         }
 
         if (!entry) {
-          process.stderr.write(`[jean] WARNING: agent-idle for "${agentName}" but agent is not connected\n`)
+          ports.log(`[jean] WARNING: agent-idle for "${agentName}" but agent is not connected\n`)
           void record('agent-idle', agentStream(agentName), { agent: agentName, role: 'unknown', disconnected: true })
           return Response.json({ ok: false, error: 'agent not connected' })
         }
@@ -2655,7 +2675,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       // SURFACING ONLY — no auto-demotion, ever. Statuses are sensei-owned and
       // single-writer; infra inform, it does not obligate. The sensei's
       // housekeeping ritual decides: ping the worker, or park it to `waiting`.
-      const now = Date.now()
+      const now = ports.now()
       const tasks = boardProjection.state.tasks.map((t) => {
         // Pre-phase-4 tasks have no recorded stream activity in this projection's
         // replay window; updatedAt is the honest floor.
@@ -2733,7 +2753,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
                 connected: bridge.connected(),
                 target: bridge.target,
                 lastPollAt: bridgeHealth.lastPollAt,
-                pollGapMs: bridgeHealth.lastPollAt === null ? null : Date.now() - bridgeHealth.lastPollAt,
+                pollGapMs: bridgeHealth.lastPollAt === null ? null : ports.now() - bridgeHealth.lastPollAt,
                 lastPollOkAt: bridgeHealth.lastPollOkAt,
                 consecutiveFailures: bridgeHealth.consecutiveFailures,
                 lastInboundAt: bridgeHealth.lastInboundAt,
@@ -2879,7 +2899,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
                 sessionId,
                 tags: msg.tags ?? [],
                 // Registering IS traffic — the session's first observed activity.
-                lastActivityAt: Date.now(),
+                lastActivityAt: ports.now(),
                 deliver: wsDeliver(ws),
                 close: () => {
                   ws.data.agent = undefined
@@ -2916,7 +2936,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
             case 'reply': {
               const sender = agents.get(msg.from)
               if (sender?.role === 'sensei') {
-                process.stderr.write(
+                ports.log(
                   `[jean] dropping reply from sensei ${msg.from} — sensei must use send with an explicit recipient\n`,
                 )
                 break
@@ -2934,7 +2954,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
               if (!from || !msg.to || !msg.text) break
               routeSend({ from, to: msg.to, text: msg.text, taskId: msg.taskId, attachments: msg.attachments }).catch(
                 (err) => {
-                  process.stderr.write(`[jean] ws send from ${from} → ${msg.to} failed: ${err}\n`)
+                  ports.log(`[jean] ws send from ${from} → ${msg.to} failed: ${err}\n`)
                 },
               )
               break
@@ -2974,7 +2994,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   boundPort = httpServer.port ?? PORT
 
   if (shouldWriteRuntimeFiles) writeRuntimeFiles()
-  process.stderr.write(`[jean] listening on port ${boundPort} (data: ${DATA_DIR})\n`)
+  ports.log(`[jean] listening on port ${boundPort} (data: ${DATA_DIR})\n`)
 
   void record('start', SYSTEM_STREAM, { port: boundPort } satisfies StartData)
   await initBridge()
@@ -2989,13 +3009,11 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   // don't stampede multiple parallel Claude spawns when many are overdue.
   // See src/infra/trigger-catchup.ts.
   {
-    const now = new Date()
+    const now = new Date(ports.now())
     for (const trigger of triggerProjection.state.triggers) {
       if (trigger.status !== 'active') continue
       if (!shouldCatchUp(trigger, now)) continue
-      process.stderr.write(
-        `[jean] trigger ${trigger.id} catch-up fire on startup (last fired ${trigger.lastFiredAt})\n`,
-      )
+      ports.log(`[jean] trigger ${trigger.id} catch-up fire on startup (last fired ${trigger.lastFiredAt})\n`)
       if (trigger.kind === 'headless') {
         await fireTrigger(trigger)
         // For headless catch-up specifically, wait for the spawn to actually

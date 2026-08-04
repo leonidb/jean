@@ -5,8 +5,8 @@
  * WHY THIS EXISTS. All 16 spawn-based server tests exercise the ENTRYPOINT.
  * They say nothing about the factory's non-default options — `port: 0`,
  * `enforceSingleInstance: false`, `writeRuntimeFiles: false`, an injected
- * `spawnHeadless`, and `stop()` itself would otherwise be dead code that breaks
- * silently the moment stage 2 leans on it. The plan's words: without this,
+ * `ports.spawn`, and `stop()` itself would otherwise be dead code that breaks
+ * silently the moment a later stage leans on it. The plan's words: without this,
  * stage 1 is a loaded gun.
  *
  * WHAT IT ASSERTS, and how. `bun test` runs every file in ONE process, so a
@@ -20,15 +20,18 @@
  *   - the socket  → the port refuses connections after stop()
  *   - listeners   → process.listenerCount() is flat across all three cycles
  *
- * This file must never spawn a real process. `spawnHeadless` is injected in
- * every case, and the catch-up test deliberately seeds a stale headless trigger
- * to prove the injection is what stands between a fixture and a real `claude`.
+ * This file must never spawn a real process. `ports.spawn` is injected in every
+ * case, and the catch-up test deliberately seeds a stale headless trigger to
+ * prove the injection is what stands between a fixture and a real `claude`.
+ * (Stage 2 folded stage 1's standalone `spawnHeadless` option into the port set;
+ * same knob, one injection mechanism instead of two.)
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { SpawnHeadlessResult } from './librarian.ts'
+import type { InfraPorts } from './ports.ts'
 import { createInfraServer, type InfraHandle } from './server.ts'
 import { connectAgent } from './test-helpers.ts'
 
@@ -44,7 +47,7 @@ function fakeSpawner() {
     calls.push({ role: opts.role, prompt: opts.prompt })
     return { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false }
   }
-  return { calls, spawn: spawn as unknown as NonNullable<Parameters<typeof createInfraServer>[0]>['spawnHeadless'] }
+  return { calls, spawn: spawn as unknown as InfraPorts['spawn'] }
 }
 
 /** Count intervals created-and-not-cleared inside a window. server.ts calls the
@@ -152,7 +155,7 @@ describe('createInfraServer', () => {
       sigterm: process.listenerCount('SIGTERM'),
     }
 
-    const ports: number[] = []
+    const boundPorts: number[] = []
 
     for (let cycle = 1; cycle <= 3; cycle++) {
       const dataDir = freshDir(`cycle-${cycle}`)
@@ -161,12 +164,12 @@ describe('createInfraServer', () => {
       let handle: InfraHandle | undefined
 
       try {
-        handle = await createInfraServer({ ...baseOpts(dataDir), spawnHeadless: spawner.spawn })
+        handle = await createInfraServer({ ...baseOpts(dataDir), ports: { spawn: spawner.spawn } })
 
         // port: 0 resolved to a real, bound, reported port.
         expect(handle.port).toBeGreaterThan(0)
         expect(handle.dataDir).toBe(dataDir)
-        ports.push(handle.port)
+        boundPorts.push(handle.port)
 
         // One HTTP round-trip. `/` reports the bound port, not the requested 0.
         const res = await fetch(`http://127.0.0.1:${handle.port}/`)
@@ -216,8 +219,8 @@ describe('createInfraServer', () => {
     // be a flake rather than a stronger claim. What actually proves the three
     // instances were independent is the per-cycle `/agents` check above — each
     // one saw only its own agent, which cross-instance state leakage would break.
-    expect(ports).toHaveLength(3)
-    expect(ports.every((p) => p > 0)).toBe(true)
+    expect(boundPorts).toHaveLength(3)
+    expect(boundPorts.every((p) => p > 0)).toBe(true)
 
     // NO LISTENER ACCUMULATION. This is the assertion that pins
     // "signal handlers live in the entrypoint, never the factory".
@@ -228,7 +231,7 @@ describe('createInfraServer', () => {
 
   test('stop() is idempotent', async () => {
     const dataDir = freshDir('idempotent')
-    const handle = await createInfraServer({ ...baseOpts(dataDir), spawnHeadless: fakeSpawner().spawn })
+    const handle = await createInfraServer({ ...baseOpts(dataDir), ports: { spawn: fakeSpawner().spawn } })
     await handle.stop()
     await handle.stop()
     expect(await portRefusesConnections(handle.port)).toBe(true)
@@ -236,7 +239,7 @@ describe('createInfraServer', () => {
 
   test('stop() releases the cron scheduler — a trigger due after stop never fires', async () => {
     const dataDir = freshDir('cron')
-    const handle = await createInfraServer({ ...baseOpts(dataDir), spawnHeadless: fakeSpawner().spawn })
+    const handle = await createInfraServer({ ...baseOpts(dataDir), ports: { spawn: fakeSpawner().spawn } })
 
     // One-off trigger due comfortably after we stop.
     const dueAt = new Date(Date.now() + 2000).toISOString()
@@ -259,7 +262,7 @@ describe('createInfraServer', () => {
 
   test('stop() releases the playbook watcher — a file written after stop is not seen', async () => {
     const dataDir = freshDir('watcher')
-    const handle = await createInfraServer({ ...baseOpts(dataDir), spawnHeadless: fakeSpawner().spawn })
+    const handle = await createInfraServer({ ...baseOpts(dataDir), ports: { spawn: fakeSpawner().spawn } })
     const playbooks = resolve(dataDir, 'playbooks')
 
     // While running, the watcher works — otherwise the negative below proves
@@ -308,7 +311,7 @@ describe('createInfraServer', () => {
     writeFileSync(resolve(dataDir, 'history.jsonl'), `${events.map((e) => JSON.stringify(e)).join('\n')}\n`)
 
     const spawner = fakeSpawner()
-    const handle = await createInfraServer({ ...baseOpts(dataDir), spawnHeadless: spawner.spawn })
+    const handle = await createInfraServer({ ...baseOpts(dataDir), ports: { spawn: spawner.spawn } })
     try {
       // The catch-up path ran and was intercepted.
       expect(spawner.calls).toEqual([{ role: 'architect', prompt: 'catch me up' }])
