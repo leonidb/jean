@@ -2808,7 +2808,18 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
               if (role === 'user') userAgentNames.add(msg.agent)
               if (role === 'sensei') {
                 senseiNames.add(msg.agent)
+                // THE MAILBOX CHANGES HANDS HERE, and this is the only place it
+                // can: the single-sensei guard above means a differently-named
+                // sensei can only register after the previous one has gone, so
+                // the owner is `lastRegisteredSenseiName` right up to this line.
+                // A disconnect alone does NOT change the owner — that is the
+                // whole point of the owner/deliverable split.
+                //
+                // The queue clock comes along; the ladder does not. See
+                // attention-listener.ts's `adoptMailbox`.
+                const previousOwner = lastRegisteredSenseiName
                 lastRegisteredSenseiName = msg.agent
+                if (previousOwner !== undefined) attention.adoptMailbox(previousOwner, msg.agent)
               }
               void record('register', agentStream(msg.agent), {
                 agent: msg.agent,

@@ -68,6 +68,28 @@ export type AttentionListener = {
    *  has no replay path at all, which is what stops a restart re-emitting every
    *  historical wake. */
   hydrate: (view: AttentionView) => void
+  /**
+   * A mailbox has CHANGED HANDS — the same queue, a differently-named owner.
+   *
+   * Carries the QUEUE CLOCK across and nothing else. The two halves of an
+   * episode answer to different things: `pendingSince` describes the QUEUE
+   * ("when did this mailbox last go non-empty"), which a rename does not touch,
+   * while the ladder counters describe a named agent's conversation and
+   * correctly start fresh (the accepted D4 delta — a renamed sensei pays at
+   * most one extra blocking wake within a tick).
+   *
+   * WHY THIS IS AN EXPLICIT SIGNAL rather than something the listener infers:
+   * it cannot be detected from `view.agent` alone. Once worker mailboxes are
+   * driven, consecutive calls legitimately alternate between agents, and every
+   * alternation would look like a rename. Only the adapter knows the registry
+   * changed identity, so the adapter says so.
+   *
+   * Found by review, not by the suite: without it, a sensei reattaching under a
+   * new name while events sat pending left the armed clock stranded on the old
+   * key and delayed the stall watchdog by a FULL window (measured: default
+   * 10 min, where the pre-reshape global clock fired immediately).
+   */
+  adoptMailbox: (from: string, to: string) => void
   /** Read-only, for tests and diagnostics. */
   readonly state: AttentionState
 }
@@ -146,6 +168,23 @@ export function createAttentionListener(exec: Executor): AttentionListener {
       if (view.agent && view.pendingIds.length > 0) {
         state = { agents: new Map([[view.agent, { ...freshEpisode(), pendingSince: view.now }]]) }
       }
+    },
+    adoptMailbox(from, to) {
+      if (from === to) return
+      const previous = state.agents.get(from)
+      if (!previous) return // nothing to carry
+      const agents = new Map(state.agents)
+      // The old key GOES: the mailbox moved, it was not copied. Leaving it
+      // strands a clock nothing can reach and grows the map by one per rename.
+      agents.delete(from)
+      // The new owner starts a fresh ladder and inherits the queue clock. If it
+      // somehow already had an episode — unreachable today, since the sensei
+      // mailbox is the only keyed one and a rename deletes the old key — its own
+      // state wins and only an unset clock is filled in. Monotone either way:
+      // this can add a clock, never overwrite one.
+      const arrived = state.agents.get(to)
+      agents.set(to, { ...(arrived ?? freshEpisode()), pendingSince: arrived?.pendingSince ?? previous.pendingSince })
+      state = { agents }
     },
     get state() {
       return state

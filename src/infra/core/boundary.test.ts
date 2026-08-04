@@ -172,6 +172,34 @@ describe('core boundary', () => {
     expect(body.slice(0, decision)).not.toMatch(/\bawait\b/)
   })
 
+  test('the register handler hands the mailbox over when the sensei name changes', async () => {
+    // STRUCTURAL, and it says so: the L2 tests prove `adoptMailbox` does the
+    // right thing, but nothing there proves the ADAPTER ever calls it. This is
+    // that half — the wiring for a defect the suite could not otherwise see (a
+    // rename mid-stall stranding the armed clock and delaying the watchdog by a
+    // full window).
+    const source = code(await read(SERVER))
+    const calls = [...source.matchAll(/attention\.adoptMailbox\(([^)]*)\)/g)]
+    expect(calls.length).toBe(1)
+    // Previous owner first, new owner second — reversed, it would carry the
+    // clock backwards onto a key nothing reads.
+    expect(calls[0]?.[1]).toBe('previousOwner, msg.agent')
+
+    // ...and it sits with the REGISTER handler's owner bookkeeping, which is
+    // the only place ownership can change: the single-sensei guard means a
+    // differently-named sensei can register only after the previous one has
+    // gone, and a disconnect alone does not move the owner.
+    //
+    // Anchored on `senseiNames.add(msg.agent)` — a line unique to that handler.
+    // The first draft sliced from `if (role === 'sensei') {`, which matches the
+    // /agent-idle branch several hundred lines earlier and failed there. Second
+    // time this file has picked the wrong region by taking the first plausible
+    // anchor; a source-reading test is only as good as the thing it anchors on.
+    const anchor = source.indexOf('senseiNames.add(msg.agent)')
+    expect(anchor).toBeGreaterThan(-1)
+    expect(source.slice(anchor, anchor + 400)).toContain('attention.adoptMailbox(')
+  })
+
   test('both timer callbacks are a single core.tick call with no branching', async () => {
     const source = await read(SERVER)
     const callbacks = [...source.matchAll(/setInterval\((\(\) => [^,]+),/g)].map((m) => m[1] as string)

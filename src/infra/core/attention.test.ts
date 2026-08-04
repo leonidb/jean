@@ -497,6 +497,78 @@ describe('mailbox ownership — owner is not deliverable', () => {
   })
 })
 
+describe('adoptMailbox — a mailbox changing hands', () => {
+  // Review finding (codex, 2026-08-04), fixed inside this commit. Without
+  // adoption, a sensei reattaching under a NEW name while events sat pending
+  // left the armed clock stranded on the old key: the pre-reshape global clock
+  // fired the watchdog immediately on connect, the reshaped one waited a FULL
+  // FURTHER window. Measured at 10 min on the defaults.
+  //
+  // The rule the three cases below pin: the QUEUE clock crosses, the LADDER
+  // does not. `pendingSince` describes the queue, which a rename cannot touch;
+  // the counters describe a named agent's conversation, and reset — the D4
+  // delta, still accepted at its stated cost.
+
+  test('THE REPRO — a rename mid-stall no longer delays the watchdog', () => {
+    const h = harness()
+    // `alice` owns the mailbox, nobody attached. An event lands and arms it.
+    h.arrive({ now: 0, agent: 'alice', deliverable: false, idle: false, pending: [[1, false]] }, 1, false)
+    expect(h.listener.state.agents.get('alice')?.pendingSince).toBe(0)
+
+    // A sensei reattaches under a different name, a full window later.
+    h.listener.adoptMailbox('alice', 'bob')
+
+    // The watchdog fires AT ONCE, because the window was measured from the
+    // arrival. Pre-fix this produced nothing and waited another full window.
+    h.tick({ now: STALL_AFTER, agent: 'bob', deliverable: true, idle: false, pending: [[1, false]] })
+    expect(h.trace).toContain('nudge:{"pendingCount":1,"forced":true}')
+  })
+
+  test('the queue clock CROSSES and the old key is released', () => {
+    const h = harness()
+    h.arrive({ now: 7_000, agent: 'alice', deliverable: false, idle: false, pending: [[1, false]] }, 1, false)
+    h.listener.adoptMailbox('alice', 'bob')
+
+    expect(h.listener.state.agents.get('bob')?.pendingSince).toBe(7_000)
+    // Moved, not copied: a stranded clock is unreachable state, and one per
+    // rename is a slow leak.
+    expect(h.listener.state.agents.has('alice')).toBe(false)
+  })
+
+  test('the LADDER does not cross — the renamed owner starts fresh', () => {
+    const h = harness()
+    const w: World = { now: 0, agent: 'alice', idle: false, pending: [[1, true]] }
+    h.arrive(w, 1, false) // a blocking wake lands: alice's ladder is now at 1
+    h.drain()
+    expect(h.listener.state.agents.get('alice')?.blockingWakeCount).toBe(1)
+
+    h.listener.adoptMailbox('alice', 'bob')
+    const bob = h.listener.state.agents.get('bob')
+    expect(bob?.blockingWakeCount).toBe(0)
+    expect(bob?.lastBlockingWakeAt).toBe(0)
+    expect(bob?.nudgeCount).toBe(0)
+    expect(bob?.maxNudgedPendingId).toBe(0)
+    // ...and the clock the landed wake armed still came along.
+    expect(bob?.pendingSince).toBe(0)
+
+    // The behavioural consequence, which is the D4 delta at exactly its stated
+    // cost: one extra blocking wake on the next tick rather than waiting out
+    // the rung. Not a missed wake, and not a stalled backstop.
+    h.tick({ ...w, now: BLOCK_1 - 1, agent: 'bob' })
+    expect(deliveries(h)).toBe(1)
+  })
+
+  test('adopting from an owner with no episode is a no-op', () => {
+    const h = harness()
+    h.listener.adoptMailbox('nobody', 'bob')
+    expect(h.listener.state.agents.size).toBe(0)
+    // Self-adoption cannot destroy state either.
+    h.arrive({ now: 5, agent: 'bob', idle: false, pending: [[1, false]] }, 1, false)
+    h.listener.adoptMailbox('bob', 'bob')
+    expect(h.listener.state.agents.get('bob')?.pendingSince).toBe(5)
+  })
+})
+
 describe('hydrate', () => {
   test('reproduces the pre-refactor boot state: counters zeroed, stall clock armed from the queue', () => {
     const h = harness()
