@@ -586,6 +586,13 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       // stand down then (review finding).
       senderRole: agents.get(args.from)?.role ?? (senseiNames.has(args.from) ? 'sensei' : undefined),
       targetRole: agents.get(args.to)?.role,
+      // EAGER where the pre-refactor code was lazy (review finding): the old
+      // version built this list only after both role checks passed. Kept eager
+      // on purpose — the alternative is to repeat the role conditions at this
+      // call site so they can short-circuit, which puts the rule in two places
+      // that can drift, to save a `filter` over the pending queue. The read is
+      // pure end to end (filter → isBlockingEvent → isUserSender → a Map get
+      // and a Set has), so the only cost is that CPU.
       blockingFromTarget: blockingPendingFrom(args.to),
     })
 
