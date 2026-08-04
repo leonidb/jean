@@ -1776,7 +1776,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
   type Upgrader = { upgrade(req: Request, opts: { data: Record<string, never> }): boolean }
 
-  function handleHttp(req: Request, server: Upgrader): Response | Promise<Response> | undefined {
+  async function handleHttp(req: Request, server: Upgrader): Promise<Response | undefined> {
     const url = new URL(req.url)
     const path = url.pathname
 
@@ -1788,22 +1788,20 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // ── Task CRUD ───────────────────────────────────────────────
 
     if (path === '/tasks' && req.method === 'POST') {
-      return (async () => {
-        const body = (await req.json()) as CreateTaskRequest
-        if (!body.title || !body.queue) {
-          return Response.json({ error: 'missing title or queue' }, { status: 400 })
-        }
-        const taskId = nextTaskId()
-        await record('task-created', taskStream(taskId), {
-          title: body.title,
-          description: body.description ?? '',
-          queue: body.queue,
-          playbook: body.playbook,
-          actor: body.actor ?? 'api',
-        } satisfies TaskCreatedData)
-        const task = boardProjection.state.tasks.find((t) => t.id === taskId)
-        return Response.json(task, { status: 201 })
-      })()
+      const body = (await req.json()) as CreateTaskRequest
+      if (!body.title || !body.queue) {
+        return Response.json({ error: 'missing title or queue' }, { status: 400 })
+      }
+      const taskId = nextTaskId()
+      await record('task-created', taskStream(taskId), {
+        title: body.title,
+        description: body.description ?? '',
+        queue: body.queue,
+        playbook: body.playbook,
+        actor: body.actor ?? 'api',
+      } satisfies TaskCreatedData)
+      const task = boardProjection.state.tasks.find((t) => t.id === taskId)
+      return Response.json(task, { status: 201 })
     }
 
     if (path === '/tasks' && req.method === 'GET') {
@@ -1817,122 +1815,114 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
     const taskGetMatch = path.match(/^\/tasks\/(\w+)$/)
     if (taskGetMatch && req.method === 'GET') {
-      return (async () => {
-        const taskId = taskGetMatch[1]
-        if (!taskId) return Response.json({ error: 'not found' }, { status: 404 })
-        const task = boardProjection.state.tasks.find((t) => t.id === taskId)
-        if (!task) return Response.json({ error: 'not found' }, { status: 404 })
-        const include = new Set((url.searchParams.get('include') ?? '').split(',').filter(Boolean))
-        if (include.size === 0) return Response.json(task)
-        const enriched: Record<string, unknown> = { ...task }
-        // Load the task's event stream once if any include flag needs it. Add new stream-backed flags here.
-        const STREAM_INCLUDES = ['comments', 'messages'] as const
-        const needsStream = STREAM_INCLUDES.some((k) => include.has(k))
-        const events = needsStream ? await store.read({ stream: taskStream(taskId) }) : []
-        if (include.has('comments')) {
-          // Curated task-comment events — deliberate notes worth reading as a summary.
-          enriched.comments = events.flatMap((e) => {
-            if (e.type !== 'task-comment') return []
-            const d = e.data as TaskCommentData
+      const taskId = taskGetMatch[1]
+      if (!taskId) return Response.json({ error: 'not found' }, { status: 404 })
+      const task = boardProjection.state.tasks.find((t) => t.id === taskId)
+      if (!task) return Response.json({ error: 'not found' }, { status: 404 })
+      const include = new Set((url.searchParams.get('include') ?? '').split(',').filter(Boolean))
+      if (include.size === 0) return Response.json(task)
+      const enriched: Record<string, unknown> = { ...task }
+      // Load the task's event stream once if any include flag needs it. Add new stream-backed flags here.
+      const STREAM_INCLUDES = ['comments', 'messages'] as const
+      const needsStream = STREAM_INCLUDES.some((k) => include.has(k))
+      const events = needsStream ? await store.read({ stream: taskStream(taskId) }) : []
+      if (include.has('comments')) {
+        // Curated task-comment events — deliberate notes worth reading as a summary.
+        enriched.comments = events.flatMap((e) => {
+          if (e.type !== 'task-comment') return []
+          const d = e.data as TaskCommentData
+          return [{ ts: e.ts, from: d.agent, text: d.text }]
+        })
+      }
+      if (include.has('messages')) {
+        // Chat-level reply/send events — full correspondence, higher volume, useful for diagnostics.
+        enriched.messages = events.flatMap((e) => {
+          if (e.type === 'reply') {
+            const d = e.data as ReplyData
             return [{ ts: e.ts, from: d.agent, text: d.text }]
-          })
-        }
-        if (include.has('messages')) {
-          // Chat-level reply/send events — full correspondence, higher volume, useful for diagnostics.
-          enriched.messages = events.flatMap((e) => {
-            if (e.type === 'reply') {
-              const d = e.data as ReplyData
-              return [{ ts: e.ts, from: d.agent, text: d.text }]
-            }
-            if (e.type === 'send') {
-              const d = e.data as SendData
-              return [{ ts: e.ts, from: d.from, to: d.agent, text: d.text }]
-            }
-            return []
-          })
-        }
-        if (include.has('playbook') && task.playbook) {
-          const playbook = playbookProjection.state.playbooks.find((p) => p.id === task.playbook)
-          if (playbook) {
-            enriched.playbook = { id: playbook.id, name: playbook.name, content: playbook.content }
           }
+          if (e.type === 'send') {
+            const d = e.data as SendData
+            return [{ ts: e.ts, from: d.from, to: d.agent, text: d.text }]
+          }
+          return []
+        })
+      }
+      if (include.has('playbook') && task.playbook) {
+        const playbook = playbookProjection.state.playbooks.find((p) => p.id === task.playbook)
+        if (playbook) {
+          enriched.playbook = { id: playbook.id, name: playbook.name, content: playbook.content }
         }
-        return Response.json(enriched)
-      })()
+      }
+      return Response.json(enriched)
     }
 
     const statusMatch = path.match(/^\/tasks\/(\w+)\/status$/)
     if (statusMatch && req.method === 'PATCH') {
-      return (async () => {
-        const body = (await req.json()) as UpdateStatusRequest
-        if (!body.status) {
-          return Response.json({ error: 'missing status' }, { status: 400 })
-        }
-        const task = boardProjection.state.tasks.find((t) => t.id === statusMatch[1])
-        if (!task) return Response.json({ error: 'not found' }, { status: 404 })
-        if (!canTransition(task.status, body.status as TaskStatus)) {
-          return Response.json({ error: `invalid transition: ${task.status} → ${body.status}` }, { status: 400 })
-        }
-        await record('task-status', taskStream(task.id), {
-          from: task.status,
-          to: body.status as TaskStatus,
-          actor: body.actor ?? 'api',
-        } satisfies TaskStatusData)
-        const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
-        return Response.json(updated)
-      })()
+      const body = (await req.json()) as UpdateStatusRequest
+      if (!body.status) {
+        return Response.json({ error: 'missing status' }, { status: 400 })
+      }
+      const task = boardProjection.state.tasks.find((t) => t.id === statusMatch[1])
+      if (!task) return Response.json({ error: 'not found' }, { status: 404 })
+      if (!canTransition(task.status, body.status as TaskStatus)) {
+        return Response.json({ error: `invalid transition: ${task.status} → ${body.status}` }, { status: 400 })
+      }
+      await record('task-status', taskStream(task.id), {
+        from: task.status,
+        to: body.status as TaskStatus,
+        actor: body.actor ?? 'api',
+      } satisfies TaskStatusData)
+      const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
+      return Response.json(updated)
     }
 
     const revertMatch = path.match(/^\/tasks\/(\w+)\/revert$/)
     if (revertMatch && req.method === 'POST') {
-      return (async () => {
-        const taskId = revertMatch[1]
-        if (!taskId) return Response.json({ error: 'not found' }, { status: 404 })
-        const task = boardProjection.state.tasks.find((t) => t.id === taskId)
-        if (!task) return Response.json({ error: 'not found' }, { status: 404 })
-        const body = (await req.json().catch(() => ({}))) as { actor?: string }
+      const taskId = revertMatch[1]
+      if (!taskId) return Response.json({ error: 'not found' }, { status: 404 })
+      const task = boardProjection.state.tasks.find((t) => t.id === taskId)
+      if (!task) return Response.json({ error: 'not found' }, { status: 404 })
+      const body = (await req.json().catch(() => ({}))) as { actor?: string }
 
-        // Rebuild the task's status stack from its event stream.
-        const events = await store.read({ stream: taskStream(taskId) })
-        const stack: TaskStatus[] = []
-        for (const e of events) {
-          if (e.type === 'task-created') stack.push('todo')
-          else if (e.type === 'task-status') stack.push((e.data as TaskStatusData).to)
-          else if (e.type === 'task-reverted') {
-            const target = (e.data as TaskRevertedData).to
-            while (stack.length > 0 && stack[stack.length - 1] !== target) stack.pop()
-          }
+      // Rebuild the task's status stack from its event stream.
+      const events = await store.read({ stream: taskStream(taskId) })
+      const stack: TaskStatus[] = []
+      for (const e of events) {
+        if (e.type === 'task-created') stack.push('todo')
+        else if (e.type === 'task-status') stack.push((e.data as TaskStatusData).to)
+        else if (e.type === 'task-reverted') {
+          const target = (e.data as TaskRevertedData).to
+          while (stack.length > 0 && stack[stack.length - 1] !== target) stack.pop()
         }
+      }
 
-        if (stack.length <= 1) {
-          return Response.json({ error: 'nothing to revert — task has no prior status to return to' }, { status: 400 })
-        }
-        const from = stack[stack.length - 1] as TaskStatus
-        const to = stack[stack.length - 2] as TaskStatus
-        await record('task-reverted', taskStream(taskId), {
-          from,
-          to,
-          actor: body.actor ?? 'api',
-        } satisfies TaskRevertedData)
-        const updated = boardProjection.state.tasks.find((t) => t.id === taskId)
-        return Response.json({ ...updated, reverted: { from, to } })
-      })()
+      if (stack.length <= 1) {
+        return Response.json({ error: 'nothing to revert — task has no prior status to return to' }, { status: 400 })
+      }
+      const from = stack[stack.length - 1] as TaskStatus
+      const to = stack[stack.length - 2] as TaskStatus
+      await record('task-reverted', taskStream(taskId), {
+        from,
+        to,
+        actor: body.actor ?? 'api',
+      } satisfies TaskRevertedData)
+      const updated = boardProjection.state.tasks.find((t) => t.id === taskId)
+      return Response.json({ ...updated, reverted: { from, to } })
     }
 
     const taskPatchMatch = path.match(/^\/tasks\/(\w+)$/)
     if (taskPatchMatch && req.method === 'PATCH') {
-      return (async () => {
-        const body = (await req.json()) as UpdateTaskRequest
-        const task = boardProjection.state.tasks.find((t) => t.id === taskPatchMatch[1])
-        if (!task) return Response.json({ error: 'not found' }, { status: 404 })
-        await record('task-updated', taskStream(task.id), {
-          ...(body.agent !== undefined && { agent: body.agent }),
-          ...(body.description !== undefined && { description: body.description }),
-          actor: body.actor ?? 'api',
-        } satisfies TaskUpdatedData)
-        const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
-        return Response.json(updated)
-      })()
+      const body = (await req.json()) as UpdateTaskRequest
+      const task = boardProjection.state.tasks.find((t) => t.id === taskPatchMatch[1])
+      if (!task) return Response.json({ error: 'not found' }, { status: 404 })
+      await record('task-updated', taskStream(task.id), {
+        ...(body.agent !== undefined && { agent: body.agent }),
+        ...(body.description !== undefined && { description: body.description }),
+        actor: body.actor ?? 'api',
+      } satisfies TaskUpdatedData)
+      const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
+      return Response.json(updated)
     }
 
     // ── Context endpoints ───────────────────────────────────────
@@ -1947,38 +1937,34 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // See docs/llm-wiki-design.md.
 
     if (path === '/context/memorize' && req.method === 'POST') {
-      return (async () => {
-        const body = (await req.json()) as Partial<MemoryData>
-        if (!body.agent || !body.role || !body.text?.trim()) {
-          return Response.json({ error: 'memorize requires agent, role, and non-empty text' }, { status: 400 })
-        }
-        const scope: MemoryScope = body.scope === 'user' ? 'user' : 'dojo'
-        const event = await record('memory', MEMORY_STREAM, {
-          agent: body.agent,
-          role: body.role,
-          text: body.text.trim(),
-          scope,
-          ...(body.taskId && { taskId: body.taskId }),
-        } satisfies MemoryData)
-        return Response.json({ id: event.id })
-      })()
+      const body = (await req.json()) as Partial<MemoryData>
+      if (!body.agent || !body.role || !body.text?.trim()) {
+        return Response.json({ error: 'memorize requires agent, role, and non-empty text' }, { status: 400 })
+      }
+      const scope: MemoryScope = body.scope === 'user' ? 'user' : 'dojo'
+      const event = await record('memory', MEMORY_STREAM, {
+        agent: body.agent,
+        role: body.role,
+        text: body.text.trim(),
+        scope,
+        ...(body.taskId && { taskId: body.taskId }),
+      } satisfies MemoryData)
+      return Response.json({ id: event.id })
     }
 
     if (path === '/context/consolidated' && req.method === 'POST') {
-      return (async () => {
-        const body = (await req.json()) as Partial<WikiConsolidatedData>
-        const data: WikiConsolidatedData = {
-          ...(body.pagesCreated !== undefined && { pagesCreated: body.pagesCreated }),
-          ...(body.pagesUpdated !== undefined && { pagesUpdated: body.pagesUpdated }),
-          ...(body.corrections !== undefined && { corrections: body.corrections }),
-          ...(body.tasksDistilled !== undefined && { tasksDistilled: body.tasksDistilled }),
-          ...(body.eventsProcessed !== undefined && { eventsProcessed: body.eventsProcessed }),
-          ...(body.rawFilesProcessed !== undefined && { rawFilesProcessed: body.rawFilesProcessed }),
-          ...(Array.isArray(body.anomalies) && body.anomalies.length > 0 && { anomalies: body.anomalies }),
-        }
-        const event = await record('wiki-consolidated', SYSTEM_STREAM, data)
-        return Response.json({ id: event.id })
-      })()
+      const body = (await req.json()) as Partial<WikiConsolidatedData>
+      const data: WikiConsolidatedData = {
+        ...(body.pagesCreated !== undefined && { pagesCreated: body.pagesCreated }),
+        ...(body.pagesUpdated !== undefined && { pagesUpdated: body.pagesUpdated }),
+        ...(body.corrections !== undefined && { corrections: body.corrections }),
+        ...(body.tasksDistilled !== undefined && { tasksDistilled: body.tasksDistilled }),
+        ...(body.eventsProcessed !== undefined && { eventsProcessed: body.eventsProcessed }),
+        ...(body.rawFilesProcessed !== undefined && { rawFilesProcessed: body.rawFilesProcessed }),
+        ...(Array.isArray(body.anomalies) && body.anomalies.length > 0 && { anomalies: body.anomalies }),
+      }
+      const event = await record('wiki-consolidated', SYSTEM_STREAM, data)
+      return Response.json({ id: event.id })
     }
 
     // GET /context/recent — memorize events not yet folded into the wiki
@@ -1987,36 +1973,34 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // everyone's). Filtering is the caller's job.
 
     if (path === '/context/recent' && req.method === 'GET') {
-      return (async () => {
-        const cursorPath = resolve(DATA_DIR, '.consolidator', 'cursor.json')
-        let cursor: { lastEventId: number; lastConsolidatedAt?: string } | null = null
-        try {
-          cursor = JSON.parse(await Bun.file(cursorPath).text()) as {
-            lastEventId: number
-            lastConsolidatedAt?: string
-          }
-        } catch {
-          // No cursor file — fresh dojo or librarian has never run.
+      const cursorPath = resolve(DATA_DIR, '.consolidator', 'cursor.json')
+      let cursor: { lastEventId: number; lastConsolidatedAt?: string } | null = null
+      try {
+        cursor = JSON.parse(await Bun.file(cursorPath).text()) as {
+          lastEventId: number
+          lastConsolidatedAt?: string
         }
+      } catch {
+        // No cursor file — fresh dojo or librarian has never run.
+      }
 
-        const sinceParam = url.searchParams.get('since')
-        const since = sinceParam !== null ? Number(sinceParam) : (cursor?.lastEventId ?? 0)
+      const sinceParam = url.searchParams.get('since')
+      const since = sinceParam !== null ? Number(sinceParam) : (cursor?.lastEventId ?? 0)
 
-        const limitParam = url.searchParams.get('limit')
-        const limit = limitParam !== null ? Number(limitParam) : undefined
+      const limitParam = url.searchParams.get('limit')
+      const limit = limitParam !== null ? Number(limitParam) : undefined
 
-        let events = await store.read({ stream: MEMORY_STREAM, afterId: since })
-        if (limit !== undefined && limit > 0) events = events.slice(-limit)
+      let events = await store.read({ stream: MEMORY_STREAM, afterId: since })
+      if (limit !== undefined && limit > 0) events = events.slice(-limit)
 
-        return Response.json({
-          cursor,
-          events: events.map((e) => ({
-            id: e.id,
-            ts: e.ts,
-            ...(e.data as MemoryData),
-          })),
-        })
-      })()
+      return Response.json({
+        cursor,
+        events: events.map((e) => ({
+          id: e.id,
+          ts: e.ts,
+          ...(e.data as MemoryData),
+        })),
+      })
     }
 
     // GET /context/map — the live page map (name + trigger-style description),
@@ -2046,45 +2030,43 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // knowledge/tasks/channel to search one source on purpose. Ranking is
     // field-boosted BM25 + capped fuzzy (see retrieval.ts).
     if (path === '/context/search' && req.method === 'GET') {
-      return (async () => {
-        const q = url.searchParams.get('q') ?? ''
-        // Absent scope defaults to `all`; an INVALID scope is a caller error,
-        // not a silent widen — returning all-scope hits for a typo'd
-        // `scope=knowlege` would mislead a caller who meant to narrow.
-        const scopeParam = url.searchParams.get('scope')
-        if (scopeParam !== null && !CONTEXT_SCOPES.includes(scopeParam)) {
-          return Response.json({ error: `invalid scope "${scopeParam}"`, validScopes: CONTEXT_SCOPES }, { status: 400 })
-        }
-        const scope = scopeParam ?? 'all'
-        // Pass the raw parse through; search() clamps garbage (negative,
-        // fractional, NaN) to a sane [1, MAX] rather than letting it reach
-        // slice()/Math.min. Absent → undefined → search's default.
-        const topNParam = url.searchParams.get('topN')
-        const topN = topNParam !== null ? Number(topNParam) : undefined
-        let result: SearchResult
-        try {
-          result = runSearch(buildIndex(await buildCorpus(scope)), q, { topN, scope })
-        } catch (err) {
-          // A knowledge source that fails to READ (vs. legitimately absent)
-          // must not masquerade as an empty result — empty means "definitively
-          // not in memory," so a masked read failure would be a lie. Surface it.
-          return Response.json(
-            { error: 'a knowledge source could not be read', detail: err instanceof Error ? err.message : String(err) },
-            { status: 503 },
-          )
-        }
-        logRetrieval({
-          at: new Date(ports.now()).toISOString(),
-          from: url.searchParams.get('from') ?? undefined,
-          query: q,
-          scope,
-          total: result.total,
-          returned: result.returned,
-          empty: result.empty,
-          hits: result.hits.map((h) => ({ page: h.page, source: h.source, score: h.score })),
-        })
-        return Response.json(result)
-      })()
+      const q = url.searchParams.get('q') ?? ''
+      // Absent scope defaults to `all`; an INVALID scope is a caller error,
+      // not a silent widen — returning all-scope hits for a typo'd
+      // `scope=knowlege` would mislead a caller who meant to narrow.
+      const scopeParam = url.searchParams.get('scope')
+      if (scopeParam !== null && !CONTEXT_SCOPES.includes(scopeParam)) {
+        return Response.json({ error: `invalid scope "${scopeParam}"`, validScopes: CONTEXT_SCOPES }, { status: 400 })
+      }
+      const scope = scopeParam ?? 'all'
+      // Pass the raw parse through; search() clamps garbage (negative,
+      // fractional, NaN) to a sane [1, MAX] rather than letting it reach
+      // slice()/Math.min. Absent → undefined → search's default.
+      const topNParam = url.searchParams.get('topN')
+      const topN = topNParam !== null ? Number(topNParam) : undefined
+      let result: SearchResult
+      try {
+        result = runSearch(buildIndex(await buildCorpus(scope)), q, { topN, scope })
+      } catch (err) {
+        // A knowledge source that fails to READ (vs. legitimately absent)
+        // must not masquerade as an empty result — empty means "definitively
+        // not in memory," so a masked read failure would be a lie. Surface it.
+        return Response.json(
+          { error: 'a knowledge source could not be read', detail: err instanceof Error ? err.message : String(err) },
+          { status: 503 },
+        )
+      }
+      logRetrieval({
+        at: new Date(ports.now()).toISOString(),
+        from: url.searchParams.get('from') ?? undefined,
+        query: q,
+        scope,
+        total: result.total,
+        returned: result.returned,
+        empty: result.empty,
+        hits: result.hits.map((h) => ({ page: h.page, source: h.source, score: h.score })),
+      })
+      return Response.json(result)
     }
 
     // ── Message routing ─────────────────────────────────────────
@@ -2109,202 +2091,194 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // ── Agent idle (stop hook) ──────────────────────────────────
 
     if (path === '/agent-idle' && (req.method === 'POST' || req.method === 'GET')) {
-      return (async () => {
-        let agentName: string | null = null
-        let sessionId: string | undefined
-        if (req.method === 'POST') {
-          const body = (await req.json()) as { agent: string; sessionId?: string }
-          agentName = body.agent
-          sessionId = body.sessionId
-        } else {
-          agentName = url.searchParams.get('name')
-          sessionId = url.searchParams.get('sessionId') ?? undefined
-        }
-        if (!agentName) {
-          return Response.json({ error: 'missing agent name' }, { status: 400 })
-        }
+      let agentName: string | null = null
+      let sessionId: string | undefined
+      if (req.method === 'POST') {
+        const body = (await req.json()) as { agent: string; sessionId?: string }
+        agentName = body.agent
+        sessionId = body.sessionId
+      } else {
+        agentName = url.searchParams.get('name')
+        sessionId = url.searchParams.get('sessionId') ?? undefined
+      }
+      if (!agentName) {
+        return Response.json({ error: 'missing agent name' }, { status: 400 })
+      }
 
-        const entry = agents.get(agentName)
+      const entry = agents.get(agentName)
 
-        if (sessionId && entry?.sessionId && sessionId !== entry.sessionId) {
-          ports.log(
-            `[jean] WARNING: agent-idle for "${agentName}" from stale session ${sessionId} (current: ${entry.sessionId})\n`,
-          )
-          void record('agent-idle', agentStream(agentName), {
-            agent: agentName,
-            role: entry.role,
-            stale: true,
-            hookSessionId: sessionId,
-            currentSessionId: entry.sessionId,
-          })
-          return Response.json({ ok: false, error: 'stale session', currentSessionId: entry.sessionId })
-        }
+      if (sessionId && entry?.sessionId && sessionId !== entry.sessionId) {
+        ports.log(
+          `[jean] WARNING: agent-idle for "${agentName}" from stale session ${sessionId} (current: ${entry.sessionId})\n`,
+        )
+        void record('agent-idle', agentStream(agentName), {
+          agent: agentName,
+          role: entry.role,
+          stale: true,
+          hookSessionId: sessionId,
+          currentSessionId: entry.sessionId,
+        })
+        return Response.json({ ok: false, error: 'stale session', currentSessionId: entry.sessionId })
+      }
 
-        if (!entry) {
-          ports.log(`[jean] WARNING: agent-idle for "${agentName}" but agent is not connected\n`)
-          void record('agent-idle', agentStream(agentName), { agent: agentName, role: 'unknown', disconnected: true })
-          return Response.json({ ok: false, error: 'agent not connected' })
-        }
+      if (!entry) {
+        ports.log(`[jean] WARNING: agent-idle for "${agentName}" but agent is not connected\n`)
+        void record('agent-idle', agentStream(agentName), { agent: agentName, role: 'unknown', disconnected: true })
+        return Response.json({ ok: false, error: 'agent not connected' })
+      }
 
-        // A Stop-hook post is inbound traffic like any other (phase 4 §3) — it
-        // sharpens liveness even though it no longer carries correctness.
-        touchAgent(agentName)
-        entry.idle = true
-        const role = entry.role
-        const taskId = inferTaskId(agentName)
-        const stream = taskId ? taskStream(taskId) : agentStream(agentName)
-        await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData)
+      // A Stop-hook post is inbound traffic like any other (phase 4 §3) — it
+      // sharpens liveness even though it no longer carries correctness.
+      touchAgent(agentName)
+      entry.idle = true
+      const role = entry.role
+      const taskId = inferTaskId(agentName)
+      const stream = taskId ? taskStream(taskId) : agentStream(agentName)
+      await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData)
 
-        if (role === 'sensei') {
-          attention.nudge(viewNow(ports.now()))
-        }
+      if (role === 'sensei') {
+        attention.nudge(viewNow(ports.now()))
+      }
 
-        return Response.json({ ok: true })
-      })()
+      return Response.json({ ok: true })
     }
 
     // ── Permission tracking ──────────────────────────────────────
 
     if (path === '/permissions' && req.method === 'POST') {
-      return (async () => {
-        const body = (await req.json()) as { agent: string; tool: string; input?: Record<string, unknown> }
-        if (!body.agent || !body.tool) {
-          return Response.json({ error: 'missing agent or tool' }, { status: 400 })
-        }
-        await record('permission-request', agentStream(body.agent), {
-          agent: body.agent,
-          tool: body.tool,
-          input: body.input ?? {},
-        } satisfies PermissionRequestData)
-        return Response.json({ ok: true })
-      })()
+      const body = (await req.json()) as { agent: string; tool: string; input?: Record<string, unknown> }
+      if (!body.agent || !body.tool) {
+        return Response.json({ error: 'missing agent or tool' }, { status: 400 })
+      }
+      await record('permission-request', agentStream(body.agent), {
+        agent: body.agent,
+        tool: body.tool,
+        input: body.input ?? {},
+      } satisfies PermissionRequestData)
+      return Response.json({ ok: true })
     }
 
     if (path === '/permissions' && req.method === 'GET') {
-      return (async () => {
-        const agentFilter = url.searchParams.get('agent') ?? undefined
-        const permEvents = await store.read({
-          types: ['permission-request'],
-          ...(agentFilter && { stream: agentStream(agentFilter) }),
-        })
+      const agentFilter = url.searchParams.get('agent') ?? undefined
+      const permEvents = await store.read({
+        types: ['permission-request'],
+        ...(agentFilter && { stream: agentStream(agentFilter) }),
+      })
 
-        type ToolStats = { count: number; samples: Record<string, unknown>[] }
-        const byAgent: Record<string, Record<string, ToolStats>> = {}
-        for (const e of permEvents) {
-          const d = e.data as PermissionRequestData
-          byAgent[d.agent] ??= {}
-          // biome-ignore lint/style/noNonNullAssertion: initialized by ??= above
-          const agentMap = byAgent[d.agent]!
-          agentMap[d.tool] ??= { count: 0, samples: [] }
-          // biome-ignore lint/style/noNonNullAssertion: initialized by ??= above
-          const entry = agentMap[d.tool]!
-          entry.count++
-          if (entry.samples.length < 5) entry.samples.push(d.input)
-        }
+      type ToolStats = { count: number; samples: Record<string, unknown>[] }
+      const byAgent: Record<string, Record<string, ToolStats>> = {}
+      for (const e of permEvents) {
+        const d = e.data as PermissionRequestData
+        byAgent[d.agent] ??= {}
+        // biome-ignore lint/style/noNonNullAssertion: initialized by ??= above
+        const agentMap = byAgent[d.agent]!
+        agentMap[d.tool] ??= { count: 0, samples: [] }
+        // biome-ignore lint/style/noNonNullAssertion: initialized by ??= above
+        const entry = agentMap[d.tool]!
+        entry.count++
+        if (entry.samples.length < 5) entry.samples.push(d.input)
+      }
 
-        return Response.json({ permissions: byAgent })
-      })()
+      return Response.json({ permissions: byAgent })
     }
 
     // ── Trigger CRUD ────────────────────────────────────────────
 
     if (path === '/triggers' && req.method === 'POST') {
-      return (async () => {
-        const body = (await req.json()) as {
-          id?: string
-          cron?: string
-          at?: string
-          agent: string
-          prompt: string
-          kind?: TriggerKind
-          model?: string
-          retries?: number
-          actor?: string
-          metadata?: Record<string, unknown>
+      const body = (await req.json()) as {
+        id?: string
+        cron?: string
+        at?: string
+        agent: string
+        prompt: string
+        kind?: TriggerKind
+        model?: string
+        retries?: number
+        actor?: string
+        metadata?: Record<string, unknown>
+      }
+      if (!body.agent || !body.prompt) {
+        return Response.json({ error: 'missing agent or prompt' }, { status: 400 })
+      }
+      if (!body.cron && !body.at) {
+        return Response.json({ error: 'must specify cron or at' }, { status: 400 })
+      }
+      if (body.cron && body.at) {
+        return Response.json({ error: 'cron and at are mutually exclusive' }, { status: 400 })
+      }
+      if (body.cron) {
+        try {
+          new Cron(body.cron)
+        } catch {
+          return Response.json({ error: 'invalid cron expression' }, { status: 400 })
         }
-        if (!body.agent || !body.prompt) {
-          return Response.json({ error: 'missing agent or prompt' }, { status: 400 })
+      }
+      if (body.at) {
+        const d = new Date(body.at)
+        if (Number.isNaN(d.getTime())) {
+          return Response.json({ error: 'invalid datetime for at' }, { status: 400 })
         }
-        if (!body.cron && !body.at) {
-          return Response.json({ error: 'must specify cron or at' }, { status: 400 })
-        }
-        if (body.cron && body.at) {
-          return Response.json({ error: 'cron and at are mutually exclusive' }, { status: 400 })
-        }
-        if (body.cron) {
-          try {
-            new Cron(body.cron)
-          } catch {
-            return Response.json({ error: 'invalid cron expression' }, { status: 400 })
-          }
-        }
-        if (body.at) {
-          const d = new Date(body.at)
-          if (Number.isNaN(d.getTime())) {
-            return Response.json({ error: 'invalid datetime for at' }, { status: 400 })
-          }
-        }
-        const kind: TriggerKind = body.kind ?? 'agent'
-        if (kind !== 'agent' && kind !== 'headless') {
-          return Response.json({ error: `invalid kind "${body.kind}", must be 'agent' or 'headless'` }, { status: 400 })
-        }
-        if (kind === 'headless') {
-          // For headless triggers the `agent` field is the role name. Validate
-          // against the canonical role list so misspellings fail at create
-          // time rather than on first fire.
-          if (!(AGENT_ROLES as readonly string[]).includes(body.agent)) {
-            return Response.json(
-              {
-                error: `headless trigger requires 'agent' to be a valid role; got "${body.agent}". Valid: ${AGENT_ROLES.join(', ')}`,
-              },
-              { status: 400 },
-            )
-          }
-        } else if (body.model) {
-          // model only takes effect for headless invocations — agent triggers
-          // route into a running Claude Code session with a fixed model.
-          // Reject loudly so users don't think they configured something
-          // that's silently doing nothing.
+      }
+      const kind: TriggerKind = body.kind ?? 'agent'
+      if (kind !== 'agent' && kind !== 'headless') {
+        return Response.json({ error: `invalid kind "${body.kind}", must be 'agent' or 'headless'` }, { status: 400 })
+      }
+      if (kind === 'headless') {
+        // For headless triggers the `agent` field is the role name. Validate
+        // against the canonical role list so misspellings fail at create
+        // time rather than on first fire.
+        if (!(AGENT_ROLES as readonly string[]).includes(body.agent)) {
           return Response.json(
-            { error: "model is only valid for headless triggers; set kind: 'headless' or remove model" },
+            {
+              error: `headless trigger requires 'agent' to be a valid role; got "${body.agent}". Valid: ${AGENT_ROLES.join(', ')}`,
+            },
             { status: 400 },
           )
         }
-        if (body.retries !== undefined) {
-          if (!Number.isInteger(body.retries) || body.retries < 0 || body.retries > 10) {
-            return Response.json({ error: 'retries must be an integer between 0 and 10' }, { status: 400 })
-          }
-          if (kind !== 'headless' && body.retries > 0) {
-            // Same reason as `model`: agent triggers don't have an attempt cycle
-            // to retry — they message a running session.
-            return Response.json(
-              { error: "retries is only valid for headless triggers; set kind: 'headless' or remove retries" },
-              { status: 400 },
-            )
-          }
+      } else if (body.model) {
+        // model only takes effect for headless invocations — agent triggers
+        // route into a running Claude Code session with a fixed model.
+        // Reject loudly so users don't think they configured something
+        // that's silently doing nothing.
+        return Response.json(
+          { error: "model is only valid for headless triggers; set kind: 'headless' or remove model" },
+          { status: 400 },
+        )
+      }
+      if (body.retries !== undefined) {
+        if (!Number.isInteger(body.retries) || body.retries < 0 || body.retries > 10) {
+          return Response.json({ error: 'retries must be an integer between 0 and 10' }, { status: 400 })
         }
-
-        const id = body.id ?? crypto.randomUUID().slice(0, 8)
-        if (triggerProjection.state.triggers.some((t) => t.id === id)) {
-          return Response.json({ error: 'trigger ID already exists' }, { status: 409 })
+        if (kind !== 'headless' && body.retries > 0) {
+          // Same reason as `model`: agent triggers don't have an attempt cycle
+          // to retry — they message a running session.
+          return Response.json(
+            { error: "retries is only valid for headless triggers; set kind: 'headless' or remove retries" },
+            { status: 400 },
+          )
         }
+      }
 
-        await record('trigger-created', TRIGGERS_STREAM, {
-          id,
-          cron: body.cron,
-          at: body.at,
-          agent: body.agent,
-          prompt: body.prompt,
-          kind,
-          ...(body.model && { model: body.model }),
-          ...(body.retries !== undefined && body.retries > 0 && { retries: body.retries }),
-          actor: body.actor ?? 'api',
-          metadata: body.metadata,
-        } satisfies TriggerCreatedData)
+      const id = body.id ?? crypto.randomUUID().slice(0, 8)
+      if (triggerProjection.state.triggers.some((t) => t.id === id)) {
+        return Response.json({ error: 'trigger ID already exists' }, { status: 409 })
+      }
 
-        const trigger = triggerProjection.state.triggers.find((t) => t.id === id)
-        return Response.json(trigger, { status: 201 })
-      })()
+      await record('trigger-created', TRIGGERS_STREAM, {
+        id,
+        cron: body.cron,
+        at: body.at,
+        agent: body.agent,
+        prompt: body.prompt,
+        kind,
+        ...(body.model && { model: body.model }),
+        ...(body.retries !== undefined && body.retries > 0 && { retries: body.retries }),
+        actor: body.actor ?? 'api',
+        metadata: body.metadata,
+      } satisfies TriggerCreatedData)
+
+      const trigger = triggerProjection.state.triggers.find((t) => t.id === id)
+      return Response.json(trigger, { status: 201 })
     }
 
     if (path === '/triggers' && req.method === 'GET') {
@@ -2325,73 +2299,67 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     }
 
     if (triggerId && req.method === 'PATCH') {
-      return (async () => {
-        const body = (await req.json()) as Record<string, unknown>
-        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId)
-        if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
-        if ('cron' in body || 'at' in body) {
-          return Response.json(
-            { error: 'schedule is immutable; delete and recreate the trigger to change cron or at' },
-            { status: 400 },
-          )
+      const body = (await req.json()) as Record<string, unknown>
+      const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId)
+      if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
+      if ('cron' in body || 'at' in body) {
+        return Response.json(
+          { error: 'schedule is immutable; delete and recreate the trigger to change cron or at' },
+          { status: 400 },
+        )
+      }
+      // Reject unknown fields — no silent drops.
+      const unknown = Object.keys(body).filter((k) => !TRIGGER_UPDATE_FIELDS.has(k))
+      if (unknown.length > 0) {
+        return Response.json({ error: `unknown fields: ${unknown.join(', ')}` }, { status: 400 })
+      }
+      const update: Omit<TriggerUpdatedData, 'id'> = {}
+      if ('agent' in body) {
+        if (typeof body.agent !== 'string') {
+          return Response.json({ error: 'agent must be a string' }, { status: 400 })
         }
-        // Reject unknown fields — no silent drops.
-        const unknown = Object.keys(body).filter((k) => !TRIGGER_UPDATE_FIELDS.has(k))
-        if (unknown.length > 0) {
-          return Response.json({ error: `unknown fields: ${unknown.join(', ')}` }, { status: 400 })
+        update.agent = body.agent
+      }
+      if ('prompt' in body) {
+        if (typeof body.prompt !== 'string') {
+          return Response.json({ error: 'prompt must be a string' }, { status: 400 })
         }
-        const update: Omit<TriggerUpdatedData, 'id'> = {}
-        if ('agent' in body) {
-          if (typeof body.agent !== 'string') {
-            return Response.json({ error: 'agent must be a string' }, { status: 400 })
-          }
-          update.agent = body.agent
+        update.prompt = body.prompt
+      }
+      if ('status' in body) {
+        if (body.status !== 'active' && body.status !== 'disabled') {
+          return Response.json({ error: 'status must be "active" or "disabled"' }, { status: 400 })
         }
-        if ('prompt' in body) {
-          if (typeof body.prompt !== 'string') {
-            return Response.json({ error: 'prompt must be a string' }, { status: 400 })
-          }
-          update.prompt = body.prompt
+        update.status = body.status
+      }
+      if ('metadata' in body) {
+        if (!body.metadata || typeof body.metadata !== 'object' || Array.isArray(body.metadata)) {
+          return Response.json({ error: 'metadata must be a JSON object (not array)' }, { status: 400 })
         }
-        if ('status' in body) {
-          if (body.status !== 'active' && body.status !== 'disabled') {
-            return Response.json({ error: 'status must be "active" or "disabled"' }, { status: 400 })
-          }
-          update.status = body.status
-        }
-        if ('metadata' in body) {
-          if (!body.metadata || typeof body.metadata !== 'object' || Array.isArray(body.metadata)) {
-            return Response.json({ error: 'metadata must be a JSON object (not array)' }, { status: 400 })
-          }
-          update.metadata = body.metadata as Record<string, unknown>
-        }
-        await record('trigger-updated', TRIGGERS_STREAM, {
-          id: triggerId,
-          ...update,
-        } satisfies TriggerUpdatedData)
-        return Response.json({ ...trigger, ...update })
-      })()
+        update.metadata = body.metadata as Record<string, unknown>
+      }
+      await record('trigger-updated', TRIGGERS_STREAM, {
+        id: triggerId,
+        ...update,
+      } satisfies TriggerUpdatedData)
+      return Response.json({ ...trigger, ...update })
     }
 
     if (triggerId && req.method === 'DELETE') {
-      return (async () => {
-        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId)
-        if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
-        await record('trigger-removed', TRIGGERS_STREAM, {
-          id: triggerId,
-        } satisfies TriggerRemovedData)
-        return Response.json({ ok: true })
-      })()
+      const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerId)
+      if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
+      await record('trigger-removed', TRIGGERS_STREAM, {
+        id: triggerId,
+      } satisfies TriggerRemovedData)
+      return Response.json({ ok: true })
     }
 
     const triggerFireMatch = path.match(/^\/triggers\/([^/]+)\/fire$/)
     if (triggerFireMatch && req.method === 'POST') {
-      return (async () => {
-        const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerFireMatch[1])
-        if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
-        await fireTrigger(trigger)
-        return Response.json({ ok: true, triggerId: trigger.id })
-      })()
+      const trigger = triggerProjection.state.triggers.find((t) => t.id === triggerFireMatch[1])
+      if (!trigger) return Response.json({ error: 'not found' }, { status: 404 })
+      await fireTrigger(trigger)
+      return Response.json({ ok: true, triggerId: trigger.id })
     }
 
     // ── Playbook endpoints ──────────────────────────────────────
@@ -2507,17 +2475,15 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // ── History endpoint ────────────────────────────────────────
 
     if (path === '/history') {
-      return (async () => {
-        const taskId = url.searchParams.get('taskId') ?? undefined
-        const last = url.searchParams.get('last')
-        const raw = url.searchParams.get('raw') === 'true'
-        const stream = url.searchParams.get('stream') ?? (taskId ? taskStream(taskId) : undefined)
-        const includeDiagnostics = url.searchParams.get('diagnostics') === 'true'
-        let events = await store.read({ stream })
-        if (!includeDiagnostics) events = events.filter((e) => e.type !== 'permission-request')
-        if (last) events = events.slice(-Number(last))
-        return Response.json({ events: raw ? events : events.map(toApiEvent) })
-      })()
+      const taskId = url.searchParams.get('taskId') ?? undefined
+      const last = url.searchParams.get('last')
+      const raw = url.searchParams.get('raw') === 'true'
+      const stream = url.searchParams.get('stream') ?? (taskId ? taskStream(taskId) : undefined)
+      const includeDiagnostics = url.searchParams.get('diagnostics') === 'true'
+      let events = await store.read({ stream })
+      if (!includeDiagnostics) events = events.filter((e) => e.type !== 'permission-request')
+      if (last) events = events.slice(-Number(last))
+      return Response.json({ events: raw ? events : events.map(toApiEvent) })
     }
 
     // ── Info endpoints ──────────────────────────────────────────
@@ -2560,26 +2526,24 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       // sanctioned dispatchability read is openTasks === 0 && session !== 'offline'.
       // PEER SHAPE IS UNTOUCHED — skip-if-silent pings and channel-identity
       // routing key on the peer `liveness` field exactly as it is.
-      return (async () => {
-        const list = await Promise.all(
-          [...agents.entries()].map(async ([name, entry]) => {
-            const base = { name, role: entry.role, idle: entry.idle, tags: entry.tags }
-            if (entry.role === 'peer') {
-              const peer = peers.get(name)
-              return { ...base, liveness: peer ? await peerLiveness(peer) : 'unknown' }
-            }
-            return {
-              ...base,
-              session: sessionOf(entry),
-              openTasks: openTaskCount(name),
-              ...(entry.lastActivityAt !== undefined && {
-                lastActivityAt: new Date(entry.lastActivityAt).toISOString(),
-              }),
-            }
-          }),
-        )
-        return Response.json({ agents: list })
-      })()
+      const list = await Promise.all(
+        [...agents.entries()].map(async ([name, entry]) => {
+          const base = { name, role: entry.role, idle: entry.idle, tags: entry.tags }
+          if (entry.role === 'peer') {
+            const peer = peers.get(name)
+            return { ...base, liveness: peer ? await peerLiveness(peer) : 'unknown' }
+          }
+          return {
+            ...base,
+            session: sessionOf(entry),
+            openTasks: openTaskCount(name),
+            ...(entry.lastActivityAt !== undefined && {
+              lastActivityAt: new Date(entry.lastActivityAt).toISOString(),
+            }),
+          }
+        }),
+      )
+      return Response.json({ agents: list })
     }
 
     // Identity: minimal, used by probes to verify "is this our jean infra?"
