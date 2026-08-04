@@ -10,13 +10,13 @@
  * as a fake clock that mysteriously does nothing.
  *
  * Each test overrides ONE port and asserts an observable that could not be
- * produced any other way. Two ports are covered elsewhere or not at all:
- * `spawn` is proven by server-factory.test.ts on the path that matters (startup
- * trigger catch-up), and `log` is deliberately unproven — see the note below.
+ * produced any other way. Two are handled elsewhere: `spawn` is proven by
+ * server-factory.test.ts on the path that matters (startup trigger catch-up),
+ * and `log` is deliberately unproven — see the note below.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createStore, jsonlBackend, type StoredEvent } from '../es/index.ts'
 import type { SpawnHeadlessResult } from './librarian.ts'
@@ -124,6 +124,123 @@ describe('injected ports are honoured', () => {
       // never touched. Without this the test would pass even if `?? ` fell
       // through to the default and the injected store were merely ignored.
       expect(existsSync(resolve(dataDir, 'history.jsonl'))).toBe(false)
+    } finally {
+      await handle.stop()
+    }
+  })
+
+  test('deliver — every push routes through the port, and its answer is what "delivered" means', async () => {
+    const dataDir = freshDir('deliver')
+    const seen: { to: string; text: string }[] = []
+    const handle = await createInfraServer({
+      ...baseOpts(dataDir),
+      // Accepts everything, for an agent that was never registered. That is the
+      // evidence: unregistered targets are exactly the case the real default
+      // refuses, so a `true` here can only have come from the injection.
+      ports: {
+        spawn: neverSpawn,
+        deliver: (agent, msg) => {
+          seen.push({ to: agent, text: msg.text ?? '' })
+          return true
+        },
+      },
+    })
+    try {
+      const res = await fetch(`http://127.0.0.1:${handle.port}/send`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ from: 'sensei', to: 'ghost', text: 'hello' }),
+      })
+      expect(await res.json()).toEqual({ delivered: true })
+      expect(seen).toEqual([{ to: 'ghost', text: 'hello' }])
+    } finally {
+      await handle.stop()
+    }
+  })
+
+  test('schedule/unschedule — croner is never reached; the port sees the trigger', async () => {
+    const dataDir = freshDir('schedule')
+    const scheduled: { id: string; spec: unknown }[] = []
+    const cancelled: string[] = []
+    const handle = await createInfraServer({
+      ...baseOpts(dataDir),
+      ports: {
+        spawn: neverSpawn,
+        schedule: (id, spec) => void scheduled.push({ id, spec }),
+        unschedule: (id) => void cancelled.push(id),
+      },
+    })
+    const base = `http://127.0.0.1:${handle.port}`
+    try {
+      await fetch(`${base}/triggers`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id: 'nightly',
+          cron: '0 3 * * *',
+          agent: 'architect',
+          prompt: 'tidy up',
+          actor: 'test',
+        }),
+      })
+      expect(await eventually(() => scheduled.length === 1)).toBe(true)
+      expect(scheduled[0]).toEqual({ id: 'nightly', spec: { cron: '0 3 * * *' } })
+
+      // Removing it must cancel through the port too — a `schedule` with no
+      // matching `unschedule` would leak a job on every trigger edit.
+      await fetch(`${base}/triggers/nightly`, { method: 'DELETE' })
+      expect(await eventually(() => cancelled.includes('nightly'))).toBe(true)
+    } finally {
+      await handle.stop()
+    }
+  })
+
+  test('probe — the pre-flight reachability check is injectable, so catch-up makes no network call', async () => {
+    const dataDir = freshDir('probe')
+    // An overdue headless trigger WITH retries: `doProbe` is `retries > 0`, so
+    // this is the only shape that reaches the probe at all. Startup catch-up
+    // fires it before createInfraServer() resolves; without the injection that
+    // is a live call to the Anthropic API from inside `bun test`.
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString()
+    const events = [
+      {
+        id: 1,
+        stream: 'triggers',
+        type: 'trigger-created',
+        ts: twoDaysAgo,
+        data: {
+          id: 'overdue',
+          cron: '0 * * * *',
+          agent: 'architect',
+          prompt: 'catch me up',
+          actor: 'test',
+          kind: 'headless',
+          retries: 1,
+        },
+      },
+      {
+        id: 2,
+        stream: 'triggers',
+        type: 'trigger-fired',
+        ts: twoDaysAgo,
+        data: { triggerId: 'overdue', agent: 'architect', prompt: 'catch me up', kind: 'headless' },
+      },
+    ]
+    writeFileSync(resolve(dataDir, 'history.jsonl'), `${events.map((e) => JSON.stringify(e)).join('\n')}\n`)
+
+    let probes = 0
+    const handle = await createInfraServer({
+      ...baseOpts(dataDir),
+      ports: {
+        spawn: neverSpawn,
+        probe: async () => {
+          probes++
+          return { ok: true, latencyMs: 7 }
+        },
+      },
+    })
+    try {
+      expect(await eventually(() => probes > 0)).toBe(true)
     } finally {
       await handle.stop()
     }

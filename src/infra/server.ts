@@ -32,9 +32,12 @@ import { resolveConfig } from './config.ts'
 import { resolveConnectors } from './connectors/config.ts'
 import { SourceQueue } from './connectors/queue.ts'
 import { createSourceConnector, sourceContext } from './connectors/source.ts'
+import type { AttentionView } from './core/attention.ts'
+import { createAttentionListener } from './core/attention-listener.ts'
 import { createEventBus } from './core/bus.ts'
-import { buildInbox, isUserSender, renderInboxLine, renderInboxWake } from './inbox.ts'
-import { commitConsolidation, type LibrarianPhase, probeAnthropicAPI, recoverWikiLayout } from './librarian.ts'
+import { planTriggers } from './core/triggers.ts'
+import { buildInbox, isUserSender, renderInboxLine } from './inbox.ts'
+import { commitConsolidation, type LibrarianPhase, recoverWikiLayout } from './librarian.ts'
 import { type AgentSession, classifySession, envMs } from './liveness.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
 import { ambientPorts, type InfraPorts } from './ports.ts'
@@ -222,13 +225,20 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   // the startup catch-up block both declare their own `const now`, and a
   // factory-scope `now` would be shadowed by one and collide with the other.
   //
-  // `store` defaults to this dojo's history.jsonl — per-instance, which is why
-  // it does not live in `ambientPorts`.
+  // Four of the defaults are PER-INSTANCE and so cannot live in `ambientPorts`:
+  // `store` is bound to this dojo's history.jsonl, `deliver` closes over this
+  // instance's agent registry, and `schedule`/`unschedule` over its croner job
+  // table. All four are function declarations or already-built values, so
+  // referencing them here — above their definitions — is safe.
   const ports: InfraPorts = {
     now: opts.ports?.now ?? ambientPorts.now,
     log: opts.ports?.log ?? ambientPorts.log,
     spawn: opts.ports?.spawn ?? ambientPorts.spawn,
+    probe: opts.ports?.probe ?? ambientPorts.probe,
     store: opts.ports?.store ?? createStore(jsonlBackend(HISTORY_PATH)),
+    deliver: opts.ports?.deliver ?? deliverToAgent,
+    schedule: opts.ports?.schedule ?? startCronJob,
+    unschedule: opts.ports?.unschedule ?? stopCronJob,
   }
 
   // Chat bridge (Telegram / Slack, optional) — selected from config, wired at
@@ -367,6 +377,30 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   bus.subscribe({ name: 'triggers', apply: (e) => void triggerProjection.apply(e) })
   bus.subscribe({ name: 'playbooks', apply: (e) => void playbookProjection.apply(e) })
 
+  // ── The attention listener — REGISTERED LAST, and that is semantics ───
+  //
+  // It decides against POST-apply projection state (what is pending now, what
+  // is blocking now), so every projection above must have run first. See
+  // core/bus.ts. Its decisions are pure (core/attention.ts); this executor is
+  // the only thing that touches the world, and it never decides anything —
+  // `run()` in the listener owns the commit-iff-landed sequence.
+  const attention = createAttentionListener({
+    deliver: (to, text) => ports.deliver(to, { type: 'deliver', from: 'infra', text }),
+    markBusy: (agent) => {
+      const entry = agents.get(agent)
+      if (entry) entry.idle = false
+    },
+    stamp: (via) => stampDelivery(via),
+    emitNudge: (data) => void record('nudge', SYSTEM_STREAM, data satisfies NudgeData),
+  })
+  bus.subscribe({
+    name: 'attention',
+    // `hadBlockingBefore` is the pre-append capture from record() (race guard
+    // 1) — it rides the publish context because no subscriber can reconstruct
+    // it after the fact.
+    apply: (e, ctx) => attention.onEvent(e, viewNow(ports.now()), ctx.hadBlockingPending),
+  })
+
   // Replay folds the projections DIRECTLY and never touches the bus — the
   // structural separation that stops a restart re-emitting historical effects.
   // See core/bus.ts, "REPLAY NEVER PUBLISHES".
@@ -432,13 +466,18 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     }
   }
 
-  function findSensei(): AgentEntry | undefined {
-    for (const entry of agents.values()) {
-      if (entry.role === 'sensei') return entry
+  /** The connected sensei, by NAME as well as entry: the name is what keys the
+   *  attention state and what `ports.deliver` addresses, so every sensei push
+   *  goes through the one port rather than reaching into the entry. */
+  function findSensei(): { name: string; entry: AgentEntry } | undefined {
+    for (const [name, entry] of agents) {
+      if (entry.role === 'sensei') return { name, entry }
     }
     return undefined
   }
 
+  /** The DEFAULT implementation of the `deliver` port (ports.ts). Call sites go
+   *  through `ports.deliver`, which is this unless something was injected. */
   function deliverToAgent(agentName: string, msg: DeliverMsg): boolean {
     const entry = agents.get(agentName)
     if (!entry) return false
@@ -505,9 +544,9 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
    *  can't recurse; no-ops when the sender isn't a locally-deliverable agent
    *  (cli/api/unknown). */
   function notifyUndelivered(sender: string, target: string, reason: string): void {
-    const entry = agents.get(sender)
-    if (!entry) return
-    entry.deliver({
+    // Through the port like every other delivery — the "no such agent" check it
+    // used to do inline is what `ports.deliver` returning false already means.
+    ports.deliver(sender, {
       type: 'deliver',
       from: 'infra',
       text: `⚠️ Your message to "${target}" was NOT delivered — ${reason}. Nothing was sent. Check the name (jean agent list / jean peer list); the target's infra may be down.`,
@@ -538,7 +577,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       return blocked.length === 1 ? (blocked[0] as StoredEvent).id : null
     })()
 
-    const delivered = deliverToAgent(args.to, {
+    const delivered = ports.deliver(args.to, {
       type: 'deliver',
       from: args.from,
       text: args.text,
@@ -614,44 +653,29 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   // ── Record event (append + project + side effects) ───────────────
 
   async function record(type: string, stream: string, data: unknown): Promise<StoredEvent> {
-    // Captured BEFORE apply: a blocking arrival starts a new wake episode only
-    // when nothing blocking was already pending (burst coalescing).
+    // RACE GUARD 1, and its position is the guard: captured BEFORE the append,
+    // because a blocking arrival starts a new wake episode only when nothing
+    // blocking was already pending (burst coalescing). After the append the
+    // event is in the queue and the question is unanswerable. It rides the
+    // publish context to the attention listener — see core/bus.ts.
     const hadBlockingBefore = hasBlockingPending()
     const event = await store.append({ stream, type, data })
     // Synchronous and ordered: every subscriber runs to completion before this
-    // returns. The subscriber list and its order are set up once at
-    // construction — see `bus.subscribe` calls below the projections, and
-    // core/bus.ts for why the order is semantics rather than style.
-    bus.publish(event)
+    // returns, attention last. That is the whole of record()'s dispatch now —
+    // the queue resets, the arrival decision and the three push paths all live
+    // in core/attention.ts.
+    bus.publish(event, { hadBlockingPending: hadBlockingBefore })
+    // These two used to run BEFORE the attention dispatch, which was inline
+    // below them; now attention rides the publish above, so they follow it.
+    // Deliberate and inert: `syncTriggerJobs` only touches the croner job table
+    // synchronously (its `fireTrigger` calls are deferred and cannot change
+    // pending state before attention has already decided), and `log` carries no
+    // contract at all — Leonid's ruling, see ports.ts.
     if (stream === TRIGGERS_STREAM) syncTriggerJobs()
 
     const taskId = taskIdFromStream(stream)
     const agent = (data as Record<string, unknown>)?.agent as string | undefined
     ports.log(`[jean] ${type}${agent ? ` agent=${agent}` : ''}${taskId ? ` task=${taskId}` : ''}\n`)
-
-    // Stall-watchdog clock: starts when pending becomes non-empty, clears when drained.
-    // A drained queue also ends the machine-nudge episode (attention phase 4): the
-    // next arrival on an empty queue is genuinely new news and nudges immediately.
-    if (pendingProjection.state.length === 0) {
-      pendingSince = null
-      resetNudgeEpisode()
-    } else pendingSince ??= ports.now()
-
-    // Blocking episode ends the moment blocking drains (ack) — reset here, not
-    // only on the backoff tick, so a new human message right after a drain gets
-    // its immediate wake instead of tripping the stale-episode race guard.
-    if (!hasBlockingPending()) blockingWakeCount = 0
-
-    // Did THIS event enter pending? Checked directly by id — a length-compare
-    // across record()'s await is maskable by an interleaved ack shrinking the
-    // queue (review finding), which would silently skip the wake/nudge dispatch.
-    const enteredPending = pendingProjection.state.some((e) => e.id === event.id)
-    if (enteredPending) {
-      // Attention phase 2: a human waiting wakes regardless of the idle flag;
-      // machine events keep the idle-gated nudge.
-      if (isBlockingEvent(event)) onBlockingArrival(hadBlockingBefore)
-      else nudgeSenseiIfIdle()
-    }
 
     return event
   }
@@ -857,78 +881,13 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     return [120_000, 300_000, 600_000]
   })()
 
-  /** Wakes fired in the current blocking episode (resets when blocking drains). */
-  let blockingWakeCount = 0
-  let lastBlockingWakeAt = 0
-
-  function wakeSenseiBlocking() {
-    const sensei = findSensei()
-    if (!sensei) return // nobody to wake; the piggyback + a future connect carry it
-    const inbox = senseiInboxNow()
-    const landed = sensei.deliver({
-      type: 'deliver',
-      from: 'infra',
-      text: `A human is waiting — delivered regardless of idle state. Handle blocking first; finish your current step, don't start new unrelated work.\n${inbox ? renderInboxWake(inbox) : 'Check the board.'}`,
-    })
-    // NOTHING THAT DIDN'T HAPPEN GETS RECORDED (review finding [A], applied to
-    // every push path by symmetry). A wake the transport refused — a dead socket
-    // whose close handler hasn't run — must not advance the episode, stamp the
-    // ledger, push the watchdog clock, or leave a `nudge` event claiming the
-    // sensei was told. Leaving blockingWakeCount at 0 is precisely the
-    // "unstarted episode" state the backoff tick self-heals, so an undelivered
-    // wake is retried on the next tick (≤15s) instead of after a backoff window
-    // — the same treatment the no-sensei-at-all case already gets above.
-    if (!landed) return
-    pendingSince = ports.now()
-    sensei.idle = false
-    lastBlockingWakeAt = ports.now()
-    blockingWakeCount++
-    stampDelivery('wake')
-    void record('nudge', SYSTEM_STREAM, {
-      pendingCount: pendingProjection.state.length,
-      blocking: true,
-    } satisfies NudgeData)
-  }
-
-  /** Called from record() when a blocking event lands. A NEW episode (no blocking
-   *  was pending before) wakes immediately; arrivals during an active episode are
-   *  coalesced — the existing wake + climbing piggyback ages cover the burst, and
-   *  the backoff loop below re-wakes if it stays unhandled. */
-  function onBlockingArrival(hadBlockingBefore: boolean) {
-    if (hadBlockingBefore) return
-    // Race guard: two near-simultaneous arrivals can BOTH capture
-    // hadBlockingBefore=false across record()'s await — without this check the
-    // second would fire a duplicate immediate wake. A very recent blocking wake
-    // means the episode is already live; the backoff loop owns any re-wake.
-    if (blockingWakeCount > 0 && ports.now() - lastBlockingWakeAt < 30_000) return
-    blockingWakeCount = 0 // fresh episode — reset any stale backoff state
-    wakeSenseiBlocking()
-  }
-
   // Backoff loop: while blocking events sit unhandled, re-wake on the schedule.
-  // Quiet when there's nothing blocking (and resets the episode counter then).
-  //
-  // SELF-HEALING (review finding, empirically proven): blocking pending with
-  // count === 0 is an UNSTARTED episode — the arrival wake was missed (no sensei
-  // connected at arrival, infra restarted with blocking persisted in pending, or
-  // the arrival was masked by an interleaved ack across record()'s await). The
-  // tick fires wake #1 itself, so every such state converges within one tick
-  // (≤15 s) of a sensei being available, instead of failing closed until the
-  // watchdog — which would silently recreate the very stall class this phase
-  // exists to kill.
+  // The decision — including the self-healing unstarted-episode case — is
+  // core/attention.ts's `decideBlockingTick`. This callback is a single call
+  // with no branching on state, which is the acceptance check for the
+  // extraction: if a timer callback still branches, it isn't done.
   const blockingTickMs = Math.min(15_000, ...BLOCKING_BACKOFF_MS)
-  const blockingTick = setInterval(() => {
-    if (!hasBlockingPending()) {
-      blockingWakeCount = 0
-      return
-    }
-    if (blockingWakeCount === 0) {
-      wakeSenseiBlocking() // no-op if no sensei yet; retried next tick
-      return
-    }
-    const delay = BLOCKING_BACKOFF_MS[Math.min(blockingWakeCount - 1, BLOCKING_BACKOFF_MS.length - 1)] as number
-    if (ports.now() - lastBlockingWakeAt >= delay) wakeSenseiBlocking()
-  }, blockingTickMs)
+  const blockingTick = setInterval(() => attention.tick(viewNow(ports.now())), blockingTickMs)
 
   /** Attach the compact inbox line as a response header when the request came
    *  from the sensei's channel plugin (`x-jean-agent`). Header-only — response
@@ -1067,10 +1026,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
   // ── Sensei nudge ──────────────────────────────────────────────────
 
-  // Stall-watchdog clock: when pending last went non-empty, or when the last
-  // nudge (either kind) fired — whichever is later. Null while pending is empty.
-  let pendingSince: number | null = pendingProjection.state.length > 0 ? ports.now() : null
-
   // ── Machine-nudge episode backoff (attention phase 4) ────────────
   //
   // The goals dojo's event 10077: SIX re-nudges in ~25s on ONE deliberately-held
@@ -1105,66 +1060,10 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     return [60_000, 120_000, 300_000, 600_000]
   })()
 
-  /** Machine-nudge episode state. Resets when pending drains (record()). */
-  let nudgeCount = 0
-  let lastNudgeAt = 0
-  /** Highest pending event id the sensei has already been told about. */
-  let maxNudgedPendingId = 0
-
-  function resetNudgeEpisode() {
-    nudgeCount = 0
-    lastNudgeAt = 0
-    maxNudgedPendingId = 0
-  }
-
-  /** Has an event entered pending since the last nudge? Id-based, not
-   *  count-based: an ack + an arrival between two nudges leaves the count equal
-   *  while the content is genuinely new. */
-  function pendingHasNewContent(): boolean {
-    for (const e of pendingProjection.state) {
-      if (e.id > maxNudgedPendingId) return true
-    }
-    return false
-  }
-
-  function shouldNudge(): boolean {
-    if (nudgeCount === 0) return true
-    if (pendingHasNewContent()) return true
-    const delay = NUDGE_BACKOFF_MS[Math.min(nudgeCount - 1, NUDGE_BACKOFF_MS.length - 1)] as number
-    return ports.now() - lastNudgeAt >= delay
-  }
-
-  function nudgeSenseiIfIdle() {
-    const sensei = findSensei()
-    // The idle gate is checked BEFORE any episode bookkeeping: a suppressed-
-    // because-busy call must not consume the content-changed signal, or the
-    // event that arrived mid-turn would never be announced at turn-end.
-    if (!sensei?.idle) return
-    if (pendingProjection.state.length === 0) return
-    if (!shouldNudge()) return
-
-    const inbox = senseiInboxNow()
-    const landed = sensei.deliver({
-      type: 'deliver',
-      from: 'infra',
-      // Full inbox on wakes (docs/attention.md §2): triage needs zero fetches.
-      text: inbox ? renderInboxWake(inbox) : 'Events pending. Check the board.',
-    })
-    // A nudge that never left the process tells the sensei nothing, so it must
-    // not consume the episode (review finding [A], 3x convergent). Advancing
-    // nudgeCount/lastNudgeAt here would suppress re-announcement for a whole
-    // backoff window — pre-phase-4, the next /agent-idle simply re-nudged.
-    if (!landed) return
-    pendingSince = ports.now()
-    sensei.idle = false
-    nudgeCount++
-    lastNudgeAt = ports.now()
-    for (const e of pendingProjection.state) {
-      if (e.id > maxNudgedPendingId) maxNudgedPendingId = e.id
-    }
-    stampDelivery('wake')
-    void record('nudge', SYSTEM_STREAM, { pendingCount: pendingProjection.state.length } satisfies NudgeData)
-  }
+  // The episode bookkeeping this backoff needs — counters, the content-changed
+  // signal, the idle gate — is core/attention.ts's `decideNudge`. Its state is
+  // per-agent now (sensei the only populated key), which is what makes the
+  // phase-5 worker queues a matter of adding keys rather than adding globals.
 
   // ── Stall watchdog ────────────────────────────────────────────────
   // A missed Stop hook leaves the sensei stuck at idle:false, which suppresses
@@ -1175,80 +1074,81 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   // nudge fired, force one that ignores the idle flag. Quiet when healthy —
   // fires only while events are actually undrained, then re-arms for a full
   // window, so a wedged sensei gets one reminder per window, not a flood.
+  // The rule itself — including standing down while blocking is pending — is
+  // core/attention.ts's `decideStallTick`.
 
   const stallEnv = Number(process.env.JEAN_STALL_NUDGE_MS)
   const STALL_NUDGE_AFTER_MS = Number.isFinite(stallEnv) && stallEnv > 0 ? stallEnv : 10 * 60_000
 
-  function fireStallWatchdog() {
-    // While ANY blocking event is pending, the blocking path owns delivery and
-    // the watchdog stands down. Its re-wakes ARE the delivery attempts (each
-    // carries the full inbox including machine counts), and at the 10m backoff
-    // cap the two clocks run at identical periods and would double-fire seconds
-    // apart (review probe, 2026-07-24).
-    //
-    // The condition is "blocking is pending", NOT "a blocking episode has fired"
-    // (review finding [H]). Since [A] stopped failed deliveries from advancing
-    // blockingWakeCount, an UNSTARTED episode — blocking pending against a dead
-    // transport — sits at count 0, which the old `count > 0` guard didn't cover:
-    // the sensei reconnecting between the watchdog's check and the blocking tick
-    // got a duplicate push, with the ledger crediting 'heartbeat' for an event
-    // the blocking path owned. Standing down on pendingness costs nothing,
-    // because an unstarted episode self-heals within one blocking tick (≤15s),
-    // far inside the watchdog's own window.
-    if (hasBlockingPending()) return
+  /**
+   * The world as the attention decisions are allowed to see it — built FRESH at
+   * every decision point, never cached.
+   *
+   * That freshness is a guard, not a style choice: the delivered inbox and the
+   * `pendingCount` recorded on the `nudge` event both come out of this one
+   * snapshot, so they cannot disagree. A cached inbox is exactly the bug
+   * scenario 6 pins (counts 1 → 2 → 1 — the falling leg is what a stale
+   * snapshot gets wrong).
+   *
+   * `now` is a PARAMETER rather than a `ports.now()` call inside, so the clock
+   * is read at the call site: the position rule from stage 2 (see ports.ts).
+   *
+   * The inbox is built only when there is someone to push to, matching the
+   * pre-refactor paths — all three called `senseiInboxNow()` only after their
+   * own `findSensei()` check had passed.
+   */
+  function viewNow(now: number): AttentionView {
     const sensei = findSensei()
-    if (!sensei) return // nobody to wake; clock stays armed for when one connects
-    const minutes = Math.max(1, Math.round(STALL_NUDGE_AFTER_MS / 60_000))
-    const inbox = senseiInboxNow()
-    const landed = sensei.deliver({
-      type: 'deliver',
-      from: 'infra',
-      text: `Watchdog: events pending for over ${minutes} min. (Sent regardless of your idle state — your Stop hook may have misfired.)\n${inbox ? renderInboxWake(inbox) : 'Check the board.'}`,
-    })
-    // Same rule as the other push paths: a refused delivery must not re-arm the
-    // window (that would silence the backstop for another full period) or leave a
-    // `nudge` event claiming a reminder was sent. It simply retries next tick.
-    if (!landed) return
-    pendingSince = ports.now()
-    sensei.idle = false
-    stampDelivery('heartbeat')
-    void record('nudge', SYSTEM_STREAM, {
-      pendingCount: pendingProjection.state.length,
-      forced: true,
-    } satisfies NudgeData)
+    const pending = pendingProjection.state
+    return {
+      now,
+      agent: sensei?.name ?? null,
+      idle: sensei?.entry.idle ?? false,
+      pendingIds: pending.map((e) => e.id),
+      blockingPendingIds: pending.filter(isBlockingEvent).map((e) => e.id),
+      inbox: sensei ? senseiInboxNow() : null,
+      blockingBackoffMs: BLOCKING_BACKOFF_MS,
+      nudgeBackoffMs: NUDGE_BACKOFF_MS,
+      stallAfterMs: STALL_NUDGE_AFTER_MS,
+    }
   }
 
-  const stallTick = setInterval(
-    () => {
-      if (pendingSince !== null && ports.now() - pendingSince >= STALL_NUDGE_AFTER_MS) fireStallWatchdog()
-    },
-    Math.min(STALL_NUDGE_AFTER_MS, 60_000),
-  )
+  // Boot state, once, AFTER catch-up and never during it: counters at zero and
+  // the stall clock armed from the replayed queue. The listener has no replay
+  // path — see core/bus.ts, "REPLAY NEVER PUBLISHES".
+  attention.hydrate(viewNow(ports.now()))
+
+  // The second of the two timer callbacks, and like the first it is one call
+  // with no branching on state. Both drive the SAME `core.tick`; the stall
+  // check therefore also runs on the blocking interval's faster grid, which can
+  // only shorten the latency AFTER its threshold, never fire before it.
+  const stallTick = setInterval(() => attention.tick(viewNow(ports.now())), Math.min(STALL_NUDGE_AFTER_MS, 60_000))
 
   // ── Trigger scheduler ───────────────────────────────────────────
 
   const cronJobs = new Map<string, Cron>()
 
-  function startTriggerJob(trigger: Trigger) {
-    if (cronJobs.has(trigger.id)) return
-    const callback = () => {
-      void fireTrigger(trigger)
-    }
-    // Trigger type is a discriminated union: exactly one of cron or at.
-    let job: Cron
-    let desc: string
-    if (trigger.cron !== undefined) {
-      job = new Cron(trigger.cron, { catch: true }, callback)
-      desc = `(${trigger.cron})`
-    } else {
-      job = new Cron(new Date(trigger.at), { catch: true }, callback)
-      desc = `(at ${trigger.at})`
-    }
-    cronJobs.set(trigger.id, job)
-    ports.log(`[jean] trigger ${trigger.id} scheduled ${desc}\n`)
+  /** What the SCHEDULE PORT has been asked to run, which is not the same thing
+   *  as what croner is running: an injected port keeps its own jobs (or none),
+   *  and `cronJobs` below is only the default implementation's private table.
+   *  Deriving "what is scheduled" from croner would mean an injected `schedule`
+   *  never produced a matching `unschedule` — the port honoured on the way in
+   *  and ignored on the way out. */
+  const scheduledIds = new Set<string>()
+
+  /** The DEFAULT implementation of the `schedule` port (ports.ts) — croner, and
+   *  nothing else. It decides nothing: what to schedule, what is overdue and
+   *  what to cancel is core/triggers.ts's `planTriggers`. */
+  function startCronJob(id: string, spec: { cron: string } | { at: string }, fire: () => void) {
+    if (cronJobs.has(id)) return
+    const job =
+      'cron' in spec ? new Cron(spec.cron, { catch: true }, fire) : new Cron(new Date(spec.at), { catch: true }, fire)
+    cronJobs.set(id, job)
+    ports.log(`[jean] trigger ${id} scheduled ${'cron' in spec ? `(${spec.cron})` : `(at ${spec.at})`}\n`)
   }
 
-  function stopTriggerJob(id: string) {
+  /** The DEFAULT implementation of the `unschedule` port. */
+  function stopCronJob(id: string) {
     const job = cronJobs.get(id)
     if (job) {
       job.stop()
@@ -1257,25 +1157,20 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   }
 
   function syncTriggerJobs() {
-    const active = new Set<string>()
-    for (const trigger of triggerProjection.state.triggers) {
-      if (trigger.status !== 'active') continue
-      active.add(trigger.id)
-
-      if (cronJobs.has(trigger.id)) continue
-
-      // One-off trigger whose time has passed — fire immediately
-      if (trigger.at && new Date(trigger.at).getTime() <= ports.now()) {
+    const plan = planTriggers(triggerProjection.state.triggers, scheduledIds, ports.now())
+    // An overdue one-off fires instead of being scheduled, so it never enters
+    // the scheduled set — matching the pre-refactor behaviour exactly.
+    for (const trigger of plan.fireNow) void fireTrigger(trigger)
+    for (const trigger of plan.schedule) {
+      // The Trigger type is a discriminated union: exactly one of cron or at.
+      ports.schedule(trigger.id, trigger.cron !== undefined ? { cron: trigger.cron } : { at: trigger.at }, () => {
         void fireTrigger(trigger)
-        continue
-      }
-
-      startTriggerJob(trigger)
+      })
+      scheduledIds.add(trigger.id)
     }
-
-    // Stop jobs for triggers no longer active
-    for (const id of cronJobs.keys()) {
-      if (!active.has(id)) stopTriggerJob(id)
+    for (const id of plan.unschedule) {
+      ports.unschedule(id)
+      scheduledIds.delete(id)
     }
   }
 
@@ -1321,7 +1216,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
     let probeLatencyMs: number | undefined
     if (doProbe) {
-      const probe = await probeAnthropicAPI()
+      const probe = await ports.probe()
       probeLatencyMs = probe.latencyMs
       if (!probe.ok) {
         ports.log(`[jean] trigger ${trigger.id}${attemptTag} probe failed (${probe.latencyMs}ms): ${probe.error}\n`)
@@ -1589,7 +1484,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       return
     }
 
-    const delivered = deliverToAgent(trigger.agent, {
+    const delivered = ports.deliver(trigger.agent, {
       type: 'deliver',
       from: 'trigger',
       text: trigger.prompt,
@@ -2273,7 +2168,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData)
 
         if (role === 'sensei') {
-          nudgeSenseiIfIdle()
+          attention.nudge(viewNow(ports.now()))
         }
 
         return Response.json({ ok: true })
@@ -2716,7 +2611,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       return Response.json({
         ...identity(),
         agents: [...agents.entries()].map(([n, e]) => ({ name: n, role: e.role })),
-        sensei: sensei ? { connected: true, idle: sensei.idle } : { connected: false },
+        sensei: sensei ? { connected: true, idle: sensei.entry.idle } : { connected: false },
         pendingEvents: pendingProjection.state.length,
         activeTriggers: triggerProjection.state.triggers.filter((t) => t.status === 'active').length,
         bridge:
@@ -2818,9 +2713,21 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
                   // sensei is blind (we deliberately suppressed the register
                   // event to avoid the nudge-flood problem) and the newcomer's
                   // stderr is easy to miss inside a Claude Code TUI.
+                  //
+                  // The fourth direct sensei push, and it goes through the port
+                  // like the other three — it is adapter-initiated (not an
+                  // attention decision), but "the port covers every delivery" is
+                  // only worth something if it has no exceptions.
+                  //
+                  // PRE-EXISTING, LEFT ALONE: `sensei.entry.deliver !==
+                  // wsDeliver(ws)` is always true, because wsDeliver returns a
+                  // fresh closure on every call. The intent was "don't notify
+                  // the sensei about its own rejected duplicate". Preserved
+                  // verbatim — this is a behaviour-preserving stage, and the
+                  // condition is reported rather than quietly fixed.
                   const sensei = findSensei()
-                  if (sensei && sensei.deliver !== wsDeliver(ws)) {
-                    sensei.deliver({
+                  if (sensei && sensei.entry.deliver !== wsDeliver(ws)) {
+                    ports.deliver(sensei.name, {
                       type: 'deliver',
                       from: 'infra',
                       text:
@@ -2894,7 +2801,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
               if (role === 'sensei') {
                 const greeting = setTimeout(() => {
                   greetingTimers.delete(greeting)
-                  deliverToAgent(msg.agent, {
+                  ports.deliver(msg.agent, {
                     type: 'deliver',
                     from: 'infra',
                     text: 'You just connected. Check the board and events to get up to date.',
@@ -3015,7 +2922,10 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     stopped = true
     clearInterval(blockingTick)
     clearInterval(stallTick)
-    for (const id of [...cronJobs.keys()]) stopTriggerJob(id)
+    // Everything the schedule port was asked to run — not croner's own table,
+    // which an injected port never populates.
+    for (const id of [...scheduledIds]) ports.unschedule(id)
+    scheduledIds.clear()
     if (playbookDebounce) clearTimeout(playbookDebounce)
     playbookDebounce = null
     playbookWatcher?.close()

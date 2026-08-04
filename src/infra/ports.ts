@@ -29,7 +29,8 @@
  */
 
 import type { EventStore } from '../es/index.ts'
-import { spawnHeadless } from './librarian.ts'
+import { probeAnthropicAPI, spawnHeadless } from './librarian.ts'
+import type { DeliverMsg } from './protocol.ts'
 
 export type InfraPorts = {
   /** Wall clock, epoch ms. Call it where `Date.now()` was called — see the
@@ -61,22 +62,48 @@ export type InfraPorts = {
    *  it finds, so an in-process caller with a stale fixture would otherwise
    *  launch real `claude` processes. */
   spawn: typeof spawnHeadless
-  /** The event log. Already port-shaped before this stage — `store` is referenced
-   *  as a bare identifier throughout, so it needs no call-site rewrites — which
-   *  is exactly why it is wired here and `deliver`/`schedule` are not. */
+  /** Pre-flight reachability check before a headless run. Injectable for the
+   *  same reason as `spawn`: it is a live network call on the retry path, and a
+   *  test driving trigger catch-up must not make one. */
+  probe: typeof probeAnthropicAPI
+  /** The event log. Already port-shaped before stage 2 — `store` is referenced
+   *  as a bare identifier throughout, so it needed no call-site rewrites, which
+   *  is why it landed a stage before `deliver` and `schedule`. */
   store: EventStore
+  /** Push a message to a locally-registered agent; returns whether the
+   *  transport accepted it.
+   *
+   *  IT CAPTURES EVERY DELIVERY PATH, and that is the whole point — a port
+   *  covering a third of delivery is worse than none, because it reads as
+   *  complete. All of these go through here: the routed `send`, trigger
+   *  dispatch, the undelivered-notice back to a sender, the three attention
+   *  pushes (blocking wake, machine nudge, stall watchdog), and the
+   *  duplicate-session notice.
+   *
+   *  Per-instance default (it closes over the agent registry), so the factory
+   *  supplies it rather than `ambientPorts`. */
+  deliver: (agent: string, msg: DeliverMsg) => boolean
+  /** Run `fire` on a schedule — a cron expression or a one-off date. MECHANISM
+   *  ONLY: whether a trigger is due, overdue, or should be cancelled is decided
+   *  in core/triggers.ts. Re-scheduling an existing id is a no-op, matching the
+   *  croner default it wraps. */
+  schedule: (id: string, spec: { cron: string } | { at: string }, fire: () => void) => void
+  unschedule: (id: string) => void
 }
 
 /**
- * The ambient defaults: real clock, real stderr, real spawner.
+ * The ambient defaults: real clock, real stderr, real spawner, real probe.
  *
- * `store` is absent on purpose: its default is per-instance (a store bound to
- * that dojo's history.jsonl), so only the factory can build it.
+ * `store`, `deliver`, `schedule` and `unschedule` are absent on purpose — every
+ * one of them has a PER-INSTANCE default (a store bound to that dojo's
+ * history.jsonl; the agent registry; that instance's croner job table), so only
+ * the factory can build them.
  */
-export const ambientPorts: Pick<InfraPorts, 'now' | 'log' | 'spawn'> = {
+export const ambientPorts: Pick<InfraPorts, 'now' | 'log' | 'spawn' | 'probe'> = {
   now: () => Date.now(),
   log: (message: string) => {
     process.stderr.write(message)
   },
   spawn: spawnHeadless,
+  probe: probeAnthropicAPI,
 }

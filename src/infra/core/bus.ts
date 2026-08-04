@@ -56,18 +56,35 @@
 
 import type { StoredEvent } from '../../es/index.ts'
 
-/** Projections already satisfy this shape, so they need no adapter — only a
- *  name, which `Projection<S>` does not carry. */
+/**
+ * Facts about the instant BEFORE the append that no subscriber can reconstruct
+ * afterwards, so the publisher has to carry them.
+ *
+ * There is exactly one, and it is race guard 1: whether anything blocking was
+ * already pending when this event was appended. A blocking arrival starts a new
+ * wake episode only if it is the FIRST one — and by the time a subscriber runs,
+ * the event is already in the queue, so "was there blocking before me?" is
+ * unanswerable from live state. Capturing it here, at the call site, is the
+ * guard; recomputing it downstream is the bug.
+ *
+ * Keep this to facts with that property. It is not a general side-channel.
+ */
+export type PublishContext = {
+  hadBlockingPending: boolean
+}
+
+/** Projections already satisfy this shape (they ignore the context), so they
+ *  need no adapter — only a name, which `Projection<S>` does not carry. */
 export type Subscriber = {
   /** Diagnostic only: it names the subscriber in error messages and lets a test
    *  assert registration ORDER, which is semantics (see above). */
   name: string
-  apply: (event: StoredEvent) => void
+  apply: (event: StoredEvent, ctx: PublishContext) => void
 }
 
 export type EventBus = {
   subscribe: (sub: Subscriber) => void
-  publish: (event: StoredEvent) => void
+  publish: (event: StoredEvent, ctx: PublishContext) => void
   /** Registered names, in order. For assertions and diagnostics. */
   names: () => string[]
 }
@@ -86,16 +103,21 @@ export function createEventBus(): EventBus {
       subscribers.push(sub)
     },
 
-    publish(event) {
+    publish(event, ctx) {
+      // Saved and restored rather than set/cleared: a nested publish (nothing
+      // does one today — the `void record(...)` paths all await an append
+      // first) would otherwise clear the flag on its way out and re-open
+      // subscription for the rest of the OUTER publish.
+      const wasPublishing = publishing
       publishing = true
       try {
         // NOT a try/catch around the subscribers — see the contract above. This
         // `finally` only clears the re-entrancy flag, so that a throwing
         // subscriber (which kills the process) doesn't first leave the bus in a
         // state where the crash path's own bookkeeping is refused.
-        for (const sub of subscribers) sub.apply(event)
+        for (const sub of subscribers) sub.apply(event, ctx)
       } finally {
-        publishing = false
+        publishing = wasPublishing
       }
     },
 

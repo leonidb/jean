@@ -284,7 +284,7 @@ $ jean peek orchestrator
 | Sensei → agent | Channel push (tasks, status checks) |
 | Agent → sensei | Passive: stop hook signals idle, sensei pings, agent replies |
 | Sensei | Always-running Claude session. Stateless per-event (reads board). Catches up via history. |
-| Infrastructure | Bun/TypeScript. Event store, projections, channel server, stop hook receiver, SSE. |
+| Infrastructure | Bun/TypeScript. Event store, projections, channel server, stop hook receiver. |
 | Agent plugin | Channel + skills + stop hook. No outbound tools except `reply`. |
 | Agent identity | `.jean-agent.json` per agent: name, role, tags. Discovered by scanning dojo dirs. |
 | Agent creation | `jean agent add` — workers get worktrees by default, non-workers get plain dirs. |

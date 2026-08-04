@@ -14,6 +14,10 @@ import { describe, expect, test } from 'bun:test'
 import type { StoredEvent } from '../../es/index.ts'
 import { createEventBus } from './bus.ts'
 
+/** The publish context is guard 1's pre-append fact; nothing here reads it, so
+ *  one constant serves every case. */
+const CTX = { hadBlockingPending: false }
+
 function event(id: number): StoredEvent {
   return { id, stream: 'system', type: 'probe', ts: new Date(0).toISOString(), data: {} }
 }
@@ -26,7 +30,7 @@ describe('event bus', () => {
       bus.subscribe({ name, apply: () => void seen.push(name) })
     }
 
-    bus.publish(event(1))
+    bus.publish(event(1), CTX)
 
     // Order: the real list's tail (the attention listener, commit 2) reads
     // projection state the earlier subscribers just wrote.
@@ -56,7 +60,7 @@ describe('event bus', () => {
     // exiting(1). The in-memory divergence therefore never outlives the crash —
     // restart re-folds from the log and is correct again. Swallowing it here
     // would trade a loud crash for silent, persistent projection divergence.
-    expect(() => bus.publish(event(1))).toThrow('boom')
+    expect(() => bus.publish(event(1), CTX)).toThrow('boom')
     expect(seen).toEqual(['before'])
 
     // ...and the bus is still usable afterwards: the re-entrancy flag is
@@ -81,7 +85,7 @@ describe('event bus', () => {
       },
     })
 
-    bus.publish(event(1))
+    bus.publish(event(1), CTX)
 
     // Whether the newcomer saw the in-flight event would depend on where it
     // landed relative to the loop index — so refuse rather than pick one.
@@ -98,8 +102,8 @@ describe('event bus', () => {
 
     // The bus does no filtering — each projection's own `filter` decides what it
     // reacts to, exactly as it did when record() called them directly.
-    bus.publish(event(1))
-    bus.publish(event(2))
+    bus.publish(event(1), CTX)
+    bus.publish(event(2), CTX)
 
     expect(a).toEqual([1, 2])
     expect(b).toEqual([1, 2])
