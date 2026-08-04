@@ -32,6 +32,7 @@ import { resolveConfig } from './config.ts'
 import { resolveConnectors } from './connectors/config.ts'
 import { SourceQueue } from './connectors/queue.ts'
 import { createSourceConnector, sourceContext } from './connectors/source.ts'
+import { createEventBus } from './core/bus.ts'
 import { buildInbox, isUserSender, renderInboxLine, renderInboxWake } from './inbox.ts'
 import { commitConsolidation, type LibrarianPhase, probeAnthropicAPI, recoverWikiLayout } from './librarian.ts'
 import { type AgentSession, classifySession, envMs } from './liveness.ts'
@@ -344,6 +345,31 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     filter: { stream: PLAYBOOKS_STREAM },
   })
 
+  // ── The bus ──────────────────────────────────────────────────────
+  //
+  // Registration order IS the order `record()` used to apply, one for one. Read
+  // core/bus.ts before changing it: the dispatch tail reads post-apply
+  // projection state, so ordering here is semantics. Commit 2 appends the
+  // attention listener, which must stay LAST for that reason.
+  //
+  // The wrappers exist only because `Projection<S>` carries no `name` and its
+  // `apply` returns the new state; a subscriber is `{name, apply(): void}`.
+  //
+  // SIX subscribers, matching catchUp()'s six. `record()` applied only five
+  // until 2026-08 — `lastTaskContext` was folded at boot and never live, which
+  // froze `inferTaskId()`'s fallback until restart (fixed in commit 0.5; see
+  // task-context.test.ts). Naming the list is what made the discrepancy visible.
+  const bus = createEventBus()
+  bus.subscribe({ name: 'board', apply: (e) => void boardProjection.apply(e) })
+  bus.subscribe({ name: 'pending', apply: (e) => void pendingProjection.apply(e) })
+  bus.subscribe({ name: 'lastTaskContext', apply: (e) => void lastTaskContext.apply(e) })
+  bus.subscribe({ name: 'taskActivity', apply: (e) => void taskActivity.apply(e) })
+  bus.subscribe({ name: 'triggers', apply: (e) => void triggerProjection.apply(e) })
+  bus.subscribe({ name: 'playbooks', apply: (e) => void playbookProjection.apply(e) })
+
+  // Replay folds the projections DIRECTLY and never touches the bus — the
+  // structural separation that stops a restart re-emitting historical effects.
+  // See core/bus.ts, "REPLAY NEVER PUBLISHES".
   await boardProjection.catchUp()
   await pendingProjection.catchUp()
   await lastTaskContext.catchUp()
@@ -592,16 +618,11 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // when nothing blocking was already pending (burst coalescing).
     const hadBlockingBefore = hasBlockingPending()
     const event = await store.append({ stream, type, data })
-    boardProjection.apply(event)
-    pendingProjection.apply(event)
-    // `lastTaskContext` was folded at startup but never applied live (fixed
-    // 2026-08, stage 3 commit 0.5). Position matches catchUp()'s order; nothing
-    // between the applies reads it, so the slot is a matter of consistency
-    // rather than semantics.
-    lastTaskContext.apply(event)
-    taskActivity.apply(event)
-    triggerProjection.apply(event)
-    playbookProjection.apply(event)
+    // Synchronous and ordered: every subscriber runs to completion before this
+    // returns. The subscriber list and its order are set up once at
+    // construction — see `bus.subscribe` calls below the projections, and
+    // core/bus.ts for why the order is semantics rather than style.
+    bus.publish(event)
     if (stream === TRIGGERS_STREAM) syncTriggerJobs()
 
     const taskId = taskIdFromStream(stream)
