@@ -2072,20 +2072,18 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // ── Message routing ─────────────────────────────────────────
 
     if (path === '/send' && req.method === 'POST') {
-      return (async () => {
-        const body = (await req.json()) as SendRequest
-        if (!body.to || !body.text) {
-          return Response.json({ error: 'missing to or text' }, { status: 400 })
-        }
-        const delivered = await routeSend({
-          from: body.from ?? 'api',
-          to: body.to,
-          text: body.text,
-          taskId: body.taskId,
-          attachments: body.attachments,
-        })
-        return Response.json({ delivered })
-      })()
+      const body = (await req.json()) as SendRequest
+      if (!body.to || !body.text) {
+        return Response.json({ error: 'missing to or text' }, { status: 400 })
+      }
+      const delivered = await routeSend({
+        from: body.from ?? 'api',
+        to: body.to,
+        text: body.text,
+        taskId: body.taskId,
+        attachments: body.attachments,
+      })
+      return Response.json({ delivered })
     }
 
     // ── Agent idle (stop hook) ──────────────────────────────────
@@ -2408,68 +2406,64 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
     const ackMatch = path.match(/^\/events\/(\d+)\/ack$/)
     if (ackMatch && req.method === 'POST') {
-      return (async () => {
-        const id = Number(ackMatch[1])
-        // recordAck rechecks membership itself; `ok` reflects what it actually
-        // cleared, so a duplicate/racing ack reads false instead of claiming a
-        // second clear of the same event.
-        const acked = await recordAck([id], 'ack')
-        return Response.json({ ok: acked.length > 0 })
-      })()
+      const id = Number(ackMatch[1])
+      // recordAck rechecks membership itself; `ok` reflects what it actually
+      // cleared, so a duplicate/racing ack reads false instead of claiming a
+      // second clear of the same event.
+      const acked = await recordAck([id], 'ack')
+      return Response.json({ ok: acked.length > 0 })
     }
 
     if (path === '/events/ack' && req.method === 'POST') {
-      return (async () => {
-        const body = (await req.json()) as { upToId?: number; ids?: number[]; agent?: string }
-        // Two forms (attention phase 3): `upToId` = drain-all sugar (the common
-        // pattern — everything read gets acked in one call); `ids` = selective
-        // per-event ack (handle the human, leave the machine events queued).
-        const hasIds = Array.isArray(body.ids)
-        const hasUpToId = body.upToId !== undefined
-        if (!hasUpToId && !hasIds) {
-          return Response.json({ error: 'pass upToId (drain-all) or ids (selective)' }, { status: 400 })
+      const body = (await req.json()) as { upToId?: number; ids?: number[]; agent?: string }
+      // Two forms (attention phase 3): `upToId` = drain-all sugar (the common
+      // pattern — everything read gets acked in one call); `ids` = selective
+      // per-event ack (handle the human, leave the machine events queued).
+      const hasIds = Array.isArray(body.ids)
+      const hasUpToId = body.upToId !== undefined
+      if (!hasUpToId && !hasIds) {
+        return Response.json({ error: 'pass upToId (drain-all) or ids (selective)' }, { status: 400 })
+      }
+      if (hasUpToId && hasIds) {
+        return Response.json({ error: 'upToId and ids are mutually exclusive' }, { status: 400 })
+      }
+      let toAck: StoredEvent[]
+      if (hasIds) {
+        const valid = (body.ids as unknown[]).filter((n): n is number => Number.isInteger(n) && (n as number) > 0)
+        // Empty or all-invalid ids is a caller bug — fail loud, not a silent
+        // success-shaped no-op (a model passing string ids would otherwise
+        // believe it acked and the nudge loop resumes).
+        if (valid.length === 0) {
+          return Response.json({ error: 'ids must contain positive integer event ids' }, { status: 400 })
         }
-        if (hasUpToId && hasIds) {
-          return Response.json({ error: 'upToId and ids are mutually exclusive' }, { status: 400 })
+        const wanted = new Set(valid)
+        // Intersect with what's actually pending — acking a non-pending id is
+        // a harmless no-op, not an error (it may have been auto-cleared already).
+        toAck = pendingProjection.state.filter((e) => wanted.has(e.id))
+      } else {
+        if (!Number.isInteger(body.upToId) || (body.upToId as number) < 1) {
+          return Response.json({ error: 'upToId must be a positive integer' }, { status: 400 })
         }
-        let toAck: StoredEvent[]
-        if (hasIds) {
-          const valid = (body.ids as unknown[]).filter((n): n is number => Number.isInteger(n) && (n as number) > 0)
-          // Empty or all-invalid ids is a caller bug — fail loud, not a silent
-          // success-shaped no-op (a model passing string ids would otherwise
-          // believe it acked and the nudge loop resumes).
-          if (valid.length === 0) {
-            return Response.json({ error: 'ids must contain positive integer event ids' }, { status: 400 })
-          }
-          const wanted = new Set(valid)
-          // Intersect with what's actually pending — acking a non-pending id is
-          // a harmless no-op, not an error (it may have been auto-cleared already).
-          toAck = pendingProjection.state.filter((e) => wanted.has(e.id))
-        } else {
-          if (!Number.isInteger(body.upToId) || (body.upToId as number) < 1) {
-            return Response.json({ error: 'upToId must be a positive integer' }, { status: 400 })
-          }
-          toAck = pendingProjection.state.filter((e) => e.id <= (body.upToId as number))
-        }
-        if (body.agent) {
-          toAck = toAck.filter((e) => resolveAgent(e) === body.agent)
-        }
-        // Report what was actually cleared by THIS call: with concurrent acks,
-        // the ids this request selected may already be owned by another writer.
-        const acked = await recordAck(
-          toAck.map((e) => e.id),
-          'ack',
-        )
-        // `remaining` is a SNAPSHOT at reply time, not a transactional count: a
-        // request that loses the race returns before the winner's append lands,
-        // so it can report one too many (review nit [J]). Left as-is on purpose —
-        // no reordering inside this handler can see another request's in-flight
-        // write; making it exact means awaiting the overlapping writers, i.e. a
-        // shared ack queue, which is disproportionate for a display-only field
-        // (and is subsumed by the phase-5 mailbox model). `acknowledged` — the
-        // field a caller acts on — is always exact.
-        return Response.json({ acknowledged: acked.length, remaining: pendingProjection.state.length })
-      })()
+        toAck = pendingProjection.state.filter((e) => e.id <= (body.upToId as number))
+      }
+      if (body.agent) {
+        toAck = toAck.filter((e) => resolveAgent(e) === body.agent)
+      }
+      // Report what was actually cleared by THIS call: with concurrent acks,
+      // the ids this request selected may already be owned by another writer.
+      const acked = await recordAck(
+        toAck.map((e) => e.id),
+        'ack',
+      )
+      // `remaining` is a SNAPSHOT at reply time, not a transactional count: a
+      // request that loses the race returns before the winner's append lands,
+      // so it can report one too many (review nit [J]). Left as-is on purpose —
+      // no reordering inside this handler can see another request's in-flight
+      // write; making it exact means awaiting the overlapping writers, i.e. a
+      // shared ack queue, which is disproportionate for a display-only field
+      // (and is subsumed by the phase-5 mailbox model). `acknowledged` — the
+      // field a caller acts on — is always exact.
+      return Response.json({ acknowledged: acked.length, remaining: pendingProjection.state.length })
     }
 
     // ── History endpoint ────────────────────────────────────────
