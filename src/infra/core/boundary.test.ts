@@ -197,7 +197,19 @@ describe('core boundary', () => {
     // anchor; a source-reading test is only as good as the thing it anchors on.
     const anchor = source.indexOf('senseiNames.add(msg.agent)')
     expect(anchor).toBeGreaterThan(-1)
-    expect(source.slice(anchor, anchor + 400)).toContain('attention.adoptMailbox(')
+    const branch = source.slice(anchor, anchor + 400)
+    expect(branch).toContain('attention.adoptMailbox(')
+
+    // ORDERING, and this is the half the first version missed (review finding):
+    // the capture must precede the reassignment. Swap those two lines and
+    // `previousOwner` becomes the NEW name, adoption degrades to a
+    // self-adoption no-op, and the defect is silently back — while every
+    // assertion above still passes. A guard that only checks a call exists is
+    // not checking the thing that can break.
+    const capture = branch.indexOf('const previousOwner = lastRegisteredSenseiName')
+    const reassign = branch.indexOf('lastRegisteredSenseiName = msg.agent')
+    expect(capture).toBeGreaterThan(-1)
+    expect(reassign).toBeGreaterThan(capture)
   })
 
   test('both timer callbacks are a single core.tick call with no branching', async () => {

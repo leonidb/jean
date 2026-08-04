@@ -544,9 +544,12 @@ describe('adoptMailbox — a mailbox changing hands', () => {
 
     h.listener.adoptMailbox('alice', 'bob')
     const bob = h.listener.state.agents.get('bob')
+    // Every ladder field, not a representative sample — "the ladder does not
+    // cross" is only worth asserting if it covers the whole ladder.
     expect(bob?.blockingWakeCount).toBe(0)
     expect(bob?.lastBlockingWakeAt).toBe(0)
     expect(bob?.nudgeCount).toBe(0)
+    expect(bob?.lastNudgeAt).toBe(0)
     expect(bob?.maxNudgedPendingId).toBe(0)
     // ...and the clock the landed wake armed still came along.
     expect(bob?.pendingSince).toBe(0)
