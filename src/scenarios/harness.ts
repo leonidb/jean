@@ -21,7 +21,12 @@
 
 import type { StoredEvent } from '../es/index.ts'
 import type { PendingEntry, TargetAttentionView, TargetExecutor } from '../infra/target/attention.ts'
-import type { SupervisedAgent, SupervisedTask, TargetSupervisionView } from '../infra/target/supervision.ts'
+import type {
+  SupervisedAgent,
+  SupervisedTask,
+  SupervisionExecutor,
+  TargetSupervisionView,
+} from '../infra/target/supervision.ts'
 
 let nextId = 0
 
@@ -64,7 +69,11 @@ export function foldWith<S>(reducer: (s: S, e: StoredEvent) => S, initial: S, lo
 }
 
 export type Recorder = {
-  exec: TargetExecutor
+  /** Satisfies both machines' effect contracts: the notifier's three effects
+   *  and the supervisor's two. `pushBridge` (the supervisor's ONLY transport
+   *  effect since task 050 — the notifier owns every agent push) records into
+   *  the same `deliver→` trace so `deliveries`/`recipients` read both alike. */
+  exec: TargetExecutor & SupervisionExecutor
   /** `deliver→<agent>` per push, in order. */
   trace: string[]
   /** Full text of each push, index-aligned with the `deliver→` entries. */
@@ -96,6 +105,11 @@ export function recorder(lands = true): Recorder {
         texts.push(text)
         return landing
       },
+      pushBridge: (to, text) => {
+        trace.push(`deliver→${to}`)
+        texts.push(text)
+        return landing
+      },
       emit: (type, data) => void emitted.push({ type, data }),
       stamp: (via) => void trace.push(`stamp:${via}`),
     },
@@ -108,6 +122,13 @@ export const deliveries = (r: Recorder): number => r.trace.filter((t) => t.start
 /** Who each push went to, in order. */
 export const recipients = (r: Recorder): string[] =>
   r.trace.filter((t) => t.startsWith('deliver→')).map((t) => t.slice('deliver→'.length))
+
+/** The S7/S8 nag EMISSIONS, in order (task 050: the nag is a mailbox event —
+ *  its addressee is `data.to`, and a push is only ever the bridge leg). */
+export const nags = (r: Recorder) => r.emitted.filter((e) => e.type === 'task-reminder')
+
+/** Each nag's addressee, in order — the assertion most S7/S8 cases turn on. */
+export const nagTargets = (r: Recorder): string[] => nags(r).map((e) => String(e.data.to))
 
 // ── Clock helpers ────────────────────────────────────────────────
 //

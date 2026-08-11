@@ -93,6 +93,31 @@ export type AgentIdleData = {
   role: AgentRole
 }
 
+/**
+ * The S7/S8 waiting-task nag (task 050, ruled 2026-08-11: supervision rides
+ * the mailbox). Emitted by the supervisor onto the SYSTEM stream — never the
+ * task's own stream, which would make `resolveAgent` inherit the task's WORKER
+ * and deliver the nag to the one party S7's inversion exists to spare.
+ *
+ * `agent` is deliberately ABSENT from this shape (the five-meanings trap,
+ * mailbox-rules.ts): the addressee lives in `to`, because `senderOf` reads
+ * `data.agent` as the SPEAKER — a nag about a human-parked task carrying its
+ * bridge addressee there would price as "a human is waiting" (priority
+ * EXTERNAL) when the human is the one being waited ON.
+ */
+export type TaskReminderData = {
+  taskId: string
+  /** The holder being nagged — a dojo agent (mailbox delivery) or the bridge
+   *  surface (direct push; the event stays the report of record). */
+  to: string
+  text: string
+  /** THE ADMISSION FLAG (the queued-send precedent): the write site decides,
+   *  the fold applies. Absent on the pre-050 bookkeeping events every dojo's
+   *  log already holds — admitting those on replay would resurrect months of
+   *  long-stale nags into the sensei's mailbox at the first restart. */
+  queued?: true
+}
+
 export type SendData = {
   agent: string
   from: string
@@ -591,6 +616,15 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
     case 'worker-status':
     case 'agent-unresponsive':
       return [...state, event]
+
+    case 'task-reminder': {
+      // The third supervision arm joins the mailbox (task 050): the S7/S8 nag
+      // is an addressed event, admitted IFF the write site queued it. The
+      // unflagged shape is the pre-050 bookkeeping record of a push already
+      // made — history, not a message (see TaskReminderData.queued).
+      const d = event.data as TaskReminderData
+      return d.queued === true ? [...state, event] : state
+    }
 
     case 'trigger-fired': {
       // Headless triggers (the librarian's consolidate-wiki run) are autonomous —

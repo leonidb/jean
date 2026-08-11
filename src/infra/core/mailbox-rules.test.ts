@@ -179,6 +179,17 @@ describe('no event admitted to pending is orphaned', () => {
       { agent: SENSEI, to: 'chat-human' },
       { agent: WORKER, to: SENSEI },
     ],
+    // The S7/S8 nag (task 050). Infra-authored — `data.agent` deliberately
+    // absent (five-meanings trap: the addressee lives in `to`) — so no
+    // self-event rule can drop it. The BRIDGE-addressed form is the
+    // adversarial one: its addressee has no mailbox at all, and the sensei's
+    // universal claim is the whole of what keeps it clearable. Held jointly
+    // with the adapter, like the queued send: the supervisor only ever
+    // addresses a resolved holder, and a holderless dojo emits nothing.
+    'task-reminder': [
+      { taskId: '044', to: SENSEI, text: 'Task 044 (t) is waiting on sensei.', queued: true },
+      { taskId: '044', to: 'chat-human', text: 'Task 044 (t) is waiting on human.', queued: true },
+    ],
   }
 
   test('THE INVARIANT: no admitted event type can be orphaned — checked against the reducer itself', async () => {

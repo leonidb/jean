@@ -110,6 +110,65 @@ describe('worker-status and agent-unresponsive ride the mailbox (H4)', () => {
     expect(mailboxFor(pending, SENSEI, ctx)).toContain(report)
   })
 
+  test('the S7/S8 waiting-task nag enters pending and lands in the sensei’s mailbox (task 050)', () => {
+    // The third supervision arm joins the other two. RULED 2026-08-11: the
+    // mailbox is THE path for how agents receive messages — the nag's old life
+    // as a bare channel push with a bookkeeping event was the defect, not the
+    // design. `queued: true` is the write-site admission flag (the send
+    // precedent); the nag rides the SYSTEM stream and names its task in data.
+    const nag = ev('task-reminder', 'system', {
+      taskId: '044',
+      to: SENSEI,
+      text: 'Task 044 (red suite) is waiting on sensei.',
+      queued: true,
+    })
+    const pending = pendingOf([nag])
+    expect(pending).toContain(nag)
+    expect(mailboxFor(pending, SENSEI, ctx)).toContain(nag)
+  })
+
+  test('GUARD — a historical task-reminder (bookkeeping, no flag) stays out on replay', () => {
+    // Every dojo's log holds these: the pre-050 arm recorded `{taskId, to}`
+    // AFTER each push, as bookkeeping. Admitting them would resurrect months
+    // of long-stale nags into the sensei's mailbox at the first restart — the
+    // queued-send hazard, through a new door.
+    const historical = ev('task-reminder', 'system', { taskId: '007', to: SENSEI })
+    expect(pendingOf([historical])).not.toContain(historical)
+  })
+
+  test('the nag is NOT in the parked worker’s mailbox — the S7 inversion survives the mailbox move', () => {
+    // The one addressee rule that must not regress: the worker that parked the
+    // task cannot be un-stuck by being asked again. Even with the board
+    // attributing task 044 to the worker, the nag rides the system stream and
+    // resolves to no worker — only the sensei's universal mailbox (or the
+    // bridge push) carries it.
+    const nag = ev('task-reminder', 'system', {
+      taskId: '044',
+      to: SENSEI,
+      text: 'Task 044 (red suite) is waiting on sensei.',
+      queued: true,
+    })
+    const owns: RuleContext = { roleOf: ctx.roleOf, taskOwner: (id) => (id === '044' ? { agent: WORKER } : undefined) }
+    const pending = pendingOf([nag])
+    expect(mailboxFor(pending, WORKER, owns)).not.toContain(nag)
+    expect(mailboxFor(pending, SENSEI, owns)).toContain(nag)
+  })
+
+  test('a BRIDGE-addressed nag is claimable by the sensei — the human has no mailbox to orphan it in', () => {
+    // S8's human holder: the push went to the bridge surface; the event is the
+    // report of record, and the sensei's universal mailbox is where it can be
+    // read and acked (A2: admitted ⇒ in at least one mailbox).
+    const nag = ev('task-reminder', 'system', {
+      taskId: '044',
+      to: 'chat-human',
+      text: 'Task 044 (red suite) is waiting on human.',
+      queued: true,
+    })
+    const pending = pendingOf([nag])
+    expect(mailboxFor(pending, SENSEI, ctx)).toContain(nag)
+    expect(mailboxFor(pending, WORKER, ctx)).not.toContain(nag)
+  })
+
   test('a report about the SENSEI is claimable by the sensei — the disconnect precedent, not the self-event rule', () => {
     // AMENDED FROM THE FIRST RED DRAFT, which excluded every unresponsive
     // report from its subject's mailbox. The invariant test in

@@ -1,6 +1,6 @@
 /**
  * SCENARIO 7 (the NAG half) — a parked task nags the SENSEI, not the worker.
- * LEVEL: core (supervision inputs in, pushes out; `now` is data).
+ * LEVEL: core (supervision inputs in, EMISSIONS out; `now` is data).
  *
  * CANON (S7, verbatim): "A worker that completes its task or hits a question
  * puts the task into waiting-on-sensei — same state, different message — and the
@@ -9,16 +9,30 @@
  * The DATA half — `blockedOn` and the transition permissions — is
  * `s07-blocked.projection.test.ts`.
  *
- * STATUS: RED — `createSupervisor` throws.
+ * ── THE NAG IS A MAILBOX EVENT (task 050 ruling, 2026-08-11) ──
  *
- * ── THE INVERSION IS THE SCENARIO ──
+ * RULED: the mailbox is THE path for how agents receive messages; channel
+ * pushes are announce legs. The original build delivered the nag as a bare
+ * channel push and recorded only a bookkeeping event that never entered
+ * pending — no code, no ack, no ledger trace (observed live, 2026-08-11
+ * ~14:53Z). So "nagged" now means: the supervisor EMITS an addressed
+ * `task-reminder` that enters the holder's pending, and the notifier announces
+ * it by priority like any other arrival. Every case below therefore asserts
+ * about emissions and their `data.to`, not about pushes — a push from this arm
+ * to a dojo agent IS the failure now.
+ *
+ * Repetition moved with the delivery (decision (a), recorded on task 050): an
+ * unacked nag is still "told" — the notifier's quiet clock and backoff ladder
+ * re-announce it (canon E2's repetition lives THERE) — so the supervisor
+ * re-emits only after the holder cleared the previous nag, paced from the
+ * clearing. `nagOutstanding` on the view is how the adapter reports that.
+ *
+ * ── THE INVERSION IS STILL THE SCENARIO ──
  *
  * Nagging whoever holds the task is what any reasonable default does, and it is
  * the measured failure: a worker that has said everything it has to say cannot
- * be un-stuck by being asked again, so the reminder lands on the one party who
- * cannot act on it while the party who can hears nothing. Every case below is
- * some form of "the push went to the right agent", because that is the entire
- * requirement.
+ * be un-stuck by being asked again. Every case below is some form of "the nag
+ * was addressed to the right agent", because that is the entire requirement.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -28,8 +42,9 @@ import {
   deliveries,
   HOUR,
   MINUTE,
+  nags,
+  nagTargets,
   REMINDER_AFTER,
-  recipients,
   recorder,
   SENSEI,
   supervisionView,
@@ -38,8 +53,8 @@ import {
 
 const WORKER = 'builder'
 
-function driver(lands = true) {
-  const r = recorder(lands)
+function driver() {
+  const r = recorder()
   return { r, supervisor: createSupervisor(r.exec) }
 }
 
@@ -58,21 +73,37 @@ function parkedTask(agoMs: number, over: Partial<SupervisedTask> = {}): Supervis
 }
 
 describe('S7 — the nag goes to the holder, and the holder is the sensei', () => {
-  test('a task parked on the sensei nags the SENSEI', () => {
+  test('a task parked on the sensei nags the SENSEI — an addressed mailbox event, no push', () => {
     const { r, supervisor } = driver()
     supervisor.tick(supervisionView({ now: T0, tasks: [parkedTask(REMINDER_AFTER)] }))
-    expect(recipients(r)).toEqual([SENSEI])
+    expect(nagTargets(r)).toEqual([SENSEI])
+    // The event is the nag. A push here would be the second delivery path the
+    // unification deleted — announcing is the notifier's job.
+    expect(deliveries(r)).toBe(0)
   })
 
-  test('the worker who parked it is NEVER pushed', () => {
-    // The inversion, asserted as an absence. A push to the worker here is not a
-    // duplicate — it is the failure, and it looks like diligence.
+  test('the nag is ADMISSIBLE — addressed, queued, and it says what is waiting', () => {
+    // The write site decides (the send precedent): `queued: true` is what the
+    // pending fold admits, so a nag emitted without it would be the old
+    // bookkeeping event wearing the new name — recorded, never delivered.
+    const { r, supervisor } = driver()
+    supervisor.tick(supervisionView({ now: T0, tasks: [parkedTask(REMINDER_AFTER)] }))
+    const [nag] = nags(r)
+    expect(nag?.data).toMatchObject({ taskId: '044', to: SENSEI, queued: true })
+    expect(String(nag?.data.text)).toContain('is waiting')
+    expect(String(nag?.data.text)).toContain('044')
+  })
+
+  test('the worker who parked it is NEVER the addressee', () => {
+    // The inversion, asserted as an absence. A nag addressed to the worker is
+    // not a duplicate — it is the failure, and it looks like diligence.
     const { r, supervisor } = driver()
     for (let t = T0; t <= T0 + 6 * HOUR; t += REMINDER_AFTER) {
       supervisor.tick(supervisionView({ now: t, tasks: [parkedTask(REMINDER_AFTER + (t - T0))] }))
     }
-    expect(deliveries(r)).toBeGreaterThan(0)
-    expect(recipients(r)).not.toContain(WORKER)
+    expect(nags(r).length).toBeGreaterThan(0)
+    expect(nagTargets(r)).not.toContain(WORKER)
+    expect(deliveries(r)).toBe(0)
   })
 
   test('a task nobody parked nags nobody', () => {
@@ -86,27 +117,31 @@ describe('S7 — the nag goes to the holder, and the holder is the sensei', () =
       lastEventAt: T0 - MINUTE,
     }
     supervisor.tick(supervisionView({ now: T0, tasks: [active] }))
-    expect(deliveries(r)).toBe(0)
+    expect(nags(r)).toHaveLength(0)
   })
 
   test('a freshly parked task is not nagged instantly', () => {
-    // Parking is itself an act, and the sensei was told by the act. The ladder
+    // Parking is itself an act, and the sensei was told by the act. The nag
     // exists for what happens when that lands on a sensei that never acts on it.
     const { r, supervisor } = driver()
     supervisor.tick(supervisionView({ now: T0, tasks: [parkedTask(MINUTE)] }))
-    expect(deliveries(r)).toBe(0)
+    expect(nags(r)).toHaveLength(0)
   })
 
-  test('the nag REPEATS while the task stays parked — repetition is the guarantee', () => {
-    // Canon E2: "the guarantee comes from repetition over an unreliable channel,
-    // not from any single delivery path being sound." One nag and silence would
-    // make the whole scenario depend on a single push landing.
+  test('the nag REPEATS while the task stays parked — after each one is handled', () => {
+    // Canon E2: "the guarantee comes from repetition over an unreliable
+    // channel." The repetition SPLIT with the delivery move: while a nag sits
+    // unacked the NOTIFIER repeats the announcement (its ladder, its clock);
+    // what the supervisor repeats is the EVENT — a fresh nag once the holder
+    // cleared the previous one and the task still has not moved.
     const { r, supervisor } = driver()
     for (let t = T0; t <= T0 + 4 * HOUR; t += 15 * MINUTE) {
+      // Each prior nag was acked before the next tick — `nagOutstanding` stays
+      // false, so every due window emits.
       supervisor.tick(supervisionView({ now: t, tasks: [parkedTask(REMINDER_AFTER + (t - T0))] }))
     }
-    expect(deliveries(r)).toBeGreaterThan(2)
-    expect(new Set(recipients(r))).toEqual(new Set([SENSEI]))
+    expect(nags(r).length).toBeGreaterThan(2)
+    expect(new Set(nagTargets(r))).toEqual(new Set([SENSEI]))
   })
 
   test('activity on the task stops the nagging', () => {
@@ -114,36 +149,80 @@ describe('S7 — the nag goes to the holder, and the holder is the sensei', () =
     // being actively worked would keep generating reminders.
     const { r, supervisor } = driver()
     supervisor.tick(supervisionView({ now: T0, tasks: [parkedTask(REMINDER_AFTER)] }))
-    const after = deliveries(r)
+    const after = nags(r).length
     supervisor.tick(supervisionView({ now: T0 + MINUTE, tasks: [parkedTask(0)] }))
-    expect(deliveries(r)).toBe(after)
+    expect(nags(r)).toHaveLength(after)
   })
 })
 
-describe('S7 — a refused nag is not a nag', () => {
-  test('landed:false advances nothing and the next tick tries again', () => {
-    // Race guard 4, at the supervision level. The failure it prevents: a nag
-    // written off as delivered to a sensei whose socket had already died, with
-    // the ladder advanced so the retry waits a full window.
-    const { r, supervisor } = driver(false)
+describe('S7 — an unacked nag re-announces, it does not re-emit (decision (a), task 050)', () => {
+  test('while the nag sits unacked, no duplicate enters the mailbox — however long that lasts', () => {
+    // The holder has been TOLD: the event is in its pending, the notifier is
+    // re-announcing on its ladder. A supervisor that re-emitted every window
+    // would inflate the mailbox with copies of one fact — the count-inflation
+    // class the A2 invariant exists to keep out.
+    const { r, supervisor } = driver()
     supervisor.tick(supervisionView({ now: T0, tasks: [parkedTask(REMINDER_AFTER)] }))
-    expect(deliveries(r)).toBe(1)
-    expect(r.emitted).toHaveLength(0)
-
-    r.setLanding(true)
-    supervisor.tick(supervisionView({ now: T0 + MINUTE, tasks: [parkedTask(REMINDER_AFTER + MINUTE)] }))
-    expect(deliveries(r)).toBe(2)
-    expect(r.emitted.length).toBeGreaterThan(0)
+    expect(nags(r)).toHaveLength(1)
+    for (let t = T0 + 15 * MINUTE; t <= T0 + 6 * HOUR; t += 15 * MINUTE) {
+      supervisor.tick(
+        supervisionView({
+          now: t,
+          tasks: [parkedTask(REMINDER_AFTER + (t - T0), { nagOutstanding: true })],
+        }),
+      )
+    }
+    expect(nags(r)).toHaveLength(1)
   })
 
-  test('an unreachable holder is not nagged, and the clock is not spent', () => {
+  test('the next nag is paced from the CLEARING, not from the emission', () => {
+    // An ack is the holder saying "seen". Re-nagging one tick later would
+    // punish exactly the read-before-ack behaviour the codes exist to produce;
+    // the reminder window restarts from the moment the mailbox cleared.
+    const { r, supervisor } = driver()
+    supervisor.tick(supervisionView({ now: T0, tasks: [parkedTask(REMINDER_AFTER)] }))
+    expect(nags(r)).toHaveLength(1)
+
+    // Unacked for two hours — the pace clock slides with the outstanding nag.
+    const acked = T0 + 2 * HOUR
+    for (let t = T0 + 15 * MINUTE; t <= acked; t += 15 * MINUTE) {
+      supervisor.tick(
+        supervisionView({ now: t, tasks: [parkedTask(REMINDER_AFTER + (t - T0), { nagOutstanding: true })] }),
+      )
+    }
+    // Cleared now — but the window restarts: nothing emits a minute later…
+    supervisor.tick(supervisionView({ now: acked + MINUTE, tasks: [parkedTask(REMINDER_AFTER + 2 * HOUR + MINUTE)] }))
+    expect(nags(r)).toHaveLength(1)
+    // …and a full reminder window after the clearing, the second nag lands.
+    const due = acked + REMINDER_AFTER + MINUTE
+    supervisor.tick(supervisionView({ now: due, tasks: [parkedTask(REMINDER_AFTER + (due - T0))] }))
+    expect(nags(r)).toHaveLength(2)
+    expect(nagTargets(r)).toEqual([SENSEI, SENSEI])
+  })
+})
+
+describe('S7 — the mailbox outlives the connection', () => {
+  test('an unreachable holder is STILL nagged — the event enters its mailbox and waits', () => {
+    // THE DEFECT THIS SCENARIO NOW PINS (task 050): the original arm checked
+    // `deliverable` and pushed, so a disconnected sensei was never told and
+    // nothing was recorded — no pending entry, no code, no ledger trace. The
+    // emission needs no live transport: the mailbox is the truth (E1), and the
+    // notifier announces on reconnect.
     const { r, supervisor } = driver()
     supervisor.tick(supervisionView({ now: T0, deliverable: [], tasks: [parkedTask(REMINDER_AFTER)] }))
+    expect(nagTargets(r)).toEqual([SENSEI])
     expect(deliveries(r)).toBe(0)
+  })
 
-    supervisor.tick(
-      supervisionView({ now: T0 + MINUTE, deliverable: [SENSEI], tasks: [parkedTask(REMINDER_AFTER + MINUTE)] }),
-    )
-    expect(recipients(r)).toEqual([SENSEI])
+  test('a dojo with no holder at all spends no clock — the first sensei to exist is nagged at once', () => {
+    // `holder` is resolved by the adapter; a never-registered dojo resolves
+    // nobody (task 040's accepted corner). The window must not be consumed by
+    // ticks that had no one to address.
+    const { r, supervisor } = driver()
+    supervisor.tick(supervisionView({ now: T0, tasks: [parkedTask(REMINDER_AFTER, { holder: undefined })] }))
+    expect(nags(r)).toHaveLength(0)
+
+    supervisor.tick(supervisionView({ now: T0 + MINUTE, tasks: [parkedTask(REMINDER_AFTER + MINUTE)] }))
+    expect(nagTargets(r)).toEqual([SENSEI])
   })
 })

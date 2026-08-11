@@ -93,6 +93,7 @@ import {
   SYSTEM_STREAM,
   type TaskCommentData,
   type TaskCreatedData,
+  type TaskReminderData,
   type TaskRevertedData,
   type TaskStatusData,
   type TaskUpdatedData,
@@ -298,6 +299,7 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         'send',
         'worker-status',
         'agent-unresponsive',
+        'task-reminder',
       ],
     },
   })
@@ -420,10 +422,13 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     (view) => renderPush(view),
   )
 
-  // The supervision machine (S7/S8/S10/S11). Same two effects, its own clock:
-  // it reads TASKS and AGENT LIVENESS rather than a queue.
+  // The supervision machine (S7/S8/S10/S11). Its own clock: it reads TASKS
+  // and AGENT LIVENESS rather than a queue. Its emissions enter pending and
+  // ride the mailbox like everything else (task 050 closed the last holdout —
+  // the S7 nag); `pushBridge` is its ONLY transport effect, the direct leg to
+  // the human's surface, which is the one audience outside the unification.
   const supervisor = createSupervisor({
-    deliver: (to, text) => ports.deliver(to, { type: 'deliver', from: 'infra', text }),
+    pushBridge: (to, text) => ports.deliver(to, { type: 'deliver', from: 'infra', text }),
     emit: (type, data) => void record(type, SYSTEM_STREAM, data),
   })
 
@@ -1281,23 +1286,37 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       deliverable: [...agents.keys()],
       tasks: boardProjection.state.tasks
         .filter((t) => t.status === 'in-progress' || t.status === 'waiting')
-        .map((t) => ({
-          id: t.id,
-          title: t.title,
-          status: t.status,
-          agent: t.agent,
-          blockedOn: t.blockedOn,
+        .map((t) => {
           // WHO GETS NAGGED, resolved here so the decisions never look up a
           // role: a parked task's holder is the sensei unless the blocker moved
           // to the human, in which case it is the bridge (S8).
-          holder:
+          const holder =
             t.status === 'waiting'
               ? t.blockedOn === 'human'
                 ? ([...userAgentNames].find((n) => agents.has(n)) ?? senseiMailboxOwner())
                 : senseiMailboxOwner()
-              : t.agent,
-          lastEventAt: Date.parse(t.updatedAt),
-        })),
+              : t.agent
+          return {
+            id: t.id,
+            title: t.title,
+            status: t.status,
+            agent: t.agent,
+            blockedOn: t.blockedOn,
+            holder,
+            lastEventAt: Date.parse(t.updatedAt),
+            // An unacked nag for this task addressed to the CURRENT holder
+            // (task 050, decision (a)): while one sits in pending the holder
+            // is told and the notifier repeats — the supervisor must not
+            // duplicate it. Matched per-holder so a handoff's fresh nag is
+            // never gated on the OLD holder's ack.
+            nagOutstanding: pendingProjection.state.some(
+              (e) =>
+                e.type === 'task-reminder' &&
+                (e.data as TaskReminderData).taskId === t.id &&
+                (e.data as TaskReminderData).to === holder,
+            ),
+          }
+        }),
       agents: (() => {
         const rows = new Map<string, { name: string; role: string; lastActivityAt: number; sessionLive: boolean }>()
         for (const [name, e] of agents) {
@@ -3134,6 +3153,16 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
                 // the owner is `lastRegisteredSenseiName` right up to this line.
                 // A disconnect alone does NOT change the owner — that is the
                 // whole point of the owner/deliverable split.
+                //
+                // The assignment was MISSING until task 050 — this comment
+                // described it while only the boot-time history replay ever
+                // wrote it, so on a dojo whose infra had not restarted since
+                // its sensei first registered, a disconnected sensei resolved
+                // to NO owner: the supervision holder went nobody (offline
+                // nags silently skipped) and no notifier view was built for
+                // the sensei's mailbox, stopping its clocks. Found by the
+                // offline-nag wiring pin (s07-nag.wiring.test.ts).
+                lastRegisteredSenseiName = msg.agent
                 //
                 // NO HANDOVER. `adoptMailbox` used to carry the armed clock from
                 // the previous owner to the new name, because a rename mid-stall

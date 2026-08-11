@@ -44,6 +44,18 @@
  * intact). Until that lands, "addressed slice" means "concerns this agent",
  * which over-delivers rather than under-delivers — the safe direction, and the
  * one 5.0 chose for the same reason.
+ *
+ * ── PARKED (Leonid, 2026-08-11, recorded with task 050 — DO NOT build yet) ──
+ *
+ * MEMBERSHIP IS PROBABLY TOO BROAD. Observed the same day the nag defect was
+ * ruled on: the sensei's first act of a fresh session was fetching and acking
+ * its own two `disconnect` records — the deliberate exception below, working
+ * as designed, and still reading as noise an agent must pay codes to clear.
+ * The general question is which lifecycle records EARN a mailbox slot versus
+ * merely existing in the log. Leonid's words: "not substantial, a specific
+ * optimization for later." When it is picked up, start from the enumerated
+ * meanings above and the A2 invariant (admitted ⇒ in at least one mailbox) —
+ * narrowing membership must not orphan anything that is still in pending.
  */
 
 import type { StoredEvent } from '../../es/index.ts'
