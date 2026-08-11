@@ -114,6 +114,13 @@ export function buildInbox(events: StoredEvent[], opts: BuildOpts): Inbox | null
   for (const e of events) {
     const d = e.data as { agent?: unknown }
     const sender = typeof d.agent === 'string' ? d.agent : undefined
+    // FIFTH-INSTANCE SEED, noted not fixed (architect's F1, 2026-08-11): this
+    // split is `reply`-only, so a user-AUTHORED queued `send` — a shape no
+    // current path produces — would price EXTERNAL in `priorityOf` (which
+    // reads `senderOf`) yet file here as machine `queued`, and the inbox line
+    // would under-report a waiting human. If a bridge or peer ever records
+    // human traffic as `send`, this branch needs `senderOf` too — behavior
+    // change requires a ruling; the comment is the tripwire.
     if (e.type === 'reply' && sender && isUserSender(sender, opts.roleOf)) {
       const list = byUser.get(sender) ?? []
       list.push(e)
@@ -200,8 +207,16 @@ export function renderInboxWake(inbox: Inbox): string {
   return [
     `Events pending — inbox summary (not yet acked):`,
     JSON.stringify(inbox, null, 1),
-    // Matches the phase-3 ack contract: drain-all sugar, selective ids, and
-    // auto-clear-on-reply for the single-pending-human case.
-    `Full payloads: GET /events. When done: ack({upToId: <highest id processed>}) to drain, or ack({ids: [...]}) selectively. Answering a human auto-clears their event when it's their only pending one.`,
+    // THE ACK CONTRACT, as scenario 5 defines it: the code exists only in a
+    // fetch response, and `{id, code}` pairs are the ONLY clearing path.
+    //
+    // What this line used to say is worth recording, because it was read by
+    // every woken agent: it taught `ack({upToId: <highest id processed>})` to
+    // drain, and promised that "answering a human auto-clears their event when
+    // it's their only pending one". Both mechanisms are gone. Instructions to
+    // an agent are a surface like any other — leaving the old text in place
+    // would have every wake teach two calls that now 400, discovered in the
+    // middle of triage.
+    `Full payloads: GET /events — each carries an ack code. When done: ack({pairs: [{id, code}, ...]}) for what you actually handled. Reading is not acking; nothing clears until you ack it.`,
   ].join('\n')
 }

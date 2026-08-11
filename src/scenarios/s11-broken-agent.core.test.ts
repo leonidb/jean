@@ -50,7 +50,9 @@ function driver() {
   return { r, supervisor: createSupervisor(r.exec) }
 }
 
-const silentSince = (at: number, name = WORKER, role = 'worker'): SupervisedAgent => ({
+/** A LIVE session that has gone silent — S11's classic case. The harness
+ *  defaults `sessionLive: true`; down agents are s10-worker-status's cases. */
+const silentSince = (at: number, name = WORKER, role = 'worker'): Omit<SupervisedAgent, 'sessionLive'> => ({
   name,
   role,
   lastActivityAt: at,
@@ -133,13 +135,18 @@ describe('S11 — auto-clears on any activity', () => {
 })
 
 describe('O3 — where the report goes when there is no bridge', () => {
-  test('no bridge: the report goes to the SENSEI', () => {
-    // 039's O3. A report addressed to a human who has no surface is not a
-    // report, and silently dropping it would make S11 vacuous on exactly the
-    // dojos most likely to be unattended.
+  test('no bridge: no direct push — the report EVENT rides the sensei’s mailbox', () => {
+    // 039's O3 said "the sensei's chat IS the human channel when no bridge
+    // exists"; the H4 ruling (2026-08-11) refined the mechanism: "the no-bridge
+    // fallback rides normal mailbox + backstop." The emitted event is the
+    // report — it enters pending, lands in the sensei's mailbox (pinned in
+    // unification.projection.test.ts), and the notifier announces it like
+    // everything else. A second direct-push path for one event class is
+    // exactly the kind of special case the unification deleted.
     const { r, supervisor } = driver()
     run(supervisor, T0, T0 + BROKEN_AFTER, T0, null)
-    expect(recipients(r)).toEqual([SENSEI])
+    expect(deliveries(r)).toBe(0)
+    expect(r.emitted.filter((e) => e.type === 'agent-unresponsive')).toHaveLength(1)
   })
 
   test('a bridge, when present, wins — the human is the intended reader', () => {
@@ -148,13 +155,16 @@ describe('O3 — where the report goes when there is no bridge', () => {
     expect(recipients(r)).toEqual([BRIDGE])
   })
 
-  test('neither bridge nor sensei: nothing is pushed, and nothing crashes', () => {
+  test('neither bridge nor sensei: nothing is pushed, nothing crashes — and the event is still the record', () => {
     // The never-registered dojo (task 040's accepted corner) reaches here too.
+    // The emit is unconditional at the bound: the log holds the report for
+    // whichever sensei eventually registers and reads its mailbox.
     const { r, supervisor } = driver()
     for (let t = T0; t <= T0 + 2 * BROKEN_AFTER; t += 10 * MINUTE) {
       supervisor.tick(supervisionView({ now: t, sensei: null, bridge: null, agents: [silentSince(T0)] }))
     }
     expect(deliveries(r)).toBe(0)
+    expect(r.emitted.filter((e) => e.type === 'agent-unresponsive')).toHaveLength(1)
   })
 })
 

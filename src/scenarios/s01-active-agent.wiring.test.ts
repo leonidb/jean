@@ -58,6 +58,16 @@ beforeAll(async () => {
   rmSync(ROOT, { recursive: true, force: true })
   mkdirSync(ROOT, { recursive: true })
   process.env.JEAN_REGISTRY_PATH = REGISTRY_PATH
+  // A FAST TICK AND A PARKED QUIET CLOCK, so the corrected DRIFTED-1 case can
+  // actually fail. `decide` pushes when there is anything unannounced OR the
+  // quiet window elapsed; the tick grid is `min(15s, interval, ...backoff)`.
+  // With the default 15s grid nothing decides inside a test's lifetime, so
+  // "no push happened" would hold against an implementation that never
+  // discharged anything — the unreachable-green shape this suite exists to
+  // avoid. Backoff sets the grid; the interval is parked far away so a push,
+  // when one comes, can only be the unannounced arm.
+  process.env.JEAN_NUDGE_BACKOFF_MS = '250'
+  process.env.JEAN_NUDGE_INTERVAL_MS = String(10 * 60_000)
   handle = await createInfraServer({
     dataDir: ROOT,
     port: 0,
@@ -85,6 +95,8 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  delete process.env.JEAN_NUDGE_BACKOFF_MS
+  delete process.env.JEAN_NUDGE_INTERVAL_MS
   sensei?.ws.close()
   worker?.ws.close()
   idleWorker?.ws.close()
@@ -120,13 +132,79 @@ describe('S1 — the piggyback is agent-uniform', () => {
     expect(await inboxHeader()).toBeNull()
   })
 
-  test('CHARACTERIZATION — no interruption: learning on the next call costs no push', async () => {
+  test('the carrier itself costs no push — the trivial half of "no interruption"', async () => {
     // S1's second clause, verbatim: "no interruption, no delay beyond the call
     // itself." The carrier rides an answer the agent asked for; if it ever
     // becomes a push, S1 has quietly become S2.
+    //
+    // WAS TITLED "no interruption" AND WAS THE ONLY TEST OF IT (task 046's audit,
+    // DRIFTED-1). It pins that a call does not push — which no plausible
+    // implementation would do anyway. The claim with teeth is below.
     const before = worker.messages.length
     await inboxHeader(WORKER)
     expect(worker.messages.length).toBe(before)
+  })
+
+  test('CORRECTED (DRIFTED-1) — a carrier DISCHARGES announcement, so the ledger and the episode agree', async () => {
+    // ── THE LOAD-BEARING HALF, AND IT WAS UNASSERTED ──
+    //
+    // "An agent making jean calls learns of new events on its next call — NO
+    // INTERRUPTION." The agent is not interrupted at all; carriage is how it
+    // learns. So: carriage discharges announcement, and a standalone push fires
+    // only for what the agent has NOT been shown.
+    //
+    // Asserted at the wiring level because the pure rule already has its test in
+    // `s03` — what only a live server can show is that a carrier is actually
+    // WIRED to discharge. That wiring is the whole defect: before the fix the
+    // piggyback stamped the ledger `deliveredVia: 'piggyback'` while the episode
+    // still considered the same events unannounced, so the two mechanisms
+    // contradicted each other on every call.
+    // ── WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY DOES NOT ──
+    //
+    // The RULE — a standalone push fires only for events the agent has not been
+    // shown, by any route — is asserted where it can be falsified: the pure
+    // cases in `s03` ("an agent already SHOWN the mailbox is not pushed again",
+    // "carriage only ever moves announcement FORWARD"). Both fail if `carried`
+    // is stubbed to a no-op; verified by mutation, not by assumption.
+    //
+    // What belongs HERE is the wiring: that a real carrier calls it. That is
+    // asserted through the LEDGER, which is the observable both mechanisms
+    // write to — and it is the exact contradiction this fix removes. Before it,
+    // the piggyback stamped `deliveredVia: 'piggyback'` while the episode still
+    // held the same events unannounced: infra recorded "delivered" and "never
+    // told" about one event at one instant.
+    //
+    // THREE ATTEMPTS AT A BEHAVIOURAL VERSION FAILED, and the failures are the
+    // finding rather than an excuse:
+    //   1. Carry, wait, assert no push — held trivially: with the default 15s
+    //      tick grid nothing decides inside the window at all.
+    //   2. The same aimed at the WORKER — held with the wiring stashed out,
+    //      because a worker has NO PUSH PATH. The bus subscription and both
+    //      timers call `notifier.tick(senseiView(...))`; no view is ever built
+    //      for any other agent, so `thresholdFor('worker')` decides nothing in
+    //      production. Canon E6's "one mechanism for sensei and worker" holds
+    //      for the pure decisions and NOT for the adapter that drives them.
+    //   3. The same aimed at the SENSEI — also held either way, because an
+    //      arrival PUSH announces synchronously at `record()` time and always
+    //      wins the race against any HTTP call the agent could make. Carriage
+    //      can only be the first announcer when a push was refused (guard 4) or
+    //      never attempted, which needs the ghost-socket construction from
+    //      `attention-nudge-backoff.test.ts`.
+    //
+    // Both (2) and (3) are REPORTED (task 045) rather than papered over: they
+    // say that today's carriage-discharge is canon-correct and observably
+    // near-inert, and the reason is the same in both — one push path, for one
+    // agent. Writing a green behavioural assertion over that would have claimed
+    // coverage this branch does not have.
+    const line = await inboxHeader(SENSEI)
+    expect(line).toBeTruthy() // the carrier ran
+
+    // The ledger now says the mailbox was handed over…
+    const fetched = (await (await fetch(`${base}/events?for=${SENSEI}`)).json()) as {
+      events: Array<{ id: number; deliveredVia?: string }>
+    }
+    expect(fetched.events.length).toBeGreaterThan(0) // precondition, asserted not assumed
+    expect(fetched.events.every((e) => e.deliveredVia !== undefined)).toBe(true)
   })
 })
 
@@ -162,5 +240,36 @@ describe('S1 — /inbox answers for the CALLER, not for the sensei', () => {
     // calls differ by a millisecond and the assertion held for a reason that had
     // nothing to do with the requirement. A red suite that flickers green is
     // worse than one that is honestly red.
+  })
+})
+
+describe('S1 — "no delay beyond the call itself"', () => {
+  test('UNTESTED-2 — the carried line reflects the mailbox AS OF THE RESPONSE, not a snapshot', async () => {
+    // Canon S1's third clause, and task 046's audit found it untested: S6 pins
+    // freshness for PUSHES ("every nudge reflects the queue as it is at
+    // emission") and says nothing about carriage, so the carrier was free to
+    // serve a cached line — the exact bug S6 exists to prevent, through the door
+    // S6's wording leaves open.
+    //
+    // "No delay beyond the call itself" is what forbids it: a line built from a
+    // snapshot taken before the event arrived delays the agent's learning by
+    // however stale the cache is, which is a delay beyond the call.
+    const lineFor = async () => (await inboxHeader(WORKER)) ?? ''
+    const before = await lineFor()
+
+    // A new event lands for this worker, then the very next call must show it.
+    const res = await fetch(`${base}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'arrived between calls', description: '', queue: WORKER, actor: 'test' }),
+    })
+    expect(res.status).toBe(201)
+
+    const after = await lineFor()
+    expect(after).not.toBe(before) // the count moved on the FIRST call after arrival
+    // Asserted on the count rather than on wording, so a phrasing change does
+    // not read as a freshness regression.
+    const countOf = (line: string) => Number(/(\d+)\s+queued/.exec(line)?.[1] ?? -1)
+    expect(countOf(after)).toBeGreaterThan(countOf(before))
   })
 })

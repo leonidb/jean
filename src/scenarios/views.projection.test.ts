@@ -52,6 +52,12 @@ function queue(): StoredEvent[] {
     workerSays(WORKER, 'branch pushed'),
     ev('task-comment', 'task-001', { agent: WORKER, role: 'worker', text: 'found the leak' }),
     ev('task-comment', 'task-001', { agent: SENSEI, role: 'sensei', text: 'noted' }),
+    // ADDRESSED to the worker rather than produced by it — it resolves to
+    // `builder` through the task's queue, and nobody authored it. Added when
+    // the rule became "concerns me AND I did not produce it": without an event
+    // of this shape the worker case asserted a non-empty mailbox using only
+    // events the worker had written itself.
+    ev('task-created', 'task-001', { title: 'ship the suite', description: '', queue: 'builder' }),
   ]
 }
 
@@ -132,7 +138,9 @@ describe('DIAL — the initial rule-set (today’s semantics), turnable without 
     const pending = queue()
     const box = mailboxFor(pending, WORKER, ctx)
     expect(box).not.toContain(pending[0] as StoredEvent) // the human's message is not addressed to the worker
-    expect(box.length).toBeGreaterThan(0)
+    // The task addressed to it, and ONLY that: its own reply and its own
+    // comment are things it said, not things it has to act on.
+    expect(box.map((e) => e.type)).toEqual(['task-created'])
   })
 })
 
@@ -210,6 +218,102 @@ describe('priority is an opaque number — order only, no semantics anywhere age
   test('every event gets a number — the heuristic is total', () => {
     for (const e of queue()) expect(Number.isFinite(priorityOf(e, ctx))).toBe(true)
     expect(Number.isFinite(priorityOf(ev('wiki-consolidated', 'system', {}), ctx))).toBe(true)
+  })
+
+  // ── THE HEURISTIC READS THE SENDER — on every event shape (fix round,
+  // 2026-08-11; sanctioned with the ruling on delivery unification).
+  //
+  // "External channel" is a fact about WHO PRODUCED the event. For `reply`
+  // events `data.agent` IS the sender, so the heuristic was right by
+  // coincidence. For `send` events `data.agent` is the ADDRESSEE — the
+  // five-meanings trap (mailbox-rules.ts) — and reading it classifies a
+  // message by who it is FOR. Inert while sends never entered pending; the
+  // moment queued sends carry priorities into mailboxes, an addressee-read
+  // would misprice exactly the class of event the unification adds.
+  describe('the heuristic classifies by SENDER, never by addressee', () => {
+    test('CHARACTERIZATION — a bridge human’s reply is EXTERNAL, end to end on the real recorded shape', () => {
+      // The bridge records inbound human traffic as `reply` with
+      // `data.agent = <user identity>` (server.ts onInbound). This is the shape
+      // production actually writes, pinned so the human classification cannot
+      // silently detach from it.
+      expect(priorityOf(humanSays(HUMAN), ctx)).toBe(2)
+    })
+
+    test('a send AUTHORED by a user is EXTERNAL — the sender is what makes it external', () => {
+      const fromHuman = ev('send', `agent-${WORKER}`, {
+        agent: WORKER,
+        from: HUMAN,
+        text: 'please check',
+        queued: true,
+      })
+      expect(priorityOf(fromHuman, ctx)).toBe(2)
+    })
+
+    test('a send ADDRESSED to a user is ROUTINE — the addressee must not inflate it', () => {
+      // A sensei answering the human produces a send with `data.agent` = the
+      // user identity. That message is dojo-authored machine traffic; reading
+      // the addressee marks it EXTERNAL, which is a human-waiting signal for an
+      // event where no human is waiting.
+      const toHuman = ev('send', `agent-${HUMAN}`, { agent: HUMAN, from: SENSEI, text: 'done, shipping' })
+      expect(priorityOf(toHuman, ctx)).toBe(1)
+    })
+  })
+
+  // ── THE FROM COLUMN READS THE SENDER TOO (architect's F1, same round) ──
+  //
+  // `views.ts`'s `fromOf` had the identical addressee-read: a summary line for
+  // a queued send would name who the message was FOR in the column that says
+  // who it is FROM. Same five-meanings trap, fourth instance — and sharper
+  // than the priority one, because this column is read by an AGENT deciding
+  // whom it is talking to: a send addressed to the human would render as the
+  // human having said something they never said.
+  describe('the from column classifies by SENDER, never by addressee', () => {
+    test('CHARACTERIZATION — a reply’s from column is its sender, on the real recorded shape', () => {
+      const v = viewsFor([humanSays(HUMAN, 'ship it?')], SENSEI, ctx)
+      expect(v.summary()[0]?.from).toBe(HUMAN)
+    })
+
+    test('a queued send’s from column is the SENDER, not the addressee', () => {
+      const dispatch = ev('send', `agent-${WORKER}`, { agent: WORKER, from: 'api', text: 'do it', queued: true })
+      const v = viewsFor([dispatch], SENSEI, ctx)
+      expect(v.summary()[0]?.from).toBe('api')
+      expect(v.fetch()[0]?.from).toBe('api')
+    })
+
+    test('a send ADDRESSED to a user is not misattributed to the human', () => {
+      // The worst rendering of the addressee-read: the sensei's own outbound
+      // answer, shown in a mailbox as words FROM the human. Driven through the
+      // ADDRESSEE's mailbox — the one filter that admits this event (the
+      // sensei's own excludes it as self-authored); the column rule is the
+      // subject, and it must hold in every mailbox that renders the event.
+      const toHuman = ev('send', `agent-${HUMAN}`, { agent: HUMAN, from: SENSEI, text: 'done, shipping', queued: true })
+      const v = viewsFor([toHuman], HUMAN, ctx)
+      expect(v.summary()).toHaveLength(1) // the premise, asserted not assumed
+      expect(v.summary()[0]?.from).toBe(SENSEI)
+    })
+  })
+
+  test('UNTESTED-1 — nor does the SKILL TEXT, which the canon names explicitly', async () => {
+    // Canon, verbatim: "no semantics in any agent-facing surface **or skill
+    // text**". The audit (task 046) found the second half untested — `views`
+    // covered the surfaces and nothing covered the words we hand the agent.
+    //
+    // This is the half more likely to rot, not less: a view leaks a label only
+    // if someone changes a renderer, while skill text is edited by hand, in
+    // prose, by whoever is explaining priority to an agent that day. And the
+    // consequence is worse — an agent taught the word "urgent" reasons about the
+    // word, and infra's heuristic stops being a dial it can retune.
+    const skills = await Array.fromAsync(new Bun.Glob('*.md').scan({ cwd: 'src/cli/skills', absolute: true }))
+    expect(skills.length).toBeGreaterThan(0) // drift shows up here, not as a vacuous pass
+    for (const path of skills) {
+      const text = await Bun.file(path).text()
+      // Bands and label-words for priority. Deliberately narrow: this must catch
+      // "priority: urgent" without failing on the ordinary English "high" that
+      // appears in unrelated prose, so it looks for the words in a priority
+      // CONTEXT rather than anywhere.
+      expect(text).not.toMatch(/priority[^.\n]{0,40}\b(urgent|critical|high|normal|low)\b/i)
+      expect(text).not.toMatch(/\b(urgent|critical)\s+(priority|events?|messages?)\b/i)
+    }
   })
 
   test('NO VIEW EXPOSES A LABEL — the opacity claim, checked where it can break', () => {

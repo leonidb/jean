@@ -6,7 +6,7 @@
  */
 
 import type { Reducer, StoredEvent } from '../es/index.ts'
-import type { Board, Task, TaskStatus } from './board.ts'
+import type { BlockedOn, Board, Task, TaskStatus } from './board.ts'
 import { migrateStatus } from './board.ts'
 import type { AgentRole } from './protocol.ts'
 
@@ -25,6 +25,35 @@ export type TaskStatusData = {
   from: TaskStatus
   to: TaskStatus
   actor?: string
+  /** The role the transition was driven AS. Checked against `canActorTransition`
+   *  at the API boundary (013 S7); recorded so a replay can audit who closed
+   *  what. */
+  actorRole?: string
+  /** Set when parking (`→ waiting`). See Task.blockedOn. */
+  blockedOn?: BlockedOn
+  blockedNote?: string
+  /** Set when parking on `time` (H3). See Task.resumeAt. */
+  resumeAt?: string
+}
+
+/**
+ * The explicit act of moving a task's blocker (013 S8's handoff).
+ *
+ * ITS OWN EVENT, per the explicit-acts principle (task 041's first amendment,
+ * Leonid): escalating to the human is an act, not a side effect riding on
+ * something else's back. Infra accepts ANY reassignment — the no-return rule
+ * left the infra contract in the S8 amendment, because infra cannot see whether
+ * new information arrived (that conversation happens inside the sensei's
+ * session). There is deliberately no cycle guard; building one would be the
+ * deviation, and it would silently refuse a legitimate re-escalation.
+ */
+export type TaskBlockedData = {
+  blockedOn: BlockedOn
+  note?: string
+  actor?: string
+  /** The wake, when the handoff parks on `time` (H3). Like every park field,
+   *  absent means none was chosen for THIS park — never "keep the old one". */
+  resumeAt?: string
 }
 
 /** Revert the task to a previous status (stack-pop semantics). Bypasses canTransition; the DAG is only for forward progress. */
@@ -68,7 +97,16 @@ export type SendData = {
   agent: string
   from: string
   text: string
-  delivered: boolean
+  /** Whether an adapter handed the message over synchronously (peers, the
+   *  bridge, triggers). ABSENT on queued sends — delivery is not knowable at
+   *  record time there; the delivery ledger is the truth. */
+  delivered?: boolean
+  /** THE ADMISSION FLAG (delivery unification, ruled 2026-08-11). Written by
+   *  `routeSend` when the target is a dojo agent; the pending reducer admits a
+   *  send IFF this is true — the write site decides, the fold applies (the
+   *  applyAck pattern). Its absence is what keeps every historical send out of
+   *  pending on replay. */
+  queued?: true
   /** Absolute local file paths delivered alongside the text (media surfaces). */
   attachments?: string[]
   /** Present when the sender is a registered peer (another dojo's sensei).
@@ -86,17 +124,42 @@ export type SendData = {
  * PRECISION, deliberately stated (dual review, 2026-07-25): these record what
  * infra HANDED OVER, not what the agent demonstrably read.
  *   'wake'      — a push the transport accepted (a dead socket stamps nothing).
- *   'heartbeat' — the same, from the stall watchdog.
+ *   'heartbeat' — the same, from the stall watchdog. HISTORICAL ONLY: the
+ *                 watchdog was deleted at the transition, so nothing writes
+ *                 this any more. It stays in the union because every dojo's log
+ *                 already contains it and a reader must still understand it.
  *   'piggyback' — the inbox line was ATTACHED to a response infra returned to
  *                 the agent. Attach-level only: infra cannot see the client
  *                 read it, and an aborted/dropped response still counts here.
+ *   'fetch'     — the agent ASKED for the payload and infra returned it. Added
+ *                 at the transition, and it is the strongest of the four: under
+ *                 S5 the fetch is the only way to obtain an ack code, so this
+ *                 is the one path where infra knows the agent went looking.
+ *                 Still attach-level — the response could be dropped in flight.
+ *                 STAMPED ONLY ON AN ADDRESSED READ (`GET /events?for=` or the
+ *                 caller header). An unaddressed read is an OBSERVER — `jean
+ *                 status`, a dashboard, a test — and recording it as a delivery
+ *                 would put a confident "delivered" against an event no agent
+ *                 ever saw, which is the failure this whole field exists to
+ *                 prevent. First-delivery-wins makes that worse, not better:
+ *                 whichever observer looked first would become the recorded
+ *                 carrier and overwrite the real answer.
  * Confirmed-read is not observable before the phase-5 mailbox model; treat
  * these as "best evidence of delivery", not proof of receipt.
  */
-export type DeliveredVia = 'wake' | 'piggyback' | 'heartbeat'
+export type DeliveredVia = 'wake' | 'piggyback' | 'heartbeat' | 'fetch'
 
-/** What removed an event from pending: an explicit ack, or infra observing the
- *  effect that handles it (auto-clear-on-reply, phase 3). */
+/**
+ * What removed an event from pending.
+ *
+ * 'ack' is the only one anything writes now: S5 makes explicit `{id, code}`
+ * pairs THE clearing path, because auto-clear-on-reply decided on the sensei's
+ * behalf that answering a human meant their question was handled — the exact
+ * judgement read-before-ack exists to keep with the agent.
+ *
+ * 'auto-clear' stays in the union as HISTORICAL ONLY, for the same reason
+ * `heartbeat` does: every dojo's log already contains it.
+ */
 export type ClearedBy = 'ack' | 'auto-clear'
 
 export type AckData = {
@@ -106,12 +169,33 @@ export type AckData = {
    *  handled (attention phase 3, docs/attention.md §5 auto-clear-on-reply).
    *  Absent on agent-initiated acks. */
   auto?: 'reply'
-  /** Delivery ledger (attention phase 4), keyed by acked event id: how the
-   *  event reached the agent and what cleared it. Two fields, deliberately —
-   *  enough to answer "did this event ever actually get delivered, and by which
-   *  path" from the event log alone, which previously took watchdog
-   *  archaeology. `deliveredVia` is absent when the delivery mark was lost
-   *  (infra restarted while the event sat pending) — unknown, not wrong. */
+  /**
+   * Delivery ledger (attention phase 4), keyed by acked event id: how the event
+   * reached the agent and what cleared it. Two fields, deliberately — enough to
+   * answer "did this event ever actually get delivered, and by which path" from
+   * the event log alone, which previously took watchdog archaeology.
+   * `deliveredVia` is absent when the delivery mark was lost (infra restarted
+   * while the event sat pending) — unknown, not wrong.
+   *
+   * ── THE READING RULE: FIRST IN LOG ORDER WINS (task 041, ruled) ──
+   *
+   * ONE EVENT CAN HAVE SEVERAL ACKS. Fold-decides has every ack append
+   * unconditionally — the pending reducer's filter is idempotent, so a duplicate
+   * is a structural no-op rather than an error — and two agents racing to clear
+   * the same id therefore write two `ack` events, on purpose.
+   *
+   * Only the FIRST carries the delivery mark. `takeFor` removes the entry as it
+   * materializes it, so the second ack's ledger has `clearedBy` and no
+   * `deliveredVia`.
+   *
+   * SO: TO ANSWER "how did event X reach anyone?", TAKE THE FIRST ACK IN LOG
+   * ORDER THAT MENTIONS X — never the latest. A reader taking the latest reports
+   * "delivery unknown" for an event that was demonstrably delivered, which is
+   * the exact failure the ledger exists to prevent, arriving through the reading
+   * direction instead of the writing one. `deliveredViaFor` (core/codes.ts)
+   * implements this; `src/scenarios/ledger-rule.projection.test.ts` demonstrates
+   * both directions, including the wrong answer the naive reader gets.
+   */
   ledger?: Record<string, { deliveredVia?: DeliveredVia; clearedBy: ClearedBy }>
 }
 
@@ -122,13 +206,26 @@ export type RegisterData = {
   sessionId?: string
 }
 
+/**
+ * What a `nudge` event carries: the queue AS OF EMISSION, and nothing else.
+ *
+ * `forced` (the stall watchdog fired this, bypassing the idle gate) and
+ * `blocking` (a human is waiting) are GONE. There is no watchdog and no idle
+ * gate to bypass, and there is no second push path to distinguish: a human is
+ * simply the highest-priority sender. `blocking` in particular had to go on its
+ * own merits — priority is opaque to every agent-facing surface (013
+ * VOCABULARY), and a boolean in the log saying "this one was the urgent kind" is
+ * that leak in its most durable form.
+ *
+ * OPTIONAL ON BOTH, STILL, for the reading direction: every dojo's history
+ * contains `nudge` events carrying them, and a reader that chokes on a shape it
+ * used to write is a migration nobody asked for.
+ */
 export type NudgeData = {
   pendingCount: number
-  /** True when fired by the stall watchdog (bypassing the idle gate) rather than the normal idle-gated path. */
+  /** @deprecated historical only — written by the pre-transition watchdog. */
   forced?: boolean
-  /** True when fired by the blocking-event path (a human is waiting) — delivered
-   *  regardless of the idle flag, with escalating backoff re-wakes (attention
-   *  phase 2, docs/attention.md §4). */
+  /** @deprecated historical only — written by the pre-transition blocking path. */
   blocking?: boolean
 }
 
@@ -377,11 +474,52 @@ export const boardReducer: Reducer<Board> = (state, event) => {
       if (!taskId) return state
       const to = migrateStatus(d.to)
       return updateTask(state, taskId, (t) => {
-        const updated = { ...t, status: to, updatedAt: event.ts }
+        const updated: Task = { ...t, status: to, updatedAt: event.ts }
         // When starting a task, ensure agent is set (default to queue)
         if (to === 'in-progress' && !updated.agent) updated.agent = t.queue
+        if (to === 'waiting') {
+          // Parking. Absent fields stay absent rather than becoming undefined
+          // keys — see Task.blockedOn.
+          if (d.blockedOn) updated.blockedOn = d.blockedOn
+          if (d.blockedNote) updated.blockedNote = d.blockedNote
+          if (d.blockedOn) updated.blockedSince = event.ts
+          // CLEAR-OR-REPLACE, unconditional (architect's F2): an absent date
+          // on this park must not inherit one from any earlier park, whatever
+          // path the task took here. The unpark branch below already clears —
+          // this makes the invariant local instead of resting on it.
+          updated.resumeAt = d.resumeAt
+        } else {
+          // LEAVING `waiting` CLEARS THE PARK. Sticky `blockedOn` would keep a
+          // task that is actively moving on the nag ladder and in the S9
+          // digest, generating reminders for a blocker that no longer exists —
+          // and a sticky `resumeAt` would re-hide the task from the digest on
+          // its NEXT time-park with a date nobody chose for it (H3).
+          updated.blockedOn = undefined
+          updated.blockedNote = undefined
+          updated.blockedSince = undefined
+          updated.resumeAt = undefined
+        }
         return updated
       })
+    }
+
+    case 'task-blocked': {
+      // S8's handoff. Replaces EVERY park field, not only the holder: a note
+      // left over from the previous holder describes a question that has
+      // already been answered — and a resume date left over from a previous
+      // time-park would HIDE the task until a date nobody chose for this one
+      // (architect's F2: time+date → human → time inherited the stale date and
+      // went dark until September). Clear-or-replace, no third option.
+      const d = event.data as TaskBlockedData
+      if (!taskId) return state
+      return updateTask(state, taskId, (t) => ({
+        ...t,
+        blockedOn: d.blockedOn,
+        blockedNote: d.note,
+        blockedSince: event.ts,
+        resumeAt: d.resumeAt,
+        updatedAt: event.ts,
+      }))
     }
 
     case 'task-reverted': {
@@ -431,6 +569,27 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
     case 'playbook-created':
     case 'playbook-updated':
     case 'playbook-removed':
+      return [...state, event]
+
+    case 'send': {
+      // QUEUED SENDS ONLY (delivery unification, ruled 2026-08-11). The write
+      // site decides — `routeSend` marks a send `queued: true` when its target
+      // is a dojo agent and no adapter delivered it — and this fold applies
+      // that decision, exactly as the ack fold applies `applyAck`'s. The flag's
+      // absence is what keeps every historical send (all of which were
+      // adapter-delivered or dropped) out of pending on replay: admitting them
+      // would resurrect months of long-answered traffic at the first restart.
+      const d = event.data as SendData
+      return d.queued === true ? [...state, event] : state
+    }
+
+    // H4's worker status-change events and S11's broken-agent report: the
+    // sensei's mailbox is how it receives them — "the no-bridge fallback rides
+    // normal mailbox + backstop" (ruling, 2026-08-11). Both are subject-self
+    // events for mailbox purposes (mailbox-rules.ts authorOf): the subject has
+    // no use for its own status notice.
+    case 'worker-status':
+    case 'agent-unresponsive':
       return [...state, event]
 
     case 'trigger-fired': {

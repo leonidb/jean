@@ -7,21 +7,21 @@
  * incident, and that no behavioural test can express:
  *
  *  1. REPLAY NEVER PUBLISHES. If someone routes `catchUp()` through the bus
- *     "for uniformity", the attention listener re-emits every historical wake
- *     on every restart. Nothing goes red — L2 folds start from empty state and
- *     never replay, and the integration tests start from empty dojos.
+ *     "for uniformity", the notifier re-emits every historical push on every
+ *     restart. Nothing goes red — L2 folds start from empty state and never
+ *     replay, and the integration tests start from empty dojos.
  *  2. THE CORE IMPORTS NO ADAPTERS. The moment `core/` reaches for the registry
  *     or the store directly, `decide(state, view)` stops being the whole input
  *     and the pure tests stop proving anything.
- *  3. TIMER CALLBACKS DON'T BRANCH. Leonid's acceptance check for the
+ *  3. EVERY DELIVERY GOES THROUGH THE PORT. A port that covers a third of the
+ *     delivery paths is worse than none, because it reads as complete.
+ *  4. TIMER CALLBACKS DON'T BRANCH. Leonid's acceptance check for the
  *     extraction, stated as a rule: "if a timer callback still branches on
  *     state, the extraction is not done."
- *  4. THE PRE-APPEND WELDS (stage 4). Guards 6 and 7 are pure functions now,
- *     and moving them did NOT move the property that makes them guards: no
- *     `await` may separate the decision from the write it protects. That is the
- *     entire risk of stage 4, it is invisible to every behavioural test in the
- *     suite — the integration tests run a transport that never interleaves at
- *     that granularity — and it is a two-line source check.
+ *
+ * A fifth kind lived here — THE PRE-APPEND WELDS, one per guard 6 and 7 — and
+ * retired with the machinery it welded. The foot of this file records that, and
+ * the two adapter guards that went with it.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -68,12 +68,15 @@ function bodyOf(source: string, anchor: string): string {
 /**
  * Strip comments before looking for code.
  *
- * The weld checks search for the word `await`, and the welds are the most
- * heavily commented lines in the file — the first version of this test failed
- * on its own explanatory prose ("NO AWAIT may appear between..."). Left
- * unstripped, the check would have been permanently red for a reason that has
- * nothing to do with the property, and the tempting fix — loosening the
- * pattern — is how a guard quietly stops guarding.
+ * Written for the weld checks, which searched for the word `await` in the most
+ * heavily commented lines of the file — the first version failed on its own
+ * explanatory prose ("NO AWAIT may appear between..."), and the tempting fix,
+ * loosening the pattern, is how a guard quietly stops guarding.
+ *
+ * The welds are retired (see the foot of this file) and this now serves the
+ * publish-call count, which had the same latent hole from the other direction:
+ * `bus.publish(` written in a comment would have counted as a call site, and the
+ * one thing that guard must be able to say is exactly how many there are.
  */
 function code(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
@@ -81,7 +84,7 @@ function code(source: string): string {
 
 describe('core boundary', () => {
   test('bus.publish is reachable only from record() — replay must never publish', async () => {
-    const source = await read(SERVER)
+    const source = code(await read(SERVER))
     const all = [...source.matchAll(/bus\.publish\(/g)]
     // One call site. Not a style preference: every additional one is a place
     // where somebody could publish a REPLAYED event.
@@ -108,10 +111,29 @@ describe('core boundary', () => {
   test('core/ imports nothing from the adapter layer', async () => {
     // The allowlist is deliberately tiny and each entry earns its place: `es/`
     // is the event-store vocabulary, `inbox.ts` is pure rendering over pending
-    // events, `reducers.ts` is the domain types. Nothing here reaches the
-    // registry, the projections, the clock or the network. If you are adding to
-    // this list, that is the moment to ask whether the thing belongs in core/.
-    const allowed = [/^\.\.\/\.\.\/es\//, /^\.\/[\w-]+\.ts$/, /^\.\.\/inbox\.ts$/, /^\.\.\/reducers\.ts$/]
+    // events, `reducers.ts` and `board.ts` are the domain types. Nothing here
+    // reaches the registry, the projections, the clock or the network. If you
+    // are adding to this list, that is the moment to ask whether the thing
+    // belongs in core/.
+    //
+    // `board.ts` was added at the transition (task 045) and the question above
+    // was answered in writing rather than by habit: it is pure domain
+    // vocabulary with zero I/O — task/status types and the transition DAG —
+    // exactly the class as the already-allowlisted `reducers.ts`, and there was
+    // never a principled reason for one to be here and not the other beyond
+    // nothing in core/ having needed it yet. `core/supervision.ts` needs
+    // `TaskStatus`. The alternative considered and REJECTED (ruled 2026-08-05)
+    // was to keep supervision outside core/ to avoid touching this line at all;
+    // that would have made "core/ is all the pure decisions" quietly false, and
+    // the hazard this guard exists for is an UNEXAMINED widening, not a
+    // justified one.
+    const allowed = [
+      /^\.\.\/\.\.\/es\//,
+      /^\.\/[\w-]+\.ts$/,
+      /^\.\.\/inbox\.ts$/,
+      /^\.\.\/reducers\.ts$/,
+      /^\.\.\/board\.ts$/,
+    ]
 
     const offenders: string[] = []
     for (const file of readdirSync(CORE_DIR)) {
@@ -148,78 +170,92 @@ describe('core boundary', () => {
     expect(offenders).toEqual([])
   })
 
-  test('GUARD 6 WELD — no await between claiming ack ids and reserving them', async () => {
-    const body = code(bodyOf(await read(SERVER), 'async function recordAck('))
-    const from = body.indexOf('claimAckIds(')
-    const to = body.indexOf('ackInFlight.add')
-    expect(from).toBeGreaterThan(-1)
-    expect(to).toBeGreaterThan(from)
-    // If anything awaits in this window, two writers can both see an id as
-    // unclaimed and both write an ack for it — the 20-way interleave that
-    // produced 20 ack events. The pure function cannot enforce this; only its
-    // caller can, so this is where it is checked.
-    expect(body.slice(from, to)).not.toMatch(/\bawait\b/)
-  })
-
-  test('GUARD 7 WELD — no await between routeSend entry and the auto-clear snapshot', async () => {
-    const body = code(bodyOf(await read(SERVER), 'async function routeSend('))
-    const decision = body.indexOf('decideAutoClear(')
-    expect(decision).toBeGreaterThan(-1)
-    // Everything before the snapshot must be synchronous, so that only an event
-    // already visible when the reply was INITIATED can be cleared. An await
-    // here lets a message that arrived mid-flight — and was never seen — be
-    // acked as though it had been answered.
-    expect(body.slice(0, decision)).not.toMatch(/\bawait\b/)
-  })
-
-  test('the register handler hands the mailbox over when the sensei name changes', async () => {
-    // STRUCTURAL, and it says so: the L2 tests prove `adoptMailbox` does the
-    // right thing, but nothing there proves the ADAPTER ever calls it. This is
-    // that half — the wiring for a defect the suite could not otherwise see (a
-    // rename mid-stall stranding the armed clock and delaying the watchdog by a
-    // full window).
-    const source = code(await read(SERVER))
-    const calls = [...source.matchAll(/attention\.adoptMailbox\(([^)]*)\)/g)]
-    expect(calls.length).toBe(1)
-    // Previous owner first, new owner second — reversed, it would carry the
-    // clock backwards onto a key nothing reads.
-    expect(calls[0]?.[1]).toBe('previousOwner, msg.agent')
-
-    // ...and it sits with the REGISTER handler's owner bookkeeping, which is
-    // the only place ownership can change: the single-sensei guard means a
-    // differently-named sensei can register only after the previous one has
-    // gone, and a disconnect alone does not move the owner.
+  test('UNTESTED-4 — activity evidence is messaging-system events only: nothing consults git', async () => {
+    // Canon FOUNDATIONS, verbatim: "activity evidence is messaging-system events
+    // only (no commits — Jean isn't code-only)". Task 046's audit found it
+    // untested, and it is exactly the class this file exists for: invisible at
+    // runtime until the day it decides something, and inexpressible as a
+    // behavioural test (a test that "no commit was consulted" has nothing to
+    // observe).
     //
-    // Anchored on `senseiNames.add(msg.agent)` — a line unique to that handler.
-    // The first draft sliced from `if (role === 'sensei') {`, which matches the
-    // /agent-idle branch several hundred lines earlier and failed there. Second
-    // time this file has picked the wrong region by taking the first plausible
-    // anchor; a source-reading test is only as good as the thing it anchors on.
-    const anchor = source.indexOf('senseiNames.add(msg.agent)')
-    expect(anchor).toBeGreaterThan(-1)
-    const branch = source.slice(anchor, anchor + 400)
-    expect(branch).toContain('attention.adoptMailbox(')
-
-    // ORDERING, and this is the half the first version missed (review finding):
-    // the capture must precede the reassignment. Swap those two lines and
-    // `previousOwner` becomes the NEW name, adoption degrades to a
-    // self-adoption no-op, and the defect is silently back — while every
-    // assertion above still passes. A guard that only checks a call exists is
-    // not checking the thing that can break.
-    const capture = branch.indexOf('const previousOwner = lastRegisteredSenseiName')
-    const reassign = branch.indexOf('lastRegisteredSenseiName = msg.agent')
-    expect(capture).toBeGreaterThan(-1)
-    expect(reassign).toBeGreaterThan(capture)
+    // The sentence is not a style note. Jean orchestrates work that leaves no
+    // commits at all — research, conversation, triage — so an agent judged live
+    // by `git log` is an agent whose non-code work reads as death, and S11 then
+    // reports a perfectly healthy worker as broken. The parenthetical says so.
+    //
+    // Checked over the DECISION LAYER, which is where it could actually bite:
+    // core/ decides who is quiet, who is nagged and who is broken.
+    for (const file of readdirSync(CORE_DIR)) {
+      if (!file.endsWith('.ts') || file.endsWith('.test.ts')) continue
+      const source = code(await read(resolve(CORE_DIR, file)))
+      expect(source).not.toMatch(/\bgit\b|\bspawn\b|execSync|mtime|statSync/)
+    }
+    // …and the views the adapter hands them carry no such field either, so the
+    // decisions could not consult one if they wanted to. `lastActivityAt` is fed
+    // from `touchAgent`, which fires on inbound frames and HTTP calls — messaging
+    // events, by construction.
+    const server = code(await read(SERVER))
+    const view = bodyOf(server, 'function notifyView(')
+    expect(view).not.toMatch(/\bgit\b|mtime|statSync/)
   })
 
-  test('both timer callbacks are a single core.tick call with no branching', async () => {
+  test('both timer callbacks are a single core call with no branching', async () => {
     const source = await read(SERVER)
     const callbacks = [...source.matchAll(/setInterval\((\(\) => [^,]+),/g)].map((m) => m[1] as string)
     expect(callbacks.length).toBe(2)
+    // OLD: both callbacks were `() => attention.tick(senseiView(ports.now()))`,
+    // and the assertion was a string equality against that one line. There are
+    // two DIFFERENT machines on the two timers now — the notifier reads
+    // mailboxes, the supervisor reads tasks and liveness — so equality to a
+    // single literal is no longer the property. The property never was "these
+    // are the same call"; it was Leonid's acceptance check for the extraction,
+    // stated as a rule: "if a timer callback still branches on state, the
+    // extraction is not done." That is what is checked, and it is checked of
+    // both.
+    //
+    // `sweep` joined `tick` at the delivery unification (ruled 2026-08-11):
+    // the notifier's timer drives EVERY dojo agent's mailbox, and the
+    // per-agent fan-out lives in core — `sweep(views)` is a tested loop over
+    // the same `run` — precisely so this callback could stay a single call
+    // with no body. Admitting a third name here should hurt: it means another
+    // entry point grew adapter-side semantics.
     for (const cb of callbacks) {
       // One call, one clock read, nothing else. A `{` here would mean a body,
       // and a body is where branching on state comes back.
-      expect(cb).toBe('() => attention.tick(senseiView(ports.now()))')
+      expect(cb).toMatch(/^\(\) => \w+\.(tick|sweep)\(\w+\(ports\.now\(\)\)\)$/)
     }
   })
 })
+
+// ── FOUR STRUCTURAL GUARDS RETIRED (task 045) ──────────────────────────
+//
+// The first two were PRE-DECLARED (task 043 part 3, `core/boundary.test.ts`:
+// "GUARD 6 WELD, GUARD 7 WELD"). The last two were NOT, and are recorded as
+// amendments — the list could not have contained them because both depended on
+// details of the replacement design that did not exist when it was written.
+//
+// `GUARD 6 WELD — no await between claiming ack ids and reserving them`.
+// PRE-DECLARED. There is no claim to weld: fold-decides (task 041, ruled) has
+// `recordAck` append unconditionally, because the pending reducer's ack case was
+// already idempotent and the claim was a redundant second layer. The window the
+// weld protected does not exist, and neither do `claimAckIds` or `ackInFlight`.
+//
+// `GUARD 7 WELD — no await between routeSend entry and the auto-clear snapshot`.
+// PRE-DECLARED. Auto-clear-on-reply is deleted whole (S5), so `routeSend` takes
+// no snapshot and there is nothing for an await to get between.
+//
+// `the register handler hands the mailbox over when the sensei name changes` —
+// AMENDMENT. This was wiring for `attention.adoptMailbox`, whose job was to
+// carry an ARMED CLOCK from an old sensei name to a new one: a rename mid-stall
+// otherwise stranded the clock on a key nothing read, and the watchdog was
+// delayed by a full window. The transition removes the need rather than the
+// wiring. Episodes are keyed by agent name and `episodeOf` answers `freshEpisode()`
+// for a name it has never seen — `announcedThroughId: 0`, `nudgeCount: 0` — so a
+// renamed sensei's first decision finds the whole mailbox unannounced and pushes
+// AT ONCE. The failure mode inverted from "silent for a window" to "re-announces
+// immediately", which is the safe direction and needs no handover to achieve.
+// Verifiable from `core/notify.ts` without running anything, which is why the
+// structural guard has nothing left to hold.
+//
+// `GUARD 6/7 WELD` and the adopt-mailbox row also leave the mutation harness;
+// see its header, which says the same thing in the same words.

@@ -138,8 +138,16 @@ export const RUNG_1 = 2 * MINUTE
 export const RUNG_2 = 10 * MINUTE
 export const RUNG_3 = 30 * MINUTE
 export const LADDER = [RUNG_1, RUNG_2, RUNG_3]
-/** The surviving watchdog-shaped backstop for a very long wait. */
-export const LONG_WAIT = 2 * HOUR
+/**
+ * The window the "does notification ever stop?" cases run over.
+ *
+ * NOT a backstop dial — there is no longer such a thing. Ruled 2026-08-05: with
+ * the idle gate gone the ladder already pushes unconditionally and never stops,
+ * so a separate long-wait timer had no job the ladder did not already do. The
+ * surviving long-wait mechanism is S11's broken-agent escalation, on a louder
+ * channel. `longWaitMs` left the view with the timer.
+ */
+export const LONG_WINDOW = 2 * HOUR
 
 /** The slice of the world a target view is built from. The adapter reads this
  *  off the registry and the pending list; here it is just data. */
@@ -157,10 +165,13 @@ export type World = {
   pending: ([id: number, priority: number] | PendingEntry)[]
 }
 
-// ── The supervision dials (S7, S8, S10, S11) ─────────────────────
+// ── The supervision dials (S7, S8, S10 as replaced by H4, S11) ───
 
-/** How long a silent worker has before a reminder (S10). */
+/** How long a parked task waits before its holder is nagged (S7/S8). */
 export const REMINDER_AFTER = 30 * MINUTE
+/** H4's silence bound: a session-alive worker holding active work that has
+ *  been jean-silent this long is up-but-stuck. */
+export const STUCK_AFTER = 30 * MINUTE
 /** "Within bounded time" (S11) — the bound. */
 export const BROKEN_AFTER = 4 * HOUR
 
@@ -176,8 +187,11 @@ export type SupervisionWorld = {
   /** Defaults to "everyone named is reachable". */
   deliverable?: string[]
   tasks?: SupervisedTask[]
-  agents?: SupervisedAgent[]
+  /** `sessionLive` defaults to true — most cases model a connected agent, and
+   *  the down cases say so explicitly. */
+  agents?: (Omit<SupervisedAgent, 'sessionLive'> & { sessionLive?: boolean })[]
   reminderAfterMs?: number
+  stuckAfterMs?: number
   brokenAfterMs?: number
 }
 
@@ -185,7 +199,7 @@ export function supervisionView(w: SupervisionWorld): TargetSupervisionView {
   const sensei = w.sensei === undefined ? SENSEI : w.sensei
   const bridge = w.bridge === undefined ? BRIDGE : w.bridge
   const tasks = w.tasks ?? []
-  const agents = w.agents ?? []
+  const agents = (w.agents ?? []).map((a) => ({ sessionLive: true, ...a }))
   const everyone = [
     sensei,
     bridge,
@@ -201,6 +215,7 @@ export function supervisionView(w: SupervisionWorld): TargetSupervisionView {
     tasks,
     agents,
     reminderAfterMs: w.reminderAfterMs ?? REMINDER_AFTER,
+    stuckAfterMs: w.stuckAfterMs ?? STUCK_AFTER,
     brokenAfterMs: w.brokenAfterMs ?? BROKEN_AFTER,
   }
 }
@@ -215,6 +230,5 @@ export function targetView(w: World): TargetAttentionView {
     pending: w.pending.map((p) => (Array.isArray(p) ? { id: p[0], priority: p[1], from: 'someone' } : p)),
     nudgeIntervalMs: INTERVAL,
     nudgeBackoffMs: LADDER,
-    longWaitMs: LONG_WAIT,
   }
 }

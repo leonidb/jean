@@ -1,19 +1,34 @@
 /**
- * THE SEVEN RACE GUARDS — deterministic interleaving tests (refactor stage 3,
- * phase A; task 033, spec = task 029 D2 STAGE 3).
+ * THE RACE GUARDS — deterministic interleaving tests (refactor stage 3, phase A;
+ * task 033, spec = task 029 D2 STAGE 3).
  *
- * WHY THIS FILE EXISTS, and why it lands BEFORE the extraction. server.ts holds
+ * ── SEVEN, THEN THREE: RETIREMENT, NOT EROSION (task 045) ──
+ *
+ * The transition retired guards 5, 6 and 7 by deleting the machinery each one
+ * guarded — the idle gate, the ack claim, auto-clear-on-reply. Each retirement
+ * is recorded in full at the foot of this file, with what replaced it where
+ * anything did. Guard 1's case survives with an AMENDMENT (its property changed;
+ * the note is at the assertion), guard 2 and scenario 6 survive on their own
+ * terms with fixtures re-aimed at the new push threshold, and guard 4 — absent
+ * here by measurement, see below — is now testable and IS tested, at the
+ * integration level in `attention-nudge-backoff.test.ts`.
+ *
+ * A guard file that shrinks needs to say which of the two things happened, or
+ * the next reader cannot tell coverage that was removed on purpose from coverage
+ * that quietly rotted.
+ *
+ * WHY THIS FILE EXISTS, and why it landed BEFORE the extraction. server.ts held
  * seven documented guards against interleaving across `record()`'s await. Every
  * one was found by review or by a deterministic repro — none had a test. They
  * are precisely the class 029 D3 named as "what a green suite would NOT catch",
  * so a refactor that moves this logic is reviewed on assurance rather than
- * evidence unless they are pinned first. These tests are written against
- * PRE-REFACTOR behaviour, go green against it, and must stay green through the
- * move.
+ * evidence unless they are pinned first. That reasoning is why the file outlived
+ * the guards it was written for: the transition is a rewrite of exactly this
+ * logic, and a rewrite reviewed on assurance is the thing 029 D3 warned about.
  *
  * ── THE TECHNIQUE: a gated store ──
  *
- * Six of the seven guards protect a window straddling `await store.append(...)`.
+ * The surviving guards protect a window straddling `await store.append(...)`.
  * Stage 2 made `store` a port, so a test can inject one whose `append` PARKS on
  * a chosen event type until released. That turns "win a race" into "step the
  * machine": no sleeps, no timing tolerances, no flakes. The 20-way interleave
@@ -21,17 +36,20 @@
  *
  * ── THE ONE THAT IS NOT HERE ──
  *
- * Guard 4 (`if (!landed) return`, in all THREE push paths) is absent BY
- * MEASUREMENT, not by omission. Its precondition is a sensei that findSensei()
- * still returns but whose deliver() refuses — entry present, transport dead.
- * Polling as fast as HTTP allows after a client close, the server's close
- * handler always wins and the entry is simply GONE; there is no observable
- * window. No second route exists either: WS is the only sensei registration
- * path, the duplicate-session path clears ws.data.agent before closing so it
- * leaves no dead entry, and the bridge/peer paths register 'user'/'peer'. The
- * guard is closure-scoped behind a transport that cannot be made to fail on
- * command — which is itself the coupling stage 3 removes. It is covered in
- * phase B as a pure core test with a per-path mutation check (see the task).
+ * Guard 4 (`if (!landed) return`) is absent BY MEASUREMENT, not by omission. Its
+ * precondition is a sensei that findSensei() still returns but whose deliver()
+ * refuses — entry present, transport dead. Polling as fast as HTTP allows after
+ * a client close, the server's close handler always wins and the entry is simply
+ * GONE; there is no observable window from here. The guard is closure-scoped
+ * behind a transport that cannot be made to fail on command — which is itself
+ * the coupling stage 3 removes.
+ *
+ * IT IS REACHABLE ELSEWHERE, and that is where it now lives: a session that
+ * registers as `sensei` and then re-registers on the SAME socket under a second
+ * name moves `ws.data.agent`, so the close handler removes only the second name
+ * and the `sensei` entry outlives its transport. `attention-nudge-backoff.test.ts`
+ * builds exactly that and asserts the guard's three consequences — no `nudge`
+ * event, no ledger stamp, and nothing marked announced.
  */
 
 import { afterEach, beforeAll, describe, expect, test } from 'bun:test'
@@ -164,27 +182,31 @@ async function history(h: Harness): Promise<{ type: string; data: Record<string,
   return ((await r.json()) as { events: { type: string; data: Record<string, unknown> }[] }).events
 }
 
-/** Ack everything currently pending, so a test starts from a known-empty queue. */
+/** Ack everything currently pending, so a test starts from a known-empty queue.
+ *
+ *  OLD: `{ids}`. That form is gone with `upToId` and for the same reason — an id
+ *  is knowable from the cheap summary rung, a code is not, so only the pair form
+ *  proves the queue was read (S5). The unaddressed fetch is deliberate: a test
+ *  clearing the queue is an observer, and only an ADDRESSED read stamps the
+ *  delivery ledger. */
 async function drain(h: Harness): Promise<void> {
-  const ids = (await pending(h)).map((e) => e.id)
-  if (ids.length === 0) return
+  const { events } = (await (await fetch(`${h.base}/events`)).json()) as {
+    events: { id: number; code: string }[]
+  }
+  if (events.length === 0) return
   await fetch(`${h.base}/events/ack`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ids }),
+    body: JSON.stringify({ pairs: events.map((e) => ({ id: e.id, code: e.code })) }),
   })
 }
 
-/** Mark the sensei idle again (the Stop-hook post). Also re-arms nudging. */
-async function senseiIdle(h: Harness): Promise<void> {
-  await fetch(`${h.base}/agent-idle`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ agent: 'sensei' }),
-  })
-}
+// (`senseiIdle` lived here — the Stop-hook post that re-armed nudging. Nothing
+//  needs re-arming: `/agent-idle` reports activity and arms nothing, so every
+//  call to it in this file was removed rather than kept as a no-op that reads
+//  like setup.)
 
-/** A human-origin (BLOCKING) event: a `reply` whose sender is a user. */
+/** A human-origin (highest-priority) event: a `reply` whose sender is a user. */
 function humanSays(h: Harness, text: string, from = 'chat-human'): void {
   h.sensei.ws.send(JSON.stringify({ type: 'reply', from, text }))
 }
@@ -204,9 +226,10 @@ async function until(pred: () => boolean | Promise<boolean>, budgetMs = 3000): P
  * The inbox JSON that renderInboxWake embeds in every push.
  *
  * Note the retry loop rather than first-`{`-to-last-`}`: the wake's trailing
- * instructions contain `ack({upToId: ...})` and `ack({ids: [...]})`, so the last
- * `}` in the message is prose, not JSON. Walking the candidate closes backwards
- * finds the real end without depending on that sentence's wording.
+ * instructions contain `ack({pairs: [{id, code}, ...]})`, so the last `}` in the
+ * message is prose, not JSON. Walking the candidate closes backwards finds the
+ * real end without depending on that sentence's wording — which is exactly what
+ * let this helper survive the ack contract changing underneath it.
  */
 function inboxOf(pushText: string): Inbox | null {
   const start = pushText.indexOf('{')
@@ -222,7 +245,10 @@ function inboxOf(pushText: string): Inbox | null {
   return null
 }
 
-const blockingPushes = (h: Harness) => h.senseiPushes().filter((t) => t.startsWith('A human is waiting'))
+/** OLD: `t.startsWith('A human is waiting')`. The blocking wake was a separate
+ *  path with its own text; there is one push path now and a human is simply the
+ *  highest-priority sender, so the oracle is the push itself. */
+const blockingPushes = (h: Harness) => h.senseiPushes().filter((t) => t.startsWith('Events pending'))
 const nudgeEvents = async (h: Harness) => (await history(h)).filter((e) => e.type === 'nudge')
 
 /** Pushes that actually CARRY an inbox. Deliberately not `senseiPushes().at(-1)`:
@@ -239,15 +265,45 @@ const latestInbox = (h: Harness): Inbox | undefined => inboxPushes(h).at(-1)
 
 // ── the guards ───────────────────────────────────────────────────
 
-describe('race guard 1 + 3 — burst coalescing across record()s await', () => {
-  test('two blocking arrivals that BOTH capture hadBlockingBefore=false produce exactly ONE wake', async () => {
+describe('race guard 1 + 3 — arrivals across record()s await', () => {
+  test('each arrival is pushed exactly ONCE, and the last push carries both', async () => {
+    // ── AMENDMENT TO THE CASUALTY LIST, AND THE ONE THAT MATTERED ──
+    //
+    // Task 043 part 3 put guards 1/2/3 in the MUST STAY GREEN column. Guard 2
+    // did. This one could not, and the gap is a behaviour change rather than a
+    // broken fixture, so it is recorded rather than adapted into agreement:
+    //
+    // OLD: both replies capture `hadBlockingBefore = false` across the append
+    // await, so both call `onBlockingArrival(false)` — guard 1 preserved the
+    // pre-append observation, and guard 3's 30s duplicate check then collapsed
+    // the pair into ONE wake. The old wake was a fixed-text ALARM ("A human is
+    // waiting"), and a second identical alarm 80ms later says nothing the first
+    // did not, so coalescing was free.
+    //
+    // NEW: neither mechanism exists — no PublishContext to capture into, no
+    // episode to de-duplicate within — and the count is 2, not 1. The reason is
+    // structural and worth naming precisely: `record()` applies and publishes
+    // one event at a time, so the decision triggered by the first reply sees a
+    // mailbox containing only the first. It announces through what it can see;
+    // the second is genuinely unannounced when its own publish comes round.
+    //
+    // Is that right? S3 says an event at or above the threshold is pushed
+    // "ONCE, on arrival", per event — so two arrivals, two pushes, and each
+    // push carries the mailbox as of ITS emission, which the second assertion
+    // below pins. What the sources do NOT settle is VOLUME: nothing says what a
+    // ten-message burst should cost in interrupts, and the old design's dedupe
+    // is evidence somebody once thought it mattered. RAISED for ruling (task
+    // 045). If coalescing is ruled back in, THIS COUNT is the line that moves.
+    //
+    // What the case still pins, either way, is the half a bookkeeping bug
+    // breaks: exactly one push PER arrival. An `announcedThroughId` that failed
+    // to advance would re-push both on the next tick, and the assertion is a
+    // hard `=== 2` rather than a floor so that it can see that.
     const h = await harness('guard-1-3')
     await drain(h)
     const wakesBefore = blockingPushes(h).length
 
-    // Park both replies before either applies to the projection, so both
-    // observe an empty blocking queue and both call onBlockingArrival(false).
-    // This is the interleave guard 1 captures and guard 3 then de-duplicates.
+    // Park both replies before either applies to the projection.
     h.gated.gate('reply')
     humanSays(h, 'first question')
     humanSays(h, 'second question')
@@ -258,207 +314,105 @@ describe('race guard 1 + 3 — burst coalescing across record()s await', () => {
 
     // Both land in pending...
     expect(await until(async () => (await pending(h)).filter((e) => e.type === 'reply').length === 2)).toBe(true)
-    // ...but the episode fired ONE wake, not two. Without guard 3's 30s
-    // duplicate check the second arrival would wake again immediately.
-    expect(await until(() => blockingPushes(h).length > wakesBefore)).toBe(true)
-    await Bun.sleep(150) // give a second (wrong) wake time to show up
-    expect(blockingPushes(h).length - wakesBefore).toBe(1)
+    expect(await until(() => blockingPushes(h).length - wakesBefore === 2)).toBe(true)
+    await Bun.sleep(150) // give a third (wrong) push time to show up
+    expect(blockingPushes(h).length - wakesBefore).toBe(2)
 
-    const blockingNudges = (await nudgeEvents(h)).filter((e) => e.data.blocking === true)
-    expect(blockingNudges).toHaveLength(1)
+    // OLD: `nudgeEvents` filtered on `data.blocking === true`. That field is
+    // gone — priority is opaque to every agent-facing surface, and the event log
+    // is the most durable one. What the record must still show is the queue as
+    // of each telling (S6): the second push saw both replies, so a re-sent
+    // stale count is visible here even though the push COUNT looks right.
+    const nudges = await nudgeEvents(h)
+    expect(nudges).toHaveLength(2)
+    expect((nudges.at(-1)?.data as { pendingCount: number }).pendingCount).toBe(2)
   })
 })
 
-describe('race guard 2 — enteredPending is checked by id, not by length', () => {
-  test('an ack that shrinks the queue mid-append does not swallow the new events nudge', async () => {
+describe('race guard 2 — what has been announced is tracked by id, not by length', () => {
+  test('an ack that shrinks the queue mid-append does not swallow the new events push', async () => {
+    // The guard survives the transition with its name intact and its subject
+    // moved one layer: `enteredPending` compared the queue before and after,
+    // and `announcedThroughId` now carries the same burden — "is there anything
+    // here I have not said yet?". A length-compare answers that wrongly in
+    // exactly one situation, and this is it.
+    //
+    // WHAT MOVED IN THE FIXTURE: the events are human-origin rather than
+    // `task-created`. A routine machine event is below the sensei's push
+    // threshold (S3), so with tasks the arrival path is never entered and the
+    // case would pass without touching the mechanism it names — a green test
+    // measuring nothing, which in this file is the worst outcome available.
     const h = await harness('guard-2')
     await drain(h)
 
-    // One machine event sits pending, and the sensei has already been nudged
-    // for it (so nudgeCount > 0 and the "first nudge always fires" arm is out).
-    await fetch(`${h.base}/tasks`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'first', queue: 'builder' }),
-    })
+    // One event sits pending and has already been pushed, so
+    // `announcedThroughId` is at its id — the "nothing has ever been announced"
+    // arm is out of the way.
+    humanSays(h, 'first')
     expect(await until(async () => (await pending(h)).length === 1)).toBe(true)
+    expect(await until(() => blockingPushes(h).length > 0)).toBe(true)
     const first = (await pending(h))[0] as { id: number }
-    await senseiIdle(h)
-    const nudgesBefore = (await nudgeEvents(h)).length
+    const pushesBefore = blockingPushes(h).length
 
     // Now: a second event parks mid-append, and while it is parked the first is
     // acked. Queue length is 1 before and 1 after — a length-compare would
     // conclude "nothing entered" and skip the dispatch entirely.
-    h.gated.gate('task-created')
-    const post = fetch(`${h.base}/tasks`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'second', queue: 'builder' }),
-    })
+    h.gated.gate('reply')
+    humanSays(h, 'second')
     expect(await until(() => h.gated.parkedCount() === 1)).toBe(true)
 
+    const { events } = (await (await fetch(`${h.base}/events`)).json()) as {
+      events: { id: number; code: string }[]
+    }
+    const firstPair = events.find((e) => e.id === first.id)
     await fetch(`${h.base}/events/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ids: [first.id] }),
+      body: JSON.stringify({ pairs: [{ id: firstPair?.id, code: firstPair?.code }] }),
     })
     expect(await until(async () => (await pending(h)).length === 0)).toBe(true)
 
     h.gated.gate(null)
     h.gated.release()
-    await post
 
-    // The id check sees the new event in pending and dispatches.
-    expect(await until(async () => (await nudgeEvents(h)).length > nudgesBefore)).toBe(true)
+    // The id check sees the new event unannounced and dispatches.
+    expect(await until(() => blockingPushes(h).length > pushesBefore)).toBe(true)
     expect(await until(async () => (await pending(h)).length === 1)).toBe(true)
   })
 })
 
-describe('race guard 5 — the idle gate is checked BEFORE episode bookkeeping', () => {
-  test('a nudge suppressed because the sensei is busy does not consume the content-changed signal', async () => {
-    const h = await harness('guard-5')
-    await drain(h)
-
-    // Nudge #1: establishes nudgeCount > 0 and sets maxNudgedPendingId, and
-    // leaves the sensei busy (every landed push sets idle = false).
-    await fetch(`${h.base}/tasks`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'one', queue: 'builder' }),
-    })
-    expect(await until(async () => (await nudgeEvents(h)).length >= 1)).toBe(true)
-    const afterFirst = (await nudgeEvents(h)).length
-
-    // A second event arrives while the sensei is BUSY. nudgeSenseiIfIdle returns
-    // at the idle gate. If that early return sat AFTER the bookkeeping,
-    // maxNudgedPendingId would advance to this event and its arrival would never
-    // be announced — the mid-turn event that is never mentioned at turn-end.
-    await fetch(`${h.base}/tasks`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'two', queue: 'builder' }),
-    })
-    expect(await until(async () => (await pending(h)).length === 2)).toBe(true)
-    expect((await nudgeEvents(h)).length).toBe(afterFirst) // suppressed, as designed
-
-    // Turn end. The backoff window has NOT elapsed, so the only thing that can
-    // produce a nudge here is the content-changed signal surviving the suppression.
-    await senseiIdle(h)
-    expect(await until(async () => (await nudgeEvents(h)).length > afterFirst)).toBe(true)
-  })
-})
-
-describe('race guard 6 — recordAck claims ids synchronously, with no await in between', () => {
-  test('two concurrent acks for the same id produce exactly ONE ack event', async () => {
-    const h = await harness('guard-6')
-    await drain(h)
-
-    await fetch(`${h.base}/tasks`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'contended', queue: 'builder' }),
-    })
-    expect(await until(async () => (await pending(h)).length === 1)).toBe(true)
-    const target = (await pending(h))[0] as { id: number }
-
-    const ackBody = JSON.stringify({ ids: [target.id] })
-    const ackOnce = () =>
-      fetch(`${h.base}/events/ack`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: ackBody,
-      }).then((r) => r.json() as Promise<{ acknowledged: number }>)
-
-    // Park the first ack's append, so the second arrives while the first is
-    // mid-write — the exact window that produced 20 ack events for one id.
-    h.gated.gate('ack')
-    const a = ackOnce()
-    expect(await until(() => h.gated.parkedCount() === 1)).toBe(true)
-    const b = ackOnce()
-    // The second must drop out on the in-flight reservation, WITHOUT parking:
-    // it never reaches the append at all.
-    await Bun.sleep(100)
-    expect(h.gated.parkedCount()).toBe(1)
-
-    h.gated.gate(null)
-    h.gated.release()
-    const [ra, rb] = await Promise.all([a, b])
-
-    // Exactly one writer owned the id; the other cleared nothing.
-    expect(ra.acknowledged + rb.acknowledged).toBe(1)
-    const acks = (await history(h)).filter((e) => e.type === 'ack')
-    expect(acks).toHaveLength(1)
-    expect((acks[0]?.data as { eventIds: number[] }).eventIds).toEqual([target.id])
-  })
-})
-
-describe('race guard 7 — routeSend snapshots the auto-clear candidate at ENTRY', () => {
-  test('a human message that arrives mid-send is never auto-cleared by that send', async () => {
-    const h = await harness('guard-7', { withUser: true })
-    await drain(h)
-
-    // Sensei sends to the human with NOTHING blocking pending, so the entry
-    // snapshot is null. Park the send's own append.
-    h.gated.gate('send')
-    const send = fetch(`${h.base}/send`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ from: 'sensei', to: 'chat-human', text: 'proactive ping' }),
-    })
-    expect(await until(() => h.gated.parkedCount() === 1)).toBe(true)
-
-    // The human asks something WHILE that send is in flight. It was never
-    // visible to the sender, so answering it is not an acknowledgement of it.
-    h.gated.gate(null)
-    humanSays(h, 'a question the sensei has not seen')
-    expect(await until(async () => (await pending(h)).some((e) => e.type === 'reply'))).toBe(true)
-
-    h.gated.release()
-    await send
-
-    // Computed at the TAIL instead of at entry, the send would have found
-    // exactly one blocking event and auto-cleared a question nobody read.
-    await Bun.sleep(150)
-    const stillPending = (await pending(h)).filter((e) => e.type === 'reply')
-    expect(stillPending).toHaveLength(1)
-    const autoClears = (await history(h)).filter((e) => e.type === 'ack' && e.data.auto === 'reply')
-    expect(autoClears).toHaveLength(0)
-  })
-})
-
-describe('scenario 6 — fresh counts: every nudge reflects the queue AT EMISSION', () => {
+describe('scenario 6 — fresh counts: every push reflects the queue AT EMISSION', () => {
   test('counts rise with arrivals and FALL after acks — never a stored snapshot', async () => {
     const h = await harness('scenario-6')
     await drain(h)
-    // Connecting the sensei queues its own `register`, which nudges — and every
-    // landed nudge sets idle=false. Without this the first assertion below would
-    // be measuring the idle gate, not the counts.
-    await senseiIdle(h)
 
-    const newTask = (title: string) =>
-      fetch(`${h.base}/tasks`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ title, queue: 'builder' }),
-      })
+    // WHAT MOVED: the events are human-origin rather than `task-created`, for
+    // the same reason as guard 2 — a routine machine event does not reach the
+    // sensei's push threshold (S3), so with tasks there would be no push to
+    // carry a count and the case would assert nothing. Human messages group
+    // under `blocking` in the rendered inbox rather than `queued`, which is a
+    // rendering difference and not the subject: what is under test is that the
+    // number in the payload is computed AT EMISSION.
+    //
+    // The old `senseiIdle(h)` calls between arrivals are gone with the gate they
+    // re-armed; nothing needs to be re-armed for an arrival to push now.
+    const blockingCount = () => latestInbox(h)?.blocking?.[0]?.count
 
-    // One event → the wake carries a queue of 1.
-    await newTask('a')
-    expect(await until(() => latestInbox(h)?.queued.count === 1)).toBe(true)
+    // One event → the push carries a queue of 1.
+    humanSays(h, 'a')
+    expect(await until(() => blockingCount() === 1)).toBe(true)
 
-    // Two events → the NEXT wake carries 2, not a re-sent 1.
-    await senseiIdle(h)
-    await newTask('b')
-    expect(await until(() => latestInbox(h)?.queued.count === 2)).toBe(true)
+    // Two events → the NEXT push carries 2, not a re-sent 1.
+    humanSays(h, 'b')
+    expect(await until(() => blockingCount() === 2)).toBe(true)
 
     // The falling case is the one a cached snapshot gets wrong: drain to a
-    // single event and the next wake must say 1 again, not 2 or 3.
+    // single event and the next push must say 1 again, not 2 or 3.
     await drain(h)
-    await senseiIdle(h)
-    await newTask('c')
-    expect(await until(() => latestInbox(h)?.queued.count === 1)).toBe(true)
+    humanSays(h, 'c')
+    expect(await until(() => blockingCount() === 1)).toBe(true)
     // ...and it genuinely went 1 → 2 → 1 rather than only ever rising.
-    expect(inboxPushes(h).map((i) => i.queued.count)).toEqual([1, 2, 1])
+    expect(inboxPushes(h).map((i) => i.blocking?.[0]?.count)).toEqual([1, 2, 1])
 
     // And the recorded nudge agrees with what was delivered — the count is
     // computed once, at emission, for both surfaces.
@@ -466,3 +420,36 @@ describe('scenario 6 — fresh counts: every nudge reflects the queue AT EMISSIO
     expect((nudges.at(-1)?.data as { pendingCount: number }).pendingCount).toBe(1)
   })
 })
+
+// ── THREE GUARDS RETIRED WITH THEIR QUESTIONS (task 045) ───────────────
+//
+// All three were PRE-DECLARED casualties (task 043 part 3). They are recorded
+// here rather than deleted quietly because a guard file that shrinks silently is
+// indistinguishable from a guard file that eroded — and the mutation harness
+// header says the same thing in the same words.
+//
+// GUARD 5 — `the idle gate is checked BEFORE episode bookkeeping`. It pinned an
+// ORDERING inside a suppression path: a nudge suppressed because the sensei was
+// busy must not consume the content-changed signal, or the mid-turn event is
+// never mentioned at turn-end. There is no idle gate to check before or after
+// anything (canon E3), so there is no ordering left to get wrong. The property
+// it ultimately protected — a new event is not silently marked as told — is
+// guard 2's, above, and guard 2 survives.
+//
+// GUARD 6 — `recordAck claims ids synchronously, with no await in between`, and
+// its WELD in `core/boundary.test.ts`. The claim machinery is deleted:
+// fold-decides (task 041, ruled) has every ack append unconditionally, because
+// the pending reducer's `filter` was already idempotent and the claim was a
+// redundant second layer. `exactly ONE ack event` is now the NEGATION of the
+// design — N concurrent acks write N events on purpose — and the replacement
+// asserts that directly in `src/scenarios/ack-concurrency.wiring.test.ts`,
+// including the half that mattered most: the FIRST ack in log order carries the
+// ledger, so a later empty ack cannot overwrite a delivery that happened.
+//
+// GUARD 7 — `routeSend snapshots the auto-clear candidate at ENTRY`, and its
+// WELD. Auto-clear-on-reply is deleted whole (S5: `{id, code}` pairs are the
+// only clearing path), so a send has no candidate to snapshot at entry or
+// anywhere else. NOTE, because it is the more interesting half: this case was
+// still PASSING at the point the machinery was removed — nothing auto-clears, so
+// "the question was not auto-cleared" is trivially true. A guard that cannot
+// fail is worse than an absent one, since it reads as coverage.

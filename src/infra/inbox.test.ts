@@ -181,7 +181,15 @@ describe('renderInboxWake', () => {
     const wake = renderInboxWake(inbox)
     expect(wake).toContain('"blocking"')
     expect(wake).toContain('hello')
-    expect(wake).toContain('ack({upToId')
+    // CASUALTY (043 part 3, executed at the transition — task 045 change M).
+    // OLD CLAIM: the wake instructs `ack({upToId`. NEW CLAIM: it instructs the
+    // `{id, code}` pair form. Scenario 5 makes pairs the ONLY clearing path and
+    // deletes `upToId`, so the old assertion pinned an instruction that would
+    // now 400 for every agent that followed it. The claim itself — that the
+    // wake TELLS the agent how to ack — is unchanged and is what this line
+    // still checks.
+    expect(wake).toContain('ack({pairs:')
+    expect(wake).not.toContain('upToId')
     // Parseable payload between header and footer lines.
     const jsonPart = wake.split('\n').slice(1, -1).join('\n')
     expect(() => JSON.parse(jsonPart)).not.toThrow()

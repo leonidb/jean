@@ -105,7 +105,21 @@ describe('full lifecycle', () => {
     const pending = (await pendingRes.json()) as { events: Array<{ type: string }> }
     expect(pending.events.some((e) => e.type === 'task-created')).toBe(true)
 
-    // 4. Signal sensei idle → nudge arrives (skip connect-time messages)
+    // 4. The sensei LEARNS about it — without being interrupted.
+    //
+    // OLD (task 045 casualty, and this file was not on the pre-declared list —
+    // recorded as an amendment): `POST /agent-idle` then expect an `Events
+    // pending` deliver. That was the idle-gated turn-end pickup, and it is gone
+    // with the gate: canon E3 says "nothing ever asks whether an agent is busy",
+    // so `/agent-idle` reports activity and no longer arms a push. A routine
+    // machine event does not outrank the sensei's push threshold either (S3), so
+    // there is nothing here that SHOULD interrupt.
+    //
+    // NEW, and it is scenario S1 rather than a weaker version of the old
+    // assertion: an active agent learns as a side effect of its own work. The
+    // lifecycle beat is unchanged — after this step the sensei knows — but the
+    // mechanism it goes through is the piggyback, which is the one that runs
+    // while an agent is mid-turn.
     const senseiBaseline = sensei.messages.length
     await fetch(`${BASE}/agent-idle`, {
       method: 'POST',
@@ -113,9 +127,14 @@ describe('full lifecycle', () => {
       body: JSON.stringify({ agent: 'flow-sensei' }),
     })
     await Bun.sleep(200)
+    const asSensei = await fetch(`${BASE}/board`, { headers: { 'x-jean-agent': 'flow-sensei' } })
+    expect(asSensei.headers.get('x-jean-inbox')).toContain('queued')
+    // …and it was NOT interrupted to learn it. Asserted in both directions on
+    // purpose: "no push happened" alone would also pass if infra had stopped
+    // tracking the event entirely, which is the failure this beat exists to
+    // catch.
     const nudge = sensei.messages.slice(senseiBaseline).find((m): m is DeliverMsg => isDeliver(m) && m.from === 'infra')
-    expect(nudge).toBeDefined()
-    expect(nudge?.text).toContain('Events pending')
+    expect(nudge).toBeUndefined()
 
     // 5. Assign task to worker: todo → assigned → in-progress
     await fetch(`${BASE}/tasks/${task.id}`, {
@@ -137,18 +156,34 @@ describe('full lifecycle', () => {
     expect(activeTask.status).toBe('in-progress')
     expect(activeTask.agent).toBe('flow-worker')
 
-    // 6. Send task to worker via /send → worker receives it
-    await fetch(`${BASE}/send`, {
+    // 6. Send task to worker via /send → it QUEUES in the worker's mailbox
+    // and the notifier pushes.
+    //
+    // OLD (fix-round casualty, licensed by the delivery-unification ruling
+    // 2026-08-11): the raw frame arrived directly, carrying the sender's text
+    // and taskId. That fast path is RETIRED — "the message gets into the
+    // mailbox, and from there notifications work the same for any agent" —
+    // so the lifecycle beat is unchanged (after this step the worker knows)
+    // but the mechanism is the mailbox: a wake push says THAT something
+    // waits; the fetch carries WHAT, plus the ack code.
+    const workerBaseline = worker.messages.length
+    const sendRes = await fetch(`${BASE}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ to: 'flow-worker', from: 'flow-sensei', text: 'Work on this task', taskId: task.id }),
     })
-    const delivery = await waitForMessage(
-      worker.messages,
-      (m): m is DeliverMsg => isDeliver(m) && m.text === 'Work on this task',
-    )
-    expect(delivery.from).toBe('flow-sensei')
-    expect(delivery.taskId).toBe(task.id)
+    expect(((await sendRes.json()) as { queued?: boolean }).queued).toBe(true)
+    await Bun.sleep(300)
+    const newFrames = worker.messages.slice(workerBaseline).filter(isDeliver)
+    expect(newFrames.some((m) => m.text === 'Work on this task')).toBe(false) // the retirement
+    expect(newFrames.some((m) => m.from === 'infra')).toBe(true) // the push
+    const workerBox = (await (await fetch(`${BASE}/events?for=flow-worker`)).json()) as {
+      events: Array<{ id: number; type: string; taskId?: string; data: { from?: string; text?: string } }>
+    }
+    const queuedSend = workerBox.events.find((e) => e.type === 'send' && e.data.text === 'Work on this task')
+    expect(queuedSend).toBeDefined()
+    expect(queuedSend?.data.from).toBe('flow-sensei')
+    expect(queuedSend?.taskId).toBe(task.id)
 
     // 7. Worker sends reply
     worker.ws.send(JSON.stringify({ type: 'reply', from: 'flow-worker', text: 'Task complete. All good.' }))
@@ -174,17 +209,22 @@ describe('full lifecycle', () => {
     }
     expect(idleHist.events.some((e) => e.type === 'agent-idle' && e.agent === 'flow-worker')).toBe(true)
 
-    // 10. Signal sensei idle → gets nudged again
-    // Reset sensei messages to track new nudge
-    const senseiMsgsBefore = sensei.messages.length
+    // 10. The worker's reply reaches the sensei's queue — same mechanism, and
+    // now with something in it that the sensei has to act on.
+    //
+    // OLD: a second `/agent-idle` expecting a second nudge. Same casualty as
+    // step 4, and the same replacement: the count is what changed, not who
+    // interrupted whom.
     await fetch(`${BASE}/agent-idle`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: 'flow-sensei' }),
     })
     await Bun.sleep(200)
-    const newNudge = sensei.messages.slice(senseiMsgsBefore).find((m) => m.type === 'deliver' && m.from === 'infra')
-    expect(newNudge).toBeDefined()
+    const counts = (await (await fetch(`${BASE}/events/counts?for=flow-sensei`)).json()) as {
+      counts: Record<string, number>
+    }
+    expect(Object.values(counts.counts).reduce((a, b) => a + b, 0)).toBeGreaterThan(0)
 
     // 11. Mark task waiting then done
     const waitRes = await fetch(`${BASE}/tasks/${task.id}/status`, {
@@ -200,14 +240,19 @@ describe('full lifecycle', () => {
     })
     expect(((await finalRes.json()) as { status: string }).status).toBe('done')
 
-    // 12. Ack all events, verify queue empty
-    const allPending = await fetch(`${BASE}/events/pending`)
-    const allEvents = (await allPending.json()) as { events: Array<{ id: number }> }
-    const maxId = Math.max(...allEvents.events.map((e) => e.id))
+    // 12. Ack all events, verify queue empty.
+    //
+    // OLD: `{upToId: max(ids)}` from `/events/pending`, which carries no codes.
+    // The rewrite is mechanical but the reason is not: under S5 a code exists
+    // only in a fetch response, so "drain the queue" now REQUIRES having read
+    // it. That the setup got one line longer is the contract working.
+    const allEvents = (await (await fetch(`${BASE}/events`)).json()) as {
+      events: Array<{ id: number; code: string }>
+    }
     await fetch(`${BASE}/events/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ upToId: maxId }),
+      body: JSON.stringify({ pairs: allEvents.events.map((e) => ({ id: e.id, code: e.code })) }),
     })
 
     const finalPending = await fetch(`${BASE}/events/pending`)
@@ -340,13 +385,18 @@ describe('history', () => {
     agent.ws.send(JSON.stringify({ type: 'reply', from: 'ack-hist-worker', text: 'ack me' }))
     await Bun.sleep(100)
 
-    // Get the event and ack it
+    // Get the event and ack it. The code comes from this fetch — the
+    // single-event endpoint requires it exactly as the batch one does (S5).
     const pending = await fetch(`${BASE}/events?agent=ack-hist-worker`)
-    const events = (await pending.json()) as { events: Array<{ id: number }> }
+    const events = (await pending.json()) as { events: Array<{ id: number; code: string }> }
     const firstEvent = events.events[0]
     if (!firstEvent) throw new Error('expected at least one pending event')
     const eventId = firstEvent.id
-    await fetch(`${BASE}/events/${eventId}/ack`, { method: 'POST' })
+    await fetch(`${BASE}/events/${eventId}/ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: firstEvent.code }),
+    })
     await Bun.sleep(100)
 
     // Check history for ack event
@@ -396,20 +446,28 @@ describe('history', () => {
 })
 
 describe('WS send message', () => {
-  test('agent sends via ws send → recipient receives and event recorded', async () => {
+  test('agent sends via ws send → it queues, the recipient is pushed, and the event is recorded', async () => {
+    // OLD (fix-round casualty, licensed by the delivery-unification ruling
+    // 2026-08-11): asserted the raw frame at the recipient and
+    // `delivered: true` on the event. The fast path is retired; the recorded
+    // event now carries `queued: true` and no `delivered` at all — delivery
+    // is the ledger's story, not the send event's.
     using sender = await connectAgent(WS_URL, 'send-from', 'sensei')
     using recv = await connectAgent(WS_URL, 'send-to', 'worker')
 
+    const recvBaseline = recv.messages.length
     sender.ws.send(JSON.stringify({ type: 'send', from: 'send-from', to: 'send-to', text: 'hello via send tool' }))
+    await Bun.sleep(300)
 
-    const delivery = await waitForMessage(
-      recv.messages,
-      (m): m is DeliverMsg => isDeliver(m) && m.text === 'hello via send tool',
-    )
-    expect(delivery.from).toBe('send-from')
+    const frames = recv.messages.slice(recvBaseline).filter(isDeliver)
+    expect(frames.some((m) => m.text === 'hello via send tool')).toBe(false) // the retirement
+    expect(frames.some((m) => m.from === 'infra')).toBe(true) // the push
 
-    // Send event should be in history
-    await Bun.sleep(100)
+    const box = (await (await fetch(`${BASE}/events?for=send-to`)).json()) as {
+      events: Array<{ type: string; data: Record<string, unknown> }>
+    }
+    expect(box.events.some((e) => e.type === 'send' && e.data?.text === 'hello via send tool')).toBe(true)
+
     const histRes = await fetch(`${BASE}/history?last=10`)
     const hist = (await histRes.json()) as {
       events: Array<{ type: string; data: Record<string, unknown> }>
@@ -417,7 +475,8 @@ describe('WS send message', () => {
     const sendEvent = hist.events.find((e) => e.type === 'send' && e.data?.text === 'hello via send tool')
     expect(sendEvent).toBeDefined()
     expect(sendEvent?.data?.from).toBe('send-from')
-    expect(sendEvent?.data?.delivered).toBe(true)
+    expect(sendEvent?.data?.queued).toBe(true)
+    expect(sendEvent?.data?.delivered).toBeUndefined()
   })
 
   test('ws send ignores payloads without an authenticated sender', async () => {

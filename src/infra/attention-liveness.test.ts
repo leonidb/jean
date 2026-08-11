@@ -124,10 +124,16 @@ describe('attention phase 4 — GET /agents field split', () => {
     expect(row?.role).toBe('worker')
     expect(row?.idle).toBe(true)
     expect(row?.tags).toEqual([])
-    // The new facts.
+    // The new facts. `lastActivityAt` is ABSENT at connect since H7 (ruled
+    // 2026-08-11: registering is not activity) — the API must not invent an
+    // act the agent never made — and lands as an ISO string on the agent's
+    // first real traffic. `session` stays 'active' at connect regardless: the
+    // hint answers "is the session there?", from the connect observation.
     expect(row?.session).toBe('active')
     expect(row?.openTasks).toBe(0)
-    expect(typeof row?.lastActivityAt).toBe('string')
+    expect(row?.lastActivityAt).toBeUndefined()
+    await fetch(`${BASE}/board`, { headers: { 'x-jean-agent': 'split-worker' } })
+    expect(typeof (await agentRow('split-worker'))?.lastActivityAt).toBe('string')
   })
 
   test('LOOKS-BUSY-WHEN-FREE IS DEAD: a worker holding an in-progress task registers idle:true, and openTasks carries the task state', async () => {
@@ -200,13 +206,17 @@ describe('attention phase 4 — traffic-observed liveness', () => {
       expect((await agentRow('quiet-worker'))?.session).toBe('active')
 
       await Bun.sleep(QUIET_MS + 250)
-      // …and so is the Stop hook, which now merely SHARPENS liveness.
+      // …but the Stop hook is NOT (H7, ruled 2026-08-11: "Stop-hook posts
+      // likewise excluded" — the post is the harness's act, not the agent's).
+      // OLD: this leg asserted the hook flipped the hint back to active. A
+      // session whose only sign of life is turn-end machinery IS quiet in
+      // every sense the hint exists for — and the hint still gates nothing.
       await fetch(`${BASE}/agent-idle`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ agent: 'quiet-worker' }),
       })
-      expect((await agentRow('quiet-worker'))?.session).toBe('active')
+      expect((await agentRow('quiet-worker'))?.session).toBe('quiet')
     },
     SLOW_TEST_MS,
   )
@@ -230,37 +240,54 @@ describe('attention phase 4 — traffic-observed liveness', () => {
 
     // What the forger CAN do: move the liveness hint.
     expect((await agentRow('forge-target'))?.session).toBe('active')
-    // What it CANNOT do: no inbox leak (the piggyback is role-gated to the
-    // sensei), no state change, no event, no effect on delivery.
+    // What it CANNOT do: no state change, no event, no effect on delivery.
+    // (The header here is empty because forge-target's MAILBOX is empty — the
+    // piggyback is agent-uniform now, so a forged identity with a non-empty
+    // mailbox would read that agent's inbox line. Same trust model as ever:
+    // 127.0.0.1, no auth, and /send + /events/ack are equally self-declared.)
     expect(res.headers.get('x-jean-inbox')).toBeNull()
     expect((await agentRow('forge-target'))?.idle).toBe(idleBefore)
     const histAfter = (await (await fetch(`${BASE}/history?last=1`)).json()) as { events: Array<{ id: number }> }
     expect(histAfter.events.at(-1)?.id).toBe(histBefore.events.at(-1)?.id as number)
 
+    // Delivery is unaffected by the forged hint: the send queues in the
+    // mailbox and the notifier pushes — the unified path (ruled 2026-08-11),
+    // same as for any worker, forged hint or none.
+    const workerBaseline = worker.messages.length
     const sent = await fetch(`${BASE}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ from: 'api', to: 'forge-target', text: 'delivery is unaffected' }),
     })
-    expect(((await sent.json()) as { delivered: boolean }).delivered).toBe(true)
-    expect(worker.messages.some((m) => m.type === 'deliver' && m.text === 'delivery is unaffected')).toBe(true)
+    expect(((await sent.json()) as { queued?: boolean }).queued).toBe(true)
+    await Bun.sleep(300)
+    expect(worker.messages.slice(workerBaseline).some((m) => m.type === 'deliver' && m.from === 'infra')).toBe(true)
   })
 
   test('quiet is a HINT: a quiet agent still receives delivery', async () => {
     // The binding invariant (docs/attention.md §3) — session must never gate
-    // anything. A worker past its quiet threshold takes messages exactly as
-    // before; if this ever fails, the phase has reintroduced the stall class.
+    // anything. A worker past its quiet threshold takes messages exactly like
+    // an active one; if this ever fails, the phase has reintroduced the stall
+    // class. The delivery SHAPE moved with the unification (ruled 2026-08-11):
+    // the send queues in the mailbox and the notifier pushes — and the quiet
+    // hint gates neither half.
     using worker = await connectAgent(WS_URL, 'quiet-target', 'worker')
     await Bun.sleep(QUIET_MS + 250)
     expect((await agentRow('quiet-target'))?.session).toBe('quiet')
 
+    const workerBaseline = worker.messages.length
     const res = await fetch(`${BASE}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ from: 'api', to: 'quiet-target', text: 'work while quiet' }),
     })
-    expect(((await res.json()) as { delivered: boolean }).delivered).toBe(true)
-    expect(worker.messages.some((m) => m.type === 'deliver' && m.text === 'work while quiet')).toBe(true)
+    expect(((await res.json()) as { queued?: boolean }).queued).toBe(true)
+    await Bun.sleep(300)
+    expect(worker.messages.slice(workerBaseline).some((m) => m.type === 'deliver' && m.from === 'infra')).toBe(true)
+    const box = (await (await fetch(`${BASE}/events?for=quiet-target`)).json()) as {
+      events: Array<{ type: string; data: { text?: string } }>
+    }
+    expect(box.events.some((e) => e.type === 'send' && e.data.text === 'work while quiet')).toBe(true)
   })
 })
 

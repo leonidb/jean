@@ -45,6 +45,10 @@ const SIGNIFICANT_EVENT_TYPES = new Set([
   'agent-idle',
   'trigger-fired',
   'permission-request',
+  // H4 (2026-08-11): a worker going down/stuck/recovered, and the S11 human
+  // report, are exactly what a human peeking at a dojo wants to see.
+  'worker-status',
+  'agent-unresponsive',
 ])
 
 // ── Core read ─────────────────────────────────────────────────────

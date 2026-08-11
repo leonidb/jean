@@ -34,7 +34,7 @@ This gives you recent events so you understand the current state.
 
 Once the wiki state is in your head, skip re-reading on purely operational nudges ("what events are pending"). On knowledge-touching questions ("what's our position on X"), open the relevant pages.
 
-When you receive a nudge from Jean — it opens with `Events pending — inbox summary` and carries a JSON inbox (`blocking`: humans waiting, coalesced per sender with count/age/preview; `queued`: machine events as type counts). The watchdog variant opens with `Watchdog:` and carries the same inbox. Triage from the summary first — **a `blocking` entry means a human is waiting; handle those before anything queued**:
+When you receive a nudge from Jean — it opens with `Events pending — inbox summary` and carries a JSON inbox (`blocking`: humans waiting, coalesced per sender with count/age/preview; `queued`: machine events as type counts). There is one push path, so that is the only shape it comes in. Triage from the summary first — **a `blocking` entry means a human is waiting; handle those before anything queued**:
 1. Read pending events: `infra(method="GET", path="/events")` (the summary tells you whether this is worth it — e.g. queued-only registers can be acked without deep reading)
 2. As needed — not ritual: read the board (`GET /board`) and/or connected agents (`GET /agents`) only when the events actually require that context. The summary already gives you the blind triage those calls would otherwise cost.
 3. Decide what to do based on the events
@@ -44,7 +44,7 @@ When you receive a nudge from Jean — it opens with `Events pending — inbox s
 
 You may also see an `[inbox] …` line appended to your tool results mid-work — that's the same summary riding along so you know what's waiting without being interrupted. It is informational: finish your current step, then drain. It is NOT acked by being shown.
 
-**Human messages wake you immediately — even mid-turn.** A wake opening with `A human is waiting` means a blocking (human) event was delivered regardless of your idle state. Don't hard-stop mid-thought, but do finish the current step and handle the human before starting anything new. If it stays unhandled, the same wake re-fires on an escalating backoff (2m → 5m → 10m) until cleared. **Answering IS the ack in the common case**: when a human has exactly ONE pending message, your reply to them auto-clears it — no manual ack needed. When they sent a **burst** (multiple pending messages), auto-clear deliberately stands down so a quick reply to question #1 can't silently swallow question #2 — handle them all, then ack explicitly (`ack({ids: [...]})` for just theirs, or `ack({upToId})` to drain everything you processed). A repeat of this wake means the human has now been waiting through at least one full backoff window.
+**Human messages wake you immediately — even mid-turn.** A human on a bridge outranks everything else, so their message pushes on arrival regardless of what you are doing. Don't hard-stop mid-thought, but do finish the current step and handle the human before starting anything new. If it stays unhandled, the push repeats on an escalating backoff (2m → 5m → 10m) until the queue is cleared. **Answering is NOT acking.** Replying to a human leaves their message pending — deciding on your behalf that an answer meant the question was handled is exactly the judgement that belongs to you. Handle them, then ack: fetch with `GET /events` to get each event's code, then `ack({pairs: [{id, code}, ...]})`. A repeat of this push means the human has now been waiting through at least one full backoff window.
 
 When the human asks you to do something (not a nudge from Jean):
 - Use the tools to interact with the board and agents directly
@@ -52,18 +52,24 @@ When the human asks you to do something (not a nudge from Jean):
 
 ## Event queue
 
-Two classes of event, two delivery rules. A **human** message wakes you immediately, even mid-turn. **Machine** events queue silently and are announced at a turn-end — but not every turn-end (see "Silence does not mean empty" below). The queue itself is always readable: `GET /events` never depends on a nudge having landed.
+One queue, one rule: **priority decides whether an arrival interrupts you.** A human on a bridge outranks everything else and pushes on arrival. Routine machine events queue silently — you learn about them from the `[inbox]` line on your own tool results, or from the quiet-clock push when you have been silent a while. Nothing is ever dropped for being below the bar; the queue itself is always readable, and `GET /events` never depends on a push having landed.
 
 Each event has: `id`, `type`, `taskId` (if task-related), `agent` (source), and `data` (structured payload).
 
-**Processing pattern:** Read all pending events at once, understand the full picture, then act.
+**Triage ladder — three views of the same queue, cheapest first:**
+```
+GET /events/counts     // numbers by priority. Is there anything worth stopping for?
+GET /events/summary    // one line each: priority · from · message. No bodies, no codes.
+GET /events            // everything, plus each event's ack code.
+```
 
-**Acknowledging:** Use the `ack` tool. Two forms — drain-all (the common case) or selective:
+**Processing pattern:** counts or summary to triage, `GET /events` for what you'll actually act on, then act.
+
+**Acknowledging:** one form. `ack({pairs: [{id, code}, ...]})`, where each code came from that event's entry in a `GET /events` response.
 ```
-ack({upToId: <highest_id>})     // drain everything you processed
-ack({ids: [<id>, ...]})         // selective: handle the human now, leave machine events queued
+ack({pairs: [{id: 41, code: "a3f9"}, {id: 42, code: "7c1e"}]})
 ```
-Answering a bridge human auto-clears their event when it's the only one pending from them — no ack needed for that case. A multi-message burst still needs an explicit ack.
+The code exists only in a fetch response, so **you cannot ack what you have not read** — that is the point of the design, not an inconvenience. **Reading is not acking, and answering is not acking**: nothing clears an event but an ack. Ack the events you decided to HOLD as well as the ones you acted on — "hold and acked" is a normal verdict; "hold without ack" is what produces re-notification loops. A wrong or stale code clears nothing and is not an error: the rest of the batch still applies.
 
 ## Event types
 
@@ -75,6 +81,8 @@ Answering a bridge human auto-clears their event when it's the only one pending 
 - **playbook-updated** — a playbook changed. Re-read it if relevant to active tasks.
 - **playbook-removed** — a playbook was removed.
 - **wiki-consolidated** — the librarian finished a consolidation run. `data` summarizes what changed (`pagesUpdated`, `pagesCreated`, `corrections`, `tasksDistilled`, `eventsProcessed`). If `data.anomalies` is non-empty, surface those to the human in your next reply — they're things the librarian flagged but didn't auto-fix (stale references, files it couldn't extract, contradictions it punted on). Otherwise just ack and move on; routine consolidations don't warrant a nudge.
+- **worker-status** — a worker's supervision state changed. `data.status`: `down` (no live session), `up-but-stuck` (session alive but jean-silent past the bound while holding active work), `recovered`. Emitted on change only — one per worker, however many tasks it holds. On `down`/`up-but-stuck`: load the worker's task and decide — nudge it, re-dispatch, or reroute the work; on `recovered`: nothing, unless you were mid-intervention. `data.text` carries the one-line story, task ids included.
+- **agent-unresponsive** — an agent sat silent past the broken bound. With a bridge configured the human has already been told directly; when this lands in YOUR mailbox you are the human channel — surface it to the human, don't just ack it.
 
 ## Tasks — the dojo's central unit
 
@@ -150,8 +158,8 @@ send(to="<agent>", text="<follow-up>", taskId="<id>")    // task-scoped message
 
 Events ack:
 ```
-ack({upToId: <highest_id>})   // drain-all
-ack({ids: [<id>, ...]})       // selective
+infra(method="GET", path="/events")          // codes come from here, per event
+ack({pairs: [{id: <id>, code: "<code>"}]})   // the only clearing path
 ```
 
 Triggers:
@@ -185,7 +193,7 @@ infra(method="GET", path="/playbooks/<name>")
 8. Wait — you'll be nudged when the worker replies or comments. A worker going idle is silent (no event enters your queue); if in doubt, check the board.
 9. Use `waiting` when a task is paused for external input. Resume to `in-progress` when ready.
 
-**Silence does not mean empty.** Machine re-nudges are backoff-suppressed: after a pending set's first announcement, further turn-ends re-nudge only when content changes or a backoff window elapses. No nudge ≠ no pending — the `[inbox]` piggyback line on your tool results is the live truth; trust it over the absence of a nudge. A deferred event can stay quiet for up to a backoff window (default ≤10 min). The trailer rides tool results — a turn with no tool calls sees neither nudge nor trailer, so when in doubt and hands-free, `GET /events`.
+**Silence does not mean empty.** Routine machine events do not push at all — they wait for the quiet clock, which is measured from YOUR last activity, so an actively-working sensei is deliberately not interrupted by them. No nudge ≠ no pending. The `[inbox]` piggyback line on your tool results is the live truth; trust it over the absence of a nudge. Once you have been told about a queue, repeats follow a backoff (default ≤10 min), so a known event can stay quiet for a window. The trailer rides tool results — a turn with no tool calls sees neither push nor trailer, so when in doubt and hands-free, `GET /events/counts`.
 
 ## Task housekeeping — keeping in-progress truthful
 

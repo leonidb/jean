@@ -96,14 +96,29 @@ describe('event queue', () => {
     agent.ws.send(JSON.stringify({ type: 'reply', from: 'ack-worker', text: 'ack me' }))
     await Bun.sleep(100)
 
-    // Get the event
-    const res = await fetch(`${BASE}/events/pending?agent=ack-worker`)
-    const data = (await res.json()) as { events: Array<{ id: number }> }
+    // Get the event FROM THE FETCH RUNG — the only place a code exists (S5).
+    const res = await fetch(`${BASE}/events?agent=ack-worker`)
+    const data = (await res.json()) as { events: Array<{ id: number; code: string }> }
     const event = data.events[0]
     if (!event) throw new Error('expected pending event for ack-worker')
 
-    // Ack it
-    const ackRes = await fetch(`${BASE}/events/${event.id}/ack`, { method: 'POST' })
+    // A CODE IS REQUIRED HERE TOO. This endpoint used to clear on the id alone,
+    // which was a hole straight through read-before-ack: an id is knowable from
+    // the cheap summary rung, so a queue could be drained one call at a time
+    // without ever being read. Asserted in both directions, because "the happy
+    // path works" would also pass against an endpoint that ignored the code.
+    const wrongCode = await fetch(`${BASE}/events/${event.id}/ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'not-the-code' }),
+    })
+    expect(((await wrongCode.json()) as { ok: boolean }).ok).toBe(false)
+
+    const ackRes = await fetch(`${BASE}/events/${event.id}/ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: event.code }),
+    })
     const ackData = (await ackRes.json()) as { ok: boolean }
     expect(ackData.ok).toBe(true)
 
@@ -113,7 +128,20 @@ describe('event queue', () => {
     expect(afterData.events.find((e) => e.id === event.id)).toBeUndefined()
   })
 
-  test('POST /events/ack batch acks up to ID', async () => {
+  test('POST /events/ack clears exactly the pairs it was given, and leaves the rest', async () => {
+    // ── CASUALTY, PRE-DECLARED (task 043 part 3, `queue.test.ts:136`) ──
+    //
+    // OLD: `POST /events/ack batch acks up to ID` — `{agent, upToId}`, asserting
+    // that acking up to the second reply also swept the earlier `register`.
+    // `upToId` is DELETED, and the sweep is precisely why: it let an agent clear
+    // a queue it had never read, and "progress is defined only by ack" (E4) is
+    // worth nothing if an ack can be issued without reading. The old assertion's
+    // most valuable line was its comment — "acking up to secondId ALSO clears
+    // register" — which is the collateral clearing stated as a feature.
+    //
+    // NEW: the property worth keeping from it — a batch ack is still a batch,
+    // and it clears WHAT IT NAMED and nothing adjacent. Same three replies, same
+    // partial drain, no range.
     using agent = await connectAgent(WS_URL, 'batch-worker')
     agent.ws.send(JSON.stringify({ type: 'reply', from: 'batch-worker', text: 'msg 1' }))
     await Bun.sleep(50)
@@ -122,52 +150,53 @@ describe('event queue', () => {
     agent.ws.send(JSON.stringify({ type: 'reply', from: 'batch-worker', text: 'msg 3' }))
     await Bun.sleep(100)
 
-    // Get events — filter to replies (register event also lands in pending now)
-    const res = await fetch(`${BASE}/events/pending?agent=batch-worker`)
-    const data = (await res.json()) as { events: Array<{ id: number; type: string }> }
+    // The FETCH rung — the only place a code exists (S5).
+    const res = await fetch(`${BASE}/events?agent=batch-worker`)
+    const data = (await res.json()) as { events: Array<{ id: number; type: string; code: string }> }
     const replies = data.events.filter((e) => e.type === 'reply')
     expect(replies.length).toBe(3)
 
-    // Ack up to the second reply
-    const secondId = replies[1]?.id
     const ackRes = await fetch(`${BASE}/events/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agent: 'batch-worker', upToId: secondId }),
+      body: JSON.stringify({ pairs: replies.slice(0, 2).map((e) => ({ id: e.id, code: e.code })) }),
     })
     const ackData = (await ackRes.json()) as { acknowledged: number; remaining: number }
-    // register event is earlier than reply[0] so acking up to secondId also clears register.
-    expect(ackData.acknowledged).toBe(3)
+    expect(ackData.acknowledged).toBe(2)
     expect(typeof ackData.remaining).toBe('number')
 
-    // Third reply should still be there
+    // The third reply survives — and so does the `register` that sat BEFORE all
+    // three, which under `upToId` would have gone with them. That is the whole
+    // behavioural difference between the two forms, so it is asserted rather
+    // than described.
     const after = await fetch(`${BASE}/events/pending?agent=batch-worker`)
-    const afterData = (await after.json()) as { events: Array<{ id: number }> }
-    expect(afterData.events.length).toBe(1)
+    const afterData = (await after.json()) as { events: Array<{ id: number; type: string }> }
+    expect(afterData.events.map((e) => e.type).sort()).toEqual(['register', 'reply'])
   })
 
   test('POST /events/ack with no agent filter drains other-agent register events (nudge-loop bug)', async () => {
-    // Other agents' register events end up in pending (sensei's inbox) but
-    // none resolve to sensei — ack with `{upToId}` and no agent filter must
-    // still drain them.
+    // Other agents' register events end up in pending (the sensei's inbox) but
+    // none resolve to sensei — an ack with no agent filter must still drain
+    // them. OLD: `{upToId: maxId}`. Mechanical rewrite to pairs (task 043's
+    // mechanical-rewrite list, `queue.test.ts:170`): the subject is the ABSENCE
+    // of an agent filter, and that survives the ack-form change untouched.
     await clearPendingEvents()
     using _a = await connectAgent(WS_URL, 'drain-a')
     using _b = await connectAgent(WS_URL, 'drain-b')
     await Bun.sleep(100)
 
     const pending = (await (await fetch(`${BASE}/events`)).json()) as {
-      events: Array<{ id: number; type: string; agent?: string }>
+      events: Array<{ id: number; type: string; agent?: string; code: string }>
     }
     const registers = pending.events.filter(
       (e) => e.type === 'register' && (e.agent === 'drain-a' || e.agent === 'drain-b'),
     )
     expect(registers.length).toBe(2)
-    const maxId = pending.events.at(-1)?.id ?? 0
 
     const ackRes = await fetch(`${BASE}/events/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ upToId: maxId }),
+      body: JSON.stringify({ pairs: pending.events.map((e) => ({ id: e.id, code: e.code })) }),
     })
     const ackData = (await ackRes.json()) as { acknowledged: number; remaining: number }
     expect(ackData.acknowledged).toBeGreaterThanOrEqual(2)
@@ -192,15 +221,17 @@ describe('event queue', () => {
   })
 })
 
+/** Drain everything pending. OLD: `{upToId: max(ids)}`. The unaddressed fetch is
+ *  deliberate — this is a test clearing the whole queue, not an agent reading
+ *  its mailbox, and only the ADDRESSED read stamps the delivery ledger. */
 async function clearPendingEvents() {
   const res = await fetch(`${BASE}/events`)
-  const data = (await res.json()) as { events: Array<{ id: number }> }
+  const data = (await res.json()) as { events: Array<{ id: number; code: string }> }
   if (data.events.length > 0) {
-    const maxId = Math.max(...data.events.map((e) => e.id))
     await fetch(`${BASE}/events/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ upToId: maxId }),
+      body: JSON.stringify({ pairs: data.events.map((e) => ({ id: e.id, code: e.code })) }),
     })
   }
 }
@@ -235,27 +266,59 @@ async function drainUntilQuiet(settleMs = 250, timeoutMs = 5000) {
 }
 
 describe('sensei nudge', () => {
-  test('sensei receives nudge when idle + events pending', async () => {
+  test('PRIORITY, not idleness, decides an interrupt: a human pushes, a worker reply does not', async () => {
+    // ── CASUALTY, PRE-DECLARED (task 043 part 3: the idle-gate-dependent cases) ──
+    //
+    // OLD: `sensei receives nudge when idle + events pending` — post
+    // `/agent-idle`, send a worker reply, expect an `Events pending` deliver.
+    // Both halves of that premise are gone. `/agent-idle` no longer arms
+    // anything (canon E3: "nothing ever asks whether an agent is busy"), and a
+    // worker's routine reply does not outrank the sensei's push threshold (S3),
+    // so the arrival it used as the trigger is now the textbook case of an event
+    // that must NOT interrupt.
+    //
+    // NEW: the same question — "when does infra interrupt the sensei?" — asked
+    // of the mechanism that answers it now. Kept at this level because the pure
+    // tests can prove what `decide` returns but not that the adapter hands it a
+    // real priority; that mapping is only exercised over a live socket.
     using sensei = await connectAgent(WS_URL, 'nudge-sensei', 'sensei')
     using worker = await connectAgent(WS_URL, 'nudge-worker')
+    using human = await connectAgent(WS_URL, 'nudge-human', 'user')
 
-    // Mark sensei idle
-    await fetch(`${BASE}/agent-idle`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agent: 'nudge-sensei' }),
-    })
+    const pushes = () =>
+      sensei.messages.filter((m) => m.type === 'deliver' && m.from === 'infra' && m.text?.includes('Events pending'))
+        .length
 
-    // Worker sends reply — should trigger nudge to sensei
+    // Settle first and take the mark AFTER the connects. The human's own
+    // `register` is an external-sender event and therefore pushes on arrival —
+    // correct under the heuristic (it looks at the sender, not the verb) and
+    // nothing to do with the arrival under test, but it lands inside
+    // `baselineCount` and would make the first assertion measure a connect.
+    await Bun.sleep(300)
+    const mark = pushes()
+
+    // BELOW THE THRESHOLD: queued, and silent.
     worker.ws.send(JSON.stringify({ type: 'reply', from: 'nudge-worker', text: 'finished' }))
-    await Bun.sleep(200)
+    await Bun.sleep(250)
+    expect(pushes()).toBe(mark)
 
-    // Look for nudge after connect-time messages
-    const postConnect = sensei.messages.slice(sensei.baselineCount)
-    const nudge = postConnect.find(
-      (m) => m.type === 'deliver' && m.from === 'infra' && m.text?.includes('Events pending'),
-    )
-    expect(nudge).toBeDefined()
+    // AT THE THRESHOLD: the same queue, the same sensei, one external message —
+    // and it lands. Asserted as a pair on purpose: either half alone passes
+    // against an implementation that pushes for everything or for nothing.
+    human.ws.send(JSON.stringify({ type: 'reply', from: 'nudge-human', text: 'are you there?' }))
+    let landed = mark
+    for (let i = 0; i < 20 && landed === mark; i++) {
+      landed = pushes()
+      if (landed === mark) await Bun.sleep(50)
+    }
+    expect(landed).toBe(mark + 1)
+    // …and the worker's reply rode along in that push rather than being lost:
+    // the threshold decides whether to INTERRUPT, never what the mailbox holds.
+    // (The wake summarises by type rather than quoting bodies — that is the
+    // cheap rung doing its job — so the reply shows up as its kind, not its
+    // text.)
+    const last = sensei.messages.filter((m) => m.type === 'deliver' && m.from === 'infra').at(-1)
+    expect((last as { text: string }).text).toContain('worker:reply')
   })
 
   test('worker event is queued even when sensei is busy', async () => {

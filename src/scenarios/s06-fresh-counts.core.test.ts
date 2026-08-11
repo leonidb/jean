@@ -53,7 +53,12 @@ describe('S6 — every push reports the queue at emission', () => {
     listener.onEvent(eventWithId(2), world(T0 + 1000, [1, 2]))
     // The agent handled #1. One remains.
     listener.onEvent(eventWithId(3, 'ack', 'system', { pairs: [] }), world(T0 + 2000, [2]))
-    listener.tick(world(T0 + INTERVAL, [2]))
+    // FAR ENOUGH OUT THAT THE LADDER ALLOWS A REPEAT. The first draft ticked at
+    // T0 + INTERVAL, which is inside the second rung after two pushes, so the
+    // falling leg never got reported and the case could not go green for any
+    // implementation — an unreachable green. WHEN the third push happens is
+    // fixture detail; this test is about WHICH NUMBER it carries.
+    listener.tick(world(T0 + 4 * INTERVAL, [2]))
 
     expect(counts(r.emitted).at(-1)).toBe(1)
     // And nothing along the way ever over-reported.

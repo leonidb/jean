@@ -86,10 +86,14 @@ describe('injected ports are honoured', () => {
       ports: { spawn: neverSpawn, now: () => FIXED_NOW },
     })
     try {
-      // Registering IS traffic: the register handler stamps lastActivityAt from
-      // ports.now(), and GET /agents renders it as an ISO string.
+      // OLD PROBE: the register handler's `lastActivityAt` stamp. H7 (ruled
+      // 2026-08-11) removed it — registering is not activity — so the probe
+      // moved to a signal that IS: an HTTP call carrying the agent's identity
+      // header, which `touchAgent` stamps from `ports.now()`. Same property,
+      // real activity path.
       const agent = await connectAgent(`ws://127.0.0.1:${handle.port}/ws`, 'clock-probe')
       try {
+        await fetch(`http://127.0.0.1:${handle.port}/board`, { headers: { 'x-jean-agent': 'clock-probe' } })
         const res = await fetch(`http://127.0.0.1:${handle.port}/agents`)
         const body = (await res.json()) as { agents: { name: string; lastActivityAt?: string }[] }
         const probe = body.agents.find((a) => a.name === 'clock-probe')
@@ -188,8 +192,18 @@ describe('injected ports are honoured', () => {
           actor: 'test',
         }),
       })
-      expect(await eventually(() => scheduled.length === 1)).toBe(true)
-      expect(scheduled[0]).toEqual({ id: 'nightly', spec: { cron: '0 3 * * *' } })
+      // ASSERTED ON THE TRIGGER THIS TEST CREATED, not on the total count.
+      //
+      // CASUALTY (transition, task 045 change L) — and one 043's list could not
+      // have anticipated, because S9's daily digest had no owning commit when
+      // that list was written (042 DEVIATION-5). Infra now creates a built-in
+      // `parked-digest` trigger at startup, so `scheduled` legitimately holds
+      // two entries. OLD CLAIM: exactly one thing was scheduled. NEW CLAIM: the
+      // trigger this test created reached the port with the right spec — which
+      // is what the test is named for, and what a `length === 1` assertion was
+      // only ever a proxy for.
+      expect(await eventually(() => scheduled.some((s) => s.id === 'nightly'))).toBe(true)
+      expect(scheduled.find((s) => s.id === 'nightly')).toEqual({ id: 'nightly', spec: { cron: '0 3 * * *' } })
 
       // Removing it must cancel through the port too — a `schedule` with no
       // matching `unschedule` would leak a job on every trigger edit.

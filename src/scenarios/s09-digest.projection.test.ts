@@ -133,16 +133,15 @@ describe('S9 — membership', () => {
     expect(lines[0]).toContain('004')
   })
 
-  test('INTERPRETATION (flagged, not canon) — "externally blocked" excludes sensei-held', () => {
-    // See the header. `human`/`external`/`time` are outside the dojo's control;
-    // a `sensei`-held task is already covered by the S7/S8 nag ladder and would
-    // otherwise be both nagged and digested. If the ruling comes back the other
-    // way, only this case and `isParked` change.
-    expect(isParked(parked('001', 'human', DAY))).toBe(true)
-    expect(isParked(parked('002', 'external', DAY))).toBe(true)
-    expect(isParked(parked('003', 'time', DAY))).toBe(true)
-    expect(isParked(parked('004', 'sensei', DAY))).toBe(false)
-    expect(isParked(task('005', { status: 'in-progress' }))).toBe(false)
+  test('RULED (H3, 2026-08-11) — membership: human and external always; sensei-held never', () => {
+    // Was "INTERPRETATION (flagged, not canon)". The flag did its job: H3's
+    // ruling confirmed the sensei exclusion (C5) and settled the rest —
+    // "Parked = any task whose blockedOn is human or external", with `time`
+    // governed by its resume date (the describe block below).
+    expect(isParked(parked('001', 'human', DAY), T0)).toBe(true)
+    expect(isParked(parked('002', 'external', DAY), T0)).toBe(true)
+    expect(isParked(parked('004', 'sensei', DAY), T0)).toBe(false)
+    expect(isParked(task('005', { status: 'in-progress' }), T0)).toBe(false)
   })
 
   test('the digest is exactly the tasks isParked admits — no second rule', () => {
@@ -155,7 +154,52 @@ describe('S9 — membership', () => {
       task('004', { status: 'done' }),
     ]
     const lines = buildDigest(boardOf(...all), T0)
-    expect(lines).toHaveLength(all.filter(isParked).length)
-    for (const t of all.filter(isParked)) expect(lines.some((l) => l.includes(t.id))).toBe(true)
+    expect(lines).toHaveLength(all.filter((t) => isParked(t, T0)).length)
+    for (const t of all.filter((t) => isParked(t, T0))) expect(lines.some((l) => l.includes(t.id))).toBe(true)
+  })
+})
+
+describe('S9 — H3 (ruled 2026-08-11): the resume date is the wake', () => {
+  // CANON, the amended sentence verbatim: "A time-parked task carries its
+  // resume date; it stays out of the digest until that date and surfaces in it
+  // from then on — the date is the wake, a trigger is optional precision."
+  //
+  // How the ruling got here matters for reading these cases: (1) Leonid cut
+  // `time` from unconditional membership — a daily line about a September task
+  // until September is spam, scheduled work is decided once; (2) the overdue
+  // valve required recording the resume date on the task; (3) WITH the date,
+  // the required trigger dissolved — the digest cycle itself is the wake, at
+  // daily granularity. Exact day-boundary granularity is deliberately the
+  // implementation's ("up to the digest") — these cases test comfortably
+  // either side of the date, never the boundary minute.
+  const timePark = (id: string, resumeAt?: string) =>
+    task(id, {
+      blockedOn: 'time',
+      blockedSince: new Date(T0 - DAY).toISOString(),
+      ...(resumeAt !== undefined && { resumeAt }),
+    })
+
+  test('a time-parked task with a FUTURE resume date stays out of the digest', () => {
+    const september = timePark('001', new Date(T0 + 30 * DAY).toISOString())
+    expect(isParked(september, T0)).toBe(false)
+    expect(buildDigest(boardOf(september), T0)).toEqual([])
+  })
+
+  test('from its resume date onward it surfaces — and never drops off again', () => {
+    // "Surfaces in it from then on": the date is a wake, not a one-shot ping.
+    // A task that appeared on resume day and vanished on day two would be the
+    // silent-vanish S9 exists to forbid, arriving through the new field.
+    const due = timePark('001', new Date(T0 + 2 * DAY).toISOString())
+    expect(buildDigest(boardOf(due), T0 + 2 * DAY + HOUR).some((l) => l.includes('001'))).toBe(true)
+    expect(buildDigest(boardOf(due), T0 + 40 * DAY).some((l) => l.includes('001'))).toBe(true)
+  })
+
+  test('a time-park with NO resume date is visible immediately — never-silently-vanishes wins', () => {
+    // The date is what earns the silence. A time-park that recorded no wake
+    // has no discovery-by-consequence path, so hiding it would be exactly the
+    // vanish the scenario forbids; showing it daily is the safe direction.
+    const undated = timePark('001')
+    expect(isParked(undated, T0)).toBe(true)
+    expect(buildDigest(boardOf(undated), T0).some((l) => l.includes('001'))).toBe(true)
   })
 })

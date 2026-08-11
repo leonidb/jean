@@ -1,6 +1,6 @@
 /**
  * Mutation harness for the race guards and the structural boundary guards
- * (refactor stage 3, tasks 033).
+ * (refactor stage 3, task 033; retargeted at the transition, task 045).
  *
  *   bun run scripts/mutate-race-guards.ts
  *
@@ -22,23 +22,44 @@
  * a different program. "Delete the guard" is usually right; "disable the feature
  * the guard protects" usually is not.
  *
- * Mutations may span several files, because after commit 2 the guards do:
- * guard 1 is the capture in server.ts's record(), guards 2/3/5 are decisions in
- * core/attention.ts, guard 4 is the single commit-iff-landed line in
- * core/attention-listener.ts, and guards 6/7 stayed in server.ts. Every touched
- * file is restored from its own in-memory copy after each case, including on
- * setup failure, so an interrupted run leaves the tree intact — verify with
- * `git status` regardless.
+ * ── TWENTY ROWS, THEN NINE: RETIREMENT, NOT EROSION (task 045) ──
+ *
+ * A shrinking mutation harness is indistinguishable from a rotting one unless it
+ * says which happened, so it says. NINE ROWS LEFT WITH THEIR GUARDS, because the
+ * machinery each one broke no longer exists:
+ *
+ *   guard 3        the 30s duplicate-wake check — no episode to de-duplicate in
+ *   guard 5        the idle gate — nothing asks whether an agent is busy (E3)
+ *   guard 6 i/p/d  the ack claim — fold-decides appends unconditionally (041)
+ *   guard 7 i/p/x  auto-clear-on-reply — `{id, code}` pairs are the only path (S5)
+ *   weld 6, weld 7 the two pre-append welds, with the guards they welded
+ *
+ * ELEVEN REMAIN, and four of them are NEW rather than carried: the guards
+ * themselves moved into `core/notify.ts`, so the mutations had to be rewritten
+ * against the mechanism that holds the property now — an `announcedThroughId`
+ * comparison instead of a captured pre-append flag. A retargeted row proves the
+ * same thing about a different implementation, which is the only honest way to
+ * carry a guard across a rewrite. The eleventh (`announce`) guards the canon fix
+ * from task 046's audit and is not a race guard at all; it lives here because
+ * this is where properties that no behavioural test can see are held.
+ *
+ * TWELVE, at the delivery unification (the fix round, 2026-08-11): `unify`
+ * reintroduces the sensei-only adapter — the exact gap three reviews missed
+ * because the pure per-agent decisions were green while nothing drove them —
+ * and `boundary C` retargeted to the sweep line the timer now holds.
+ *
+ * Every touched file is restored from its own in-memory copy after each case,
+ * including on setup failure, so an interrupted run leaves the tree intact —
+ * verify with `git status` regardless.
  */
 
 const SERVER = 'src/infra/server.ts'
-const ATTENTION = 'src/infra/core/attention.ts'
-const LISTENER = 'src/infra/core/attention-listener.ts'
-const PRE_APPEND = 'src/infra/core/pre-append.ts'
+const NOTIFY = 'src/infra/core/notify.ts'
 
 const RACE_GUARDS = 'src/infra/race-guards.test.ts'
-const CORE_TESTS = 'src/infra/core/attention.test.ts'
-const PRE_APPEND_TESTS = 'src/infra/core/pre-append.test.ts'
+const NUDGE_BACKOFF = 'src/infra/attention-nudge-backoff.test.ts'
+const S03 = 'src/scenarios/s03-threshold.core.test.ts'
+const S07 = 'src/scenarios/s07-nag.core.test.ts'
 const BOUNDARY = 'src/infra/core/boundary.test.ts'
 
 type Edit = { file: string; from: string; to: string }
@@ -55,13 +76,14 @@ type Mutation = {
 
 // ── Guard 4's mutation is ONE edit proven by THREE tests ──────────────
 //
-// Before the extraction "a refused delivery advances nothing" was three
-// separate `if (!landed) return` lines, one per push path. Folding them into
-// one line in the listener is the point of the refactor — but it must not
-// weaken the evidence, so the same break is run against each path's test
-// separately. Three rows, three independent detections.
+// "A refused delivery advances nothing" is a single line in the notifier, and
+// folding the old three push paths into one is the point of the refactor — but
+// it must not weaken the evidence, so the same break is run against three
+// independent covers: the pure notifier decision, the pure supervision decision
+// (a different machine with the same rule), and the live-socket case that only
+// the integration level can reach.
 const DROP_LANDED_GUARD: Edit = {
-  file: LISTENER,
+  file: NOTIFY,
   from: `      if (!landed) continue`,
   to: `      // MUTATED: commit-iff-landed guard removed`,
 }
@@ -69,241 +91,116 @@ const DROP_LANDED_GUARD: Edit = {
 const MUTATIONS: Mutation[] = [
   {
     guard: 'guard 1',
-    what: 'recompute hadBlockingPending in the listener instead of capturing it before the append',
+    what: 'announce beyond what the push actually carried',
     test: RACE_GUARDS,
-    filter: 'burst coalescing',
-    // This is not a strawman — it is the design alternative that was actually
-    // considered and rejected. The listener is serialized by publish order, so
-    // by the time it runs the event is already in the queue and every blocking
-    // arrival reads "blocking was already pending", suppressing its own wake.
+    filter: 'each arrival is pushed exactly ONCE',
+    // RETARGETED. The old row broke guard 1 by recomputing `hadBlockingPending`
+    // downstream; there is no such fact any more. The equivalent lie in the new
+    // mechanism is marking events announced that the payload never contained —
+    // "I told you", of something never sent. Announcing everything forever makes
+    // the second arrival invisible, so the burst produces one push instead of
+    // two and the case sees it.
     edits: [
       {
-        file: SERVER,
-        from: `    apply: (e, ctx) => attention.onEvent(e, senseiView(ports.now()), ctx.hadBlockingPending),`,
-        to: `    apply: (e) => attention.onEvent(e, senseiView(ports.now()), hasBlockingPending()),`,
-      },
-    ],
-  },
-  {
-    guard: 'guard 3',
-    what: 'delete the 30s duplicate-wake guard',
-    test: RACE_GUARDS,
-    filter: 'burst coalescing',
-    edits: [
-      {
-        file: ATTENTION,
-        from: `    if (episode.blockingWakeCount > 0 && view.now - episode.lastBlockingWakeAt < 30_000) {
-      return { next: state, effects: [] }
-    }`,
-        to: `    // MUTATED: duplicate-wake guard removed`,
+        file: NOTIFY,
+        from: `            announcedThroughId: Math.max(episode.announcedThroughId, maxId(view.pending)),`,
+        to: `            announcedThroughId: Number.MAX_SAFE_INTEGER, // MUTATED: announce what was never sent`,
       },
     ],
   },
   {
     guard: 'guard 2',
-    what: 'decide enteredPending by length-compare instead of by id',
+    what: 'decide "anything new?" by length-compare instead of by id',
     test: RACE_GUARDS,
-    filter: 'enteredPending is checked by id',
-    // The length has to be captured inside the SAME record() call, before its
-    // own append — a listener-level tracker would be updated by the interleaved
-    // ack and would not reproduce the bug. So the mutation threads it exactly
-    // where the real code once read it.
+    filter: 'tracked by id, not by length',
+    // RETARGETED, and it is the SAME historical bug: an ack that shrinks the
+    // queue while an append is in flight leaves the length unchanged, so a
+    // length-compare concludes "nothing entered" and skips the dispatch. The
+    // memo has to live in the notifier closure — the one place that sees every
+    // decision in order — which is exactly where the old code read it from.
     edits: [
       {
-        file: SERVER,
-        from: `    const hadBlockingBefore = hasBlockingPending()
-    const event = await store.append({ stream, type, data })`,
-        to: `    const hadBlockingBefore = hasBlockingPending()
-    const mutantLenBefore = pendingProjection.state.length
-    const event = await store.append({ stream, type, data })`,
-      },
-      {
-        file: SERVER,
-        from: `    bus.publish(event, { hadBlockingPending: hadBlockingBefore })`,
-        to: `    bus.publish(event, { hadBlockingPending: hadBlockingBefore, mutantLenBefore } as never)`,
-      },
-      {
-        file: SERVER,
-        from: `    apply: (e, ctx) => attention.onEvent(e, senseiView(ports.now()), ctx.hadBlockingPending),`,
-        to: `    apply: (e, ctx) =>
-      attention.onEvent(e, senseiView(ports.now()), ctx.hadBlockingPending, (ctx as never as { mutantLenBefore: number }).mutantLenBefore),`,
-      },
-      {
-        file: LISTENER,
-        from: `    onEvent(event, view, hadBlockingPending) {
-      run(decideEventApplied(state, view, event, hadBlockingPending))
-    },`,
-        to: `    onEvent(event, view, hadBlockingPending, mutantLenBefore?: number) {
-      const decision = decideEventApplied(state, view, event, hadBlockingPending)
-      // The unconditional resets still land; only the dispatch is skipped —
-      // which is exactly what the length-compare bug did.
-      if (mutantLenBefore !== undefined && view.pendingIds.length <= mutantLenBefore) {
-        state = decision.next
-        return
-      }
-      run(decision)
-    },`,
-      },
-    ],
-  },
-  {
-    guard: 'guard 5',
-    what: 'let a suppressed-because-busy nudge consume the content-changed signal',
-    test: RACE_GUARDS,
-    filter: 'idle gate is checked BEFORE',
-    edits: [
-      {
-        file: ATTENTION,
-        from: `  if (!view.agent || !view.deliverable || !view.idle) return { next: state, effects: [] }`,
-        to: `  if (!view.agent || !view.deliverable) return { next: state, effects: [] }
-  if (!view.idle) {
-    const busy = episodeOf(state, view.agent)
-    return {
-      next: withEpisode(state, view.agent, {
-        ...busy,
-        maxNudgedPendingId: Math.max(busy.maxNudgedPendingId, maxId(view.pendingIds)),
-      }),
-      effects: [],
-    }
-  }`,
+        file: NOTIFY,
+        from: `  let state = initialState()
+
+  function run(view: NotifyView): void {
+    const decision = decide(state, view)
+    state = decision.next`,
+        to: `  let state = initialState()
+  let mutantLastLen = 0
+
+  function run(view: NotifyView): void {
+    const decision = decide(state, view)
+    state = decision.next
+    // MUTATED: the unconditional state advance still lands; only the dispatch is
+    // skipped — which is precisely what the length-compare bug did.
+    if (view.pending.length <= mutantLastLen) return
+    mutantLastLen = view.pending.length`,
       },
     ],
   },
   {
     guard: 'guard 4a',
-    what: 'drop commit-iff-landed — blocking wake path',
-    test: CORE_TESTS,
-    filter: 'blocking wake: nothing is committed',
+    what: 'drop commit-iff-landed — the notifier decision (pure)',
+    test: S03,
+    filter: 'REFUSED push is not a push',
     edits: [DROP_LANDED_GUARD],
   },
   {
     guard: 'guard 4b',
-    what: 'drop commit-iff-landed — machine nudge path',
-    test: CORE_TESTS,
-    filter: 'machine nudge: the episode is not consumed',
-    edits: [DROP_LANDED_GUARD],
+    what: 'drop commit-iff-landed — the supervision decision (pure, same rule)',
+    test: S07,
+    filter: 'landed:false advances nothing',
+    edits: [
+      {
+        file: 'src/infra/core/supervision.ts',
+        from: `    if (!exec.deliver(to, text)) return`,
+        to: `    exec.deliver(to, text) // MUTATED: commit-iff-landed guard removed`,
+      },
+    ],
   },
   {
     guard: 'guard 4c',
-    what: 'drop commit-iff-landed — stall watchdog path',
-    test: CORE_TESTS,
-    filter: 'stall watchdog: the window is not re-armed',
+    what: 'drop commit-iff-landed — a live socket whose transport refuses',
+    test: NUDGE_BACKOFF,
+    filter: 'FAILED DELIVERY DOES NOT CONSUME',
     edits: [DROP_LANDED_GUARD],
   },
-  // ── THE TWO-ROW RULE (035) ────────────────────────────────────────
-  //
-  // Guards 6 and 7 moved into pure functions in stage 4. A moved guard with one
-  // row proves LESS than it did before the move: the integration row shows the
-  // wiring still holds, the pure row shows the rule itself is still right, and
-  // neither implies the other. Both rows stay for as long as the guards live.
   {
-    guard: 'guard 6 (i)',
-    what: 'drop the in-flight reservation — integration row',
-    test: RACE_GUARDS,
-    filter: 'claims ids synchronously',
+    guard: 'announce',
+    what: 'let carriage discharge nothing — the canon drift, reintroduced',
+    test: S03,
+    filter: 'CORRECTED',
+    // NEW AT THE CANON FIX (task 046's audit). The rule this breaks is the one
+    // that satisfies S1, S3 and the foundations simultaneously: a push fires
+    // only for what the agent has not been SHOWN, by any route. Stubbing
+    // `carried` restores exactly the drifted reading the audit found — a push
+    // per qualifying event, and an agent told twice about the same news.
+    //
+    // It gets a row because it was verified by hand (stashing the wiring) while
+    // being written, and a guard proven once by hand is a guard nobody proves
+    // again. Two of the three CORRECTED cases fail under it.
     edits: [
       {
-        file: PRE_APPEND,
-        from: `  return [...new Set(requested)].filter((id) => pendingIds.has(id) && !inFlight.has(id))`,
-        to: `  return [...new Set(requested)].filter((id) => pendingIds.has(id))`,
-      },
-    ],
-  },
-  {
-    guard: 'guard 6 (p)',
-    what: 'drop the in-flight reservation — pure row',
-    test: PRE_APPEND_TESTS,
-    filter: 'drops ids another writer already owns',
-    edits: [
-      {
-        file: PRE_APPEND,
-        from: `  return [...new Set(requested)].filter((id) => pendingIds.has(id) && !inFlight.has(id))`,
-        to: `  return [...new Set(requested)].filter((id) => pendingIds.has(id))`,
-      },
-    ],
-  },
-  {
-    guard: 'guard 6 (d)',
-    what: 'drop the local input dedupe — the half no caller currently exercises',
-    test: PRE_APPEND_TESTS,
-    filter: 'DEDUPES ITS INPUT',
-    edits: [
-      {
-        file: PRE_APPEND,
-        from: `  return [...new Set(requested)].filter((id) => pendingIds.has(id) && !inFlight.has(id))`,
-        to: `  return requested.filter((id) => pendingIds.has(id) && !inFlight.has(id))`,
-      },
-    ],
-  },
-  {
-    guard: 'guard 7 (i)',
-    what: 'compute the auto-clear candidate at the TAIL instead of at entry — integration row',
-    test: RACE_GUARDS,
-    filter: 'snapshots the auto-clear candidate at ENTRY',
-    // Still expressed at the CALL SITE, because that is where the entry-vs-tail
-    // property lives — the pure function cannot be wrong about a position it
-    // does not control.
-    edits: [
-      {
-        file: SERVER,
-        from: `    if (delivered && autoClearId !== null && confirmAutoClear(autoClearId, blockingPendingFrom(args.to))) {
-      await recordAck([autoClearId], 'auto-clear')
-    }`,
-        to: `    if (delivered) {
-      const mutantTail = decideAutoClear({
-        senderRole: agents.get(args.from)?.role ?? (senseiNames.has(args.from) ? 'sensei' : undefined),
-        targetRole: agents.get(args.to)?.role,
-        blockingFromTarget: blockingPendingFrom(args.to),
-      })
-      if (mutantTail !== null) await recordAck([mutantTail], 'auto-clear')
-    }`,
-      },
-    ],
-  },
-  {
-    guard: 'guard 7 (p)',
-    what: 'let the tail check confirm a DIFFERENT id than the entry candidate — pure row',
-    test: PRE_APPEND_TESTS,
-    filter: 'never clears a DIFFERENT event',
-    edits: [
-      {
-        file: PRE_APPEND,
-        from: `  return blockingFromTarget.length === 1 && blockingFromTarget[0] === candidate`,
-        to: `  return blockingFromTarget.length === 1`,
-      },
-    ],
-  },
-  {
-    guard: 'guard 7 (x)',
-    what: 'drop the exactly-one rule — auto-clear a burst',
-    test: PRE_APPEND_TESTS,
-    filter: 'THE EXACTLY-ONE RULE',
-    edits: [
-      {
-        file: PRE_APPEND,
-        from: `  return view.blockingFromTarget.length === 1 ? (view.blockingFromTarget[0] as number) : null`,
-        to: `  return view.blockingFromTarget.length >= 1 ? (view.blockingFromTarget[0] as number) : null`,
+        file: NOTIFY,
+        from: `      if (ids.length === 0) return`,
+        to: `      if (ids.length >= 0) return // MUTATED: carriage discharges nothing`,
       },
     ],
   },
   {
     guard: 'scenario 6',
-    what: 'cache the inbox in the view builder instead of rebuilding it per decision',
+    what: 'cache the rendered inbox instead of rebuilding it per decision',
     test: RACE_GUARDS,
     filter: 'fresh counts',
     edits: [
       {
         file: SERVER,
-        from: `  function viewFor(agent: string | undefined, now: number): AttentionView {
-    const live = findSensei()`,
-        to: `  let mutantCachedInbox: ReturnType<typeof senseiInboxNow> | undefined
-  function viewFor(agent: string | undefined, now: number): AttentionView {
-    const live = findSensei()`,
-      },
-      {
-        file: SERVER,
-        from: `      inbox: deliverable ? inboxFor(pending, taskOwner, { now, roleOf }) : null,`,
-        to: `      inbox: deliverable ? (mutantCachedInbox ??= inboxFor(pending, taskOwner, { now, roleOf })) : null,`,
+        from: `  function renderPush(view: NotifyView): string {
+    const inbox = view.agent ? inboxNow(view.agent) : null`,
+        to: `  let mutantCachedInbox: ReturnType<typeof inboxNow> | undefined
+  function renderPush(view: NotifyView): string {
+    const inbox = view.agent ? (mutantCachedInbox ??= inboxNow(view.agent)) : null`,
       },
     ],
   },
@@ -322,7 +219,7 @@ const MUTATIONS: Mutation[] = [
       {
         file: SERVER,
         from: `  await boardProjection.catchUp()`,
-        to: `  for (const e of await store.read({})) bus.publish(e, { hadBlockingPending: false })
+        to: `  for (const e of await store.read({})) bus.publish(e)
   await boardProjection.catchUp()`,
       },
     ],
@@ -334,7 +231,7 @@ const MUTATIONS: Mutation[] = [
     filter: 'core/ imports nothing from the adapter layer',
     edits: [
       {
-        file: ATTENTION,
+        file: NOTIFY,
         from: `import type { StoredEvent } from '../../es/index.ts'`,
         to: `import type { StoredEvent } from '../../es/index.ts'
 import type { Bridge } from '../bridge.ts'`,
@@ -342,35 +239,40 @@ import type { Bridge } from '../bridge.ts'`,
     ],
   },
   {
-    guard: 'weld 6',
-    what: 'slip an await between the ack claim and the reservation',
+    guard: 'boundary C',
+    what: 'put branching back into a timer callback',
     test: BOUNDARY,
-    filter: 'GUARD 6 WELD',
-    // The failure stage 4 exists to not cause. No behavioural test in the suite
-    // sees this — the integration tests run a transport that never interleaves
-    // at this granularity — so the structural check is the only witness.
+    // RETARGETED at the delivery unification: the timer drives `sweep` over
+    // every dojo agent's views now, so the anchor moved with it. The mutation
+    // is the same historical bug — state-dependent behavior hiding in a timer
+    // callback where no test level can see it.
+    filter: 'timer callbacks are a single core call',
     edits: [
       {
         file: SERVER,
-        from: `    if (claimed.length === 0) return [] // already cleared, or another writer owns it
-    for (const id of claimed) ackInFlight.add(id)`,
-        to: `    if (claimed.length === 0) return []
-    await Promise.resolve()
-    for (const id of claimed) ackInFlight.add(id)`,
+        from: `  const notifyTick = setInterval(() => notifier.sweep(notifyViews(ports.now())), NOTIFY_TICK_MS)`,
+        to: `  const notifyTick = setInterval(() => {
+    if (pendingProjection.state.length > 0) notifier.sweep(notifyViews(ports.now()))
+  }, NOTIFY_TICK_MS)`,
       },
     ],
   },
   {
-    guard: 'weld 7',
-    what: 'slip an await before the auto-clear entry snapshot',
-    test: BOUNDARY,
-    filter: 'GUARD 7 WELD',
+    guard: 'unify',
+    what: 'drive the notifier for the sensei only — the pre-unification adapter, back',
+    test: 'src/scenarios/unification.wiring.test.ts',
+    filter: 'driven per-agent',
+    // NEW AT THE DELIVERY UNIFICATION (ruled 2026-08-11). The historical gap,
+    // in s01's own words: "no view is ever built for any other agent, so
+    // thresholdFor('worker') decides nothing in production" — canon E6 held
+    // for the pure decisions and not for the adapter that drives them, and
+    // three reviews read the green core tests as coverage. This row
+    // reintroduces exactly that adapter and demands the wiring level see it.
     edits: [
       {
         file: SERVER,
-        from: `    const autoClearId: number | null = decideAutoClear({`,
-        to: `    await Promise.resolve()
-    const autoClearId: number | null = decideAutoClear({`,
+        from: `      if (entry.role === 'sensei' || entry.role === 'worker') owners.add(name)`,
+        to: `      if (entry.role === 'sensei') owners.add(name) // MUTATED: sensei-only driving`,
       },
     ],
   },
@@ -384,21 +286,6 @@ import type { Bridge } from '../bridge.ts'`,
         file: SERVER,
         from: `    ports.deliver(sender, {`,
         to: `    agents.get(sender)?.deliver({`,
-      },
-    ],
-  },
-  {
-    guard: 'boundary C',
-    what: 'put branching back into a timer callback',
-    test: BOUNDARY,
-    filter: 'timer callbacks are a single core.tick call',
-    edits: [
-      {
-        file: SERVER,
-        from: `  const stallTick = setInterval(() => attention.tick(senseiView(ports.now())), Math.min(STALL_NUDGE_AFTER_MS, 60_000))`,
-        to: `  const stallTick = setInterval(() => {
-    if (pendingProjection.state.length > 0) attention.tick(senseiView(ports.now()))
-  }, Math.min(STALL_NUDGE_AFTER_MS, 60_000))`,
       },
     ],
   },
@@ -440,11 +327,17 @@ for (const m of MUTATIONS) {
   const nPass = Number(/(\d+) pass/.exec(text)?.[1] ?? -1)
   // A mutation that makes the file unparseable, or selects zero tests, is a
   // BROKEN CASE rather than a caught guard — say so instead of scoring it.
+  //
+  // THE THIRD WAY TO BE BROKEN, added at the transition after it bit: a `-t`
+  // filter that matches nothing produces no summary line at all, so both counts
+  // parse as -1 and the row scored MISSED — a retargeted guard reading as an
+  // uncovered one, which is the exact confusion this harness exists to prevent.
+  // (The filter was `A REFUSED push…` against a test named `a REFUSED push…`.)
+  const unparsed = nPass < 0 && nFail < 0
   const caught = nFail > 0
   const zeroSelected = nPass === 0 && nFail === 0
-  results.push(
-    `${m.guard.padEnd(11)} | ${zeroSelected ? 'NO TESTS' : caught ? 'CAUGHT  ' : 'MISSED !'} | ${nPass} pass ${nFail} fail | ${m.what}`,
-  )
+  const verdict = unparsed ? 'NO OUTPUT' : zeroSelected ? 'NO TESTS' : caught ? 'CAUGHT  ' : 'MISSED !'
+  results.push(`${m.guard.padEnd(11)} | ${verdict} | ${nPass} pass ${nFail} fail | ${m.what}`)
 
   await restore()
 }

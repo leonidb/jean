@@ -97,31 +97,30 @@ export const MEMORIZE_TOOL: Tool = {
 export const ACK_TOOL: Tool = {
   name: 'ack',
   description:
-    'Acknowledge events as processed, advancing the per-agent pending count. ' +
-    'Two forms — pass exactly one: `upToId` = drain-all (the common case: the highest event id you have read and decided about, including events you decided to "hold"); ' +
-    '`ids` = selective ack (handle the human now, leave machine events queued for later). ' +
-    'NOTE: answering a bridge human AUTO-clears their event when it is the only one pending from them — no ack needed for that case; a multi-message burst still needs an explicit ack. ' +
-    'Without acking, the orchestrator keeps re-nudging with the same pendingCount, producing an infinite loop. ' +
-    'Treat ack as a normal part of every turn that consumed events, not a rare operation.',
+    'Acknowledge events you have READ and decided about, clearing them from your pending queue. ' +
+    'ONE form: `pairs`, a list of `{id, code}` — and the code comes only from `GET /events`. ' +
+    'That is deliberate: you cannot ack an event you have not fetched, so "acked" always means "read". ' +
+    'Ack the events you decided to HOLD as well as the ones you acted on — "hold and acked" is a normal verdict, ' +
+    '"hold without ack" is the bug that produces re-notification loops. ' +
+    'A wrong or stale code clears nothing and is not an error: the rest of the batch still applies.',
   inputSchema: {
     type: 'object',
     properties: {
-      upToId: {
-        type: 'number',
-        description:
-          'Drain-all form: highest event id you have read and processed. All pending events with id ≤ upToId are acked. Mutually exclusive with `ids`.',
-      },
-      ids: {
+      pairs: {
         type: 'array',
-        items: { type: 'number' },
         description:
-          'Selective form: exact pending event ids to ack (from the inbox summary or GET /events). Non-pending ids are harmless no-ops. Mutually exclusive with `upToId`.',
+          'The events to ack. Each entry is {id, code} exactly as returned by GET /events — the code is per event, not per response.',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number', description: 'Event id.' },
+            code: { type: 'string', description: "The ack code from that event's fetch response." },
+          },
+          required: ['id', 'code'],
+        },
       },
     },
-    // Deliberately no `required`: exactly ONE of upToId | ids must be passed
-    // (enforced by the handler) — requiring upToId would make the selective
-    // ids-only form schema-invalid (review finding, 2026-07-24).
-    required: [],
+    required: ['pairs'],
   },
 }
 
@@ -196,7 +195,12 @@ export function buildInfraTool(role: AgentRole): Tool {
 /** The MCP tool list exposed to Claude for a given role. */
 export function buildTools(role: AgentRole): Tool[] {
   if (role === 'sensei') return [SEND_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, ACK_TOOL, buildInfraTool(role)]
-  return [REPLY_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, buildInfraTool(role)]
+  // Workers ack too (delivery unification, ruled 2026-08-11: the mailbox is
+  // for every agent). A worker's mailbox queues its dispatches now, and its
+  // events sit in NO other drainable mailbox (a sensei-authored send is
+  // self-excluded from the sensei's own) — a worker without `ack` would be
+  // nudged about its queue forever with no way to clear it.
+  return [REPLY_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, ACK_TOOL, buildInfraTool(role)]
 }
 
 /** Read a tool argument that should be a non-empty string. Non-string, empty, or whitespace-only values return undefined. */
@@ -241,13 +245,13 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
       `You are the sensei (orchestrator) in the Jean system, agent "${agentName}".`,
       `When you receive any message from Jean, FIRST load BOTH the jean-sensei skill (orchestrator behavior) AND the context skill (wiki-awareness + memorize). Then follow jean-sensei's instructions.`,
       `Use the \`send\` tool to message any agent or channel (including the human via the Slack channel). Use the \`comment\` tool to record durable decisions/context on a task (visible to workers via ?include=comments). Use the \`infra\` tool for all other API calls (board, tasks, triggers, playbooks, events).`,
-      `After reading the events that prompted a nudge — and deciding what (if anything) to do about each — ack them: \`ack({upToId})\` drains everything you processed (the common case); \`ack({ids: [...]})\` acks selectively. Answering a bridge human auto-clears their event when it's the only one pending from them (a burst still needs an explicit ack). Ack also when you choose to "hold"; "hold and acked" is a normal verdict, "hold without ack" is the bug that produces nudge-loops.`,
+      `After reading the events that prompted a notification — and deciding what (if anything) to do about each — ack them: fetch with \`GET /events\` to get each event's ack code, then \`ack({pairs: [{id, code}, ...]})\`. Fetching is not acking, and nothing else clears an event: answering a human no longer clears their message, so ack it like everything else. Ack also when you choose to "hold"; "hold and acked" is a normal verdict, "hold without ack" is the bug that produces re-notification loops.`,
     ].join('\n')
   }
   return [
     `You are connected to the Jean orchestration system as agent "${agentName}".`,
     `When you receive any message from Jean, FIRST load the jean-worker skill, then follow its instructions.`,
-    `Messages from the orchestrator arrive as <channel source="jean" ...> tags.`,
+    `Messages to you land in YOUR MAILBOX on infra; what reaches your session is infra's announcement (a push or the inbox line on a response). When one arrives: fetch your mailbox with \`GET /events\` (each event carries its full content and an ack code), act on what it says, then \`ack({pairs: [{id, code}, ...]})\` for what you handled. Reading is not acking — infra keeps nudging while anything sits unacked.`,
     `Use the \`reply\` tool for conversation with the orchestrator (including short acks, questions, "still working"). Use the \`comment\` tool when you have something substantive worth recording on a task — findings, blocker resolved, phase done. Comments are curated; replies are chat.`,
     `Use the \`infra\` tool (read-only — GET only) to look up context: \`GET /tasks/<id>?include=comments,messages\` for both the curated comments and the full correspondence on a task you're working on, \`GET /board\` for related tasks, \`GET /agents\` to see who else is connected. State changes are the sensei's job — if you need something written, ask via \`reply\`.`,
     `ALWAYS end a turn with \`reply\` — your stdout is invisible to the sensei, and \`agent-idle\` does not wake it. If you finish, hit a blocker, or need to stop, call \`reply\` before stopping. Not doing so means the sensei never learns anything happened.`,

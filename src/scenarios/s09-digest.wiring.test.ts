@@ -180,6 +180,43 @@ describe('S9 — the digest rides the regular trigger scheduler (O1)', () => {
     expect(JSON.stringify(arrived)).not.toMatch(/also parked/)
   })
 
+  test('H3 (ruled 2026-08-11) — parking on time records the resume date, and unparking clears it', async () => {
+    // The adapter half of the resume-date model: the date is accepted AT PARK
+    // TIME on the same PATCH that parks, lands on the task, and leaves with
+    // the park like blockedOn/blockedSince do — a stale date on a resumed
+    // task would re-hide it on its next time-park.
+    const created = (await (
+      await fetch(`${base}/tasks`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title: 'september work', description: '', queue: 'builder', actor: 'test' }),
+      })
+    ).json()) as { id: string }
+    await fetch(`${base}/tasks/${created.id}/status`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'in-progress', actor: 'sensei' }),
+    })
+    const resumeAt = '2026-09-01T09:00:00.000Z'
+    const parked = (await (
+      await fetch(`${base}/tasks/${created.id}/status`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'waiting', actor: 'builder', blockedOn: 'time', resumeAt }),
+      })
+    ).json()) as { resumeAt?: string }
+    expect(parked.resumeAt).toBe(resumeAt)
+
+    const resumed = (await (
+      await fetch(`${base}/tasks/${created.id}/status`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'in-progress', actor: 'sensei' }),
+      })
+    ).json()) as { resumeAt?: string }
+    expect(resumed.resumeAt).toBeUndefined()
+  })
+
   test('the board records the park the digest reads from', async () => {
     // The seam between this file and `s09-digest.projection.test.ts`: the pure
     // side proves the list is right given board state, and this proves the

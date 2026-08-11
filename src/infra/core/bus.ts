@@ -57,34 +57,39 @@
 import type { StoredEvent } from '../../es/index.ts'
 
 /**
- * Facts about the instant BEFORE the append that no subscriber can reconstruct
- * afterwards, so the publisher has to carry them.
+ * ── THE PUBLISH CONTEXT IS GONE (the transition, task 045) ──
  *
- * There is exactly one, and it is race guard 1: whether anything blocking was
- * already pending when this event was appended. A blocking arrival starts a new
- * wake episode only if it is the FIRST one — and by the time a subscriber runs,
- * the event is already in the queue, so "was there blocking before me?" is
- * unanswerable from live state. Capturing it here, at the call site, is the
- * guard; recomputing it downstream is the bug.
+ * It carried exactly one fact — `hadBlockingPending`, race guard 1's pre-append
+ * capture of "was anything blocking already pending when this event was
+ * appended?" A blocking arrival started a new wake EPISODE only if it was the
+ * first one, and by the time a subscriber ran the event was already in the
+ * queue, so the question was unanswerable downstream. Capturing it at the call
+ * site was the guard; recomputing it downstream was the bug.
  *
- * Keep this to facts with that property. It is not a general side-channel.
+ * The notifier asks no such question. It compares the mailbox against what the
+ * agent has already been TOLD (`announcedThroughId` — core/notify.ts), which is
+ * knowable entirely after the fact, so the guard retires with its question
+ * rather than being weakened. Removed rather than left as an unread field: a
+ * side-channel that exists is a side-channel somebody will use, and this one
+ * came with a doc comment explaining why putting things in it was correct.
+ *
+ * If a fact ever genuinely has that property again — knowable only before the
+ * append, needed after it — it goes back here, with the same discipline. This is
+ * not a general side-channel.
  */
-export type PublishContext = {
-  hadBlockingPending: boolean
-}
 
-/** Projections already satisfy this shape (they ignore the context), so they
- *  need no adapter — only a name, which `Projection<S>` does not carry. */
+/** Projections already satisfy this shape, so they need no adapter — only a
+ *  name, which `Projection<S>` does not carry. */
 export type Subscriber = {
   /** Diagnostic only: it names the subscriber in error messages and lets a test
    *  assert registration ORDER, which is semantics (see above). */
   name: string
-  apply: (event: StoredEvent, ctx: PublishContext) => void
+  apply: (event: StoredEvent) => void
 }
 
 export type EventBus = {
   subscribe: (sub: Subscriber) => void
-  publish: (event: StoredEvent, ctx: PublishContext) => void
+  publish: (event: StoredEvent) => void
   /** Registered names, in order. For assertions and diagnostics. */
   names: () => string[]
 }
@@ -103,7 +108,7 @@ export function createEventBus(): EventBus {
       subscribers.push(sub)
     },
 
-    publish(event, ctx) {
+    publish(event) {
       // Saved and restored rather than set/cleared: a nested publish (nothing
       // does one today — the `void record(...)` paths all await an append
       // first) would otherwise clear the flag on its way out and re-open
@@ -115,7 +120,7 @@ export function createEventBus(): EventBus {
         // `finally` only clears the re-entrancy flag, so that a throwing
         // subscriber (which kills the process) doesn't first leave the bus in a
         // state where the crash path's own bookkeeping is refused.
-        for (const sub of subscribers) sub.apply(event, ctx)
+        for (const sub of subscribers) sub.apply(event)
       } finally {
         publishing = wasPublishing
       }

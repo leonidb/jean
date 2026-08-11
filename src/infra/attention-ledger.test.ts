@@ -1,9 +1,25 @@
 // Attention phase 4 — the minimal delivery ledger (docs/attention.md
 // "Observability"). Two facts per event and no more: how it reached the agent
-// (`deliveredVia`: wake | piggyback | heartbeat) and what cleared it
-// (`clearedBy`: ack | auto-clear). Live on GET /events, materialized onto the
-// `ack` event so the answer to "did this ever actually get delivered, and how"
-// comes out of the event log instead of a day of watchdog archaeology.
+// (`deliveredVia`: wake | piggyback | heartbeat | fetch) and what cleared it
+// (`clearedBy`). Live on GET /events, materialized onto the `ack` event so the
+// answer to "did this ever actually get delivered, and how" comes out of the
+// event log instead of a day of watchdog archaeology.
+//
+// ── WHAT THE TRANSITION DID TO THIS FILE (task 045) ──
+//
+// The ledger itself is untouched; what changed is every fixture that produced a
+// delivery, because the delivery paths moved:
+//
+//   - `wake` is now earned by PRIORITY, not by catching the sensei idle. A
+//     worker's reply no longer pushes (S3), so the three cases that used one to
+//     provoke a wake now use a human's message — the sender that outranks the
+//     sensei's threshold.
+//   - `fetch` is a NEW via, and it is why the reads in this file stay
+//     unaddressed (see `pending()` below). Under S5 an agent gets its ack codes
+//     by reading its mailbox, so that read is a delivery too.
+//   - The `auto-clear` case is gone with the mechanism; the CONCURRENT ACKS case
+//     asserted the exact inverse of what fold-decides now guarantees. Both are
+//     recorded at the foot of this file rather than silently dropped.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdirSync, rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
@@ -23,7 +39,13 @@ beforeAll(async () => {
       ...process.env,
       JEAN_PORT: String(TEST_PORT),
       JEAN_DATA_DIR: DATA_DIR,
-      JEAN_STALL_NUDGE_MS: String(60_000), // keep the heartbeat out of the way
+      // Park the quiet clock and the supervisor far away: this file is about
+      // WHICH via gets stamped, so a timer firing mid-case would stamp a real
+      // delivery the assertions have no reason to expect. (OLD:
+      // `JEAN_STALL_NUDGE_MS`, which no longer names anything — a test setting a
+      // dead env var configures nothing and silently measures the defaults.)
+      JEAN_NUDGE_INTERVAL_MS: String(600_000),
+      JEAN_REMINDER_AFTER_MS: String(600_000),
     },
     stdout: 'ignore',
     stderr: 'pipe',
@@ -46,19 +68,38 @@ const BASE = `http://127.0.0.1:${TEST_PORT}`
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 
 type LedgerEntry = { deliveredVia?: string; clearedBy?: string }
-type PendingEvent = { id: number; type: string; deliveredVia?: string; data: { text?: string; agent?: string } }
+type PendingEvent = {
+  id: number
+  type: string
+  code: string
+  deliveredVia?: string
+  data: { text?: string; agent?: string }
+}
 
-/** Read pending WITHOUT the sensei header — a headered read would itself stamp
- *  the piggyback (the header rides on the response, after the body is built). */
+/** Read pending WITHOUT identifying a reader — an OBSERVER read, which is the
+ *  only kind that stamps nothing.
+ *
+ *  Two ways this file's own instrument would otherwise write the fact it is
+ *  measuring: a headered read stamps the piggyback (the header rides on the
+ *  response, after the body is built), and an ADDRESSED read — `?for=` or the
+ *  `x-jean-agent` header — is the S5 fetch rung and stamps `fetch`. The second
+ *  is new at the transition, and it is exactly how the first version of this
+ *  rewrite went wrong: with the stamp unconditional, three cases here reported
+ *  `deliveredVia: 'fetch'` for events whose real delivery was a wake, because
+ *  the test's own `pending()` got there first. */
 async function pending(): Promise<PendingEvent[]> {
   return ((await (await fetch(`${BASE}/events`)).json()) as { events: PendingEvent[] }).events
 }
 
+/** Ack by `{id, code}` pairs — the one form S5 leaves. OLD: `{ids}`, which is
+ *  gone for the same reason `upToId` is: an id is knowable from the cheap
+ *  summary rung, a code is not, so only the pair form proves a read. */
 async function ackIds(ids: number[]) {
+  const byId = new Map((await pending()).map((e) => [e.id, e.code]))
   await fetch(`${BASE}/events/ack`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ids }),
+    body: JSON.stringify({ pairs: ids.map((id) => ({ id, code: byId.get(id) })) }),
   })
 }
 
@@ -76,24 +117,25 @@ async function drain() {
 }
 
 describe('attention phase 4 — delivery ledger', () => {
-  test('wake: a nudged event is stamped deliveredVia:wake and acks with clearedBy:ack', async () => {
+  test('wake: a pushed event is stamped deliveredVia:wake and acks with clearedBy:ack', async () => {
     using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
-    using worker = await connectAgent(WS_URL, 'led-w1', 'worker')
+    // OLD: a worker's reply, sent right after posting `/agent-idle`, on the
+    // premise that an idle sensei gets nudged for anything pending. Both halves
+    // died: `/agent-idle` arms nothing, and a worker's reply is below the
+    // sensei's push threshold (S3). A HUMAN is the sender that outranks it —
+    // which is the same fact the old fixture was relying on by accident, since
+    // what it really needed was simply "an event that provokes a push".
+    using human = await connectAgent(WS_URL, 'led-human-1', 'user')
     void sensei
     await Bun.sleep(150) // let the register events land before draining
     await drain()
-    await fetch(`${BASE}/agent-idle`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agent: 'sensei' }),
-    })
 
-    worker.ws.send(JSON.stringify({ type: 'reply', from: 'led-w1', text: 'nudged into existence' }))
+    human.ws.send(JSON.stringify({ type: 'reply', from: 'led-human-1', text: 'nudged into existence' }))
     await Bun.sleep(250)
 
     const event = (await pending()).find((e) => e.data?.text === 'nudged into existence')
     expect(event).toBeDefined()
-    expect(event?.deliveredVia).toBe('wake') // the nudge carried it
+    expect(event?.deliveredVia).toBe('wake') // the push carried it
 
     await ackIds([event?.id as number])
     const ack = await lastAck()
@@ -104,18 +146,18 @@ describe('attention phase 4 — delivery ledger', () => {
   test('piggyback: an event that no wake carried is stamped when the sensei reads the inbox line — and first delivery wins', async () => {
     using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
     using worker = await connectAgent(WS_URL, 'led-w2', 'worker')
+    using human = await connectAgent(WS_URL, 'led-human-2', 'user')
     await Bun.sleep(150) // let the register events land before draining
     await drain()
-    await fetch(`${BASE}/agent-idle`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agent: 'sensei' }),
-    })
 
-    // First event nudges (and marks the sensei non-idle)…
-    worker.ws.send(JSON.stringify({ type: 'reply', from: 'led-w2', text: 'woke it' }))
+    // OLD: two worker replies, the first nudging and thereby marking the sensei
+    // non-idle so the second was suppressed. The gate is gone, so "an event no
+    // wake carried" has to be produced by the mechanism that actually declines
+    // to push now: PRIORITY. The human's message pushes…
+    human.ws.send(JSON.stringify({ type: 'reply', from: 'led-human-2', text: 'woke it' }))
     await Bun.sleep(250)
-    // …so the second arrives with the sensei mid-turn: queued, no wake.
+    // …and the worker's reply, below the threshold, does not — so it sits in the
+    // mailbox undelivered, which is precisely the state the piggyback exists for.
     worker.ws.send(JSON.stringify({ type: 'reply', from: 'led-w2', text: 'arrived mid-turn' }))
     await Bun.sleep(200)
     expect((await pending()).find((e) => e.data?.text === 'arrived mid-turn')?.deliveredVia).toBeUndefined()
@@ -140,73 +182,77 @@ describe('attention phase 4 — delivery ledger', () => {
     void sensei
   })
 
-  test('auto-clear: answering a human records clearedBy:auto-clear (and keeps the phase-3 auto:reply tag)', async () => {
+  test('fetch: reading a mailbox IS a delivery — and an observer read is not', async () => {
+    // NEW AT THE TRANSITION, and it replaces the `auto-clear` case in this file
+    // (see the foot). It exists because `fetch` is the via that most events now
+    // arrive by — under S5 an agent cannot ack without reading — so a ledger
+    // that missed it would answer "delivery unknown" for very nearly the whole
+    // log, which is the failure the ledger was built to end.
+    //
+    // The negative half is the one that had to be found the hard way: with the
+    // stamp unconditional, ANY read of the queue recorded a delivery to nobody,
+    // and first-delivery-wins made whichever observer looked first the recorded
+    // carrier — a `jean status` overwriting the real answer.
     using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
-    using human = await connectAgent(WS_URL, 'led-human', 'user')
-    void sensei
-    await Bun.sleep(150) // let the register events land before draining
-    await drain()
-
-    human.ws.send(JSON.stringify({ type: 'reply', from: 'led-human', text: 'one question' }))
-    await Bun.sleep(250)
-    const event = (await pending()).find((e) => e.data?.text === 'one question')
-    expect(event?.deliveredVia).toBe('wake') // blocking events wake regardless of idle
-
-    await fetch(`${BASE}/send`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ from: 'sensei', to: 'led-human', text: 'the answer' }),
-    })
-    await Bun.sleep(200)
-
-    const ack = await lastAck()
-    expect(ack?.auto).toBe('reply') // phase-3 field preserved
-    expect(ack?.ledger?.[String(event?.id)]).toEqual({ deliveredVia: 'wake', clearedBy: 'auto-clear' })
-    await drain()
-  })
-
-  test('CONCURRENT ACKS: twenty simultaneous acks for one id produce exactly ONE ack event, and it keeps deliveredVia', async () => {
-    // Review finding [B], deterministic repro. The bulk-ack handler selects
-    // pending ids and then records across an await, so N concurrent requests
-    // used to write N ack events for the same id — and every one after the
-    // first carried clearedBy with NO deliveredVia, because the first write had
-    // already dropped the in-memory ledger entry. A reader taking the LATEST
-    // ack for an event therefore concluded "delivery unknown" for an event that
-    // was demonstrably woken. The race predates phase 4; the ledger gave it a
-    // way to lie.
-    using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
-    using worker = await connectAgent(WS_URL, 'led-w3', 'worker')
+    using worker = await connectAgent(WS_URL, 'led-w4', 'worker')
     void sensei
     await Bun.sleep(150)
     await drain()
-    await fetch(`${BASE}/agent-idle`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agent: 'sensei' }),
-    })
 
-    worker.ws.send(JSON.stringify({ type: 'reply', from: 'led-w3', text: 'acked twenty ways' }))
-    await Bun.sleep(250)
-    const event = (await pending()).find((e) => e.data?.text === 'acked twenty ways')
-    expect(event?.deliveredVia).toBe('wake')
-    const id = event?.id as number
+    // START THE SENSEI'S QUIET CLOCK (H7, ruled 2026-08-11): registering is
+    // not activity, so a fresh session that never speaks reads as long-quiet
+    // and the arrival below would be wake-pushed at once — the ruling's
+    // desired behavior, but not this case's subject. One identity-carrying
+    // call is the agent's own act; it makes "nothing pushes" reachable again.
+    await fetch(`${BASE}/board`, { headers: { 'x-jean-agent': 'sensei' } })
 
-    // Twenty interleaved acks for the same id, fired without awaiting between.
-    await Promise.all(Array.from({ length: 20 }, () => ackIds([id])))
+    worker.ws.send(JSON.stringify({ type: 'reply', from: 'led-w4', text: 'below the threshold' }))
     await Bun.sleep(200)
 
-    const hist = (await (await fetch(`${BASE}/history?last=60`)).json()) as {
-      events: Array<{ type: string; data: { eventIds?: number[]; ledger?: Record<string, LedgerEntry> } }>
-    }
-    const acksForId = hist.events.filter((e) => e.type === 'ack' && (e.data.eventIds ?? []).includes(id))
-    expect(acksForId.length).toBe(1)
-    // The single ack still carries the delivery fact — no "unknown" overwrite.
-    expect(acksForId[0]?.data.ledger?.[String(id)]).toEqual({ deliveredVia: 'wake', clearedBy: 'ack' })
-    // No empty acks were recorded by the nineteen that lost the race.
-    expect(hist.events.some((e) => e.type === 'ack' && (e.data.eventIds ?? []).length === 0)).toBe(false)
+    // OBSERVER READ: no identity, so no claim about who received anything.
+    const unstamped = (await pending()).find((e) => e.data?.text === 'below the threshold')
+    expect(unstamped).toBeDefined()
+    expect(unstamped?.deliveredVia).toBeUndefined()
+
+    // ADDRESSED READ: the sensei fetching its own mailbox. That is the S5 fetch
+    // rung, and the response is where the ack code comes from.
+    const fetched = (await (await fetch(`${BASE}/events?for=sensei`)).json()) as { events: PendingEvent[] }
+    expect(fetched.events.some((e) => e.data?.text === 'below the threshold')).toBe(true)
+
+    const after = (await pending()).find((e) => e.data?.text === 'below the threshold')
+    expect(after?.deliveredVia).toBe('fetch')
     await drain()
   })
-
-  // The 'heartbeat' path is asserted in stall-watchdog.test.ts, on the server
-  // that already exercises the watchdog — same coverage, one fewer spawn.
 })
+
+// ── RETIRED HERE, RECORDED HERE (task 045) ─────────────────────────────
+//
+// `auto-clear: answering a human records clearedBy:auto-clear (and keeps the
+// phase-3 auto:reply tag)` — PRE-DECLARED CASUALTY (task 043 part 3: "auto-clear
+// ledger cases"). Answering a human no longer clears their message: S5 makes
+// `{id, code}` pairs THE ONLY clearing path, because auto-clear decided on the
+// sensei's behalf that a reply meant the question was handled. `clearedBy` is
+// still on every entry — the two surviving cases above assert it — and
+// `ClearedBy` keeps `'auto-clear'` in its union for the historical logs that
+// will carry it forever.
+//
+// `CONCURRENT ACKS: twenty simultaneous acks for one id produce exactly ONE ack
+// event` — RETIRED WITH ITS QUESTION, and it is worth being precise about why,
+// because this one was INVERTED rather than deleted. Its subject was the ack
+// claim: a synchronous membership check plus an in-flight reservation, so that
+// exactly one writer could own an id. Fold-decides (task 041, ruled) deletes the
+// claim — every ack appends, the pending reducer's `filter` is already
+// idempotent, and N concurrent acks now write N events ON PURPOSE. So the
+// assertion `acksForId.length === 1` is not a property this system has any more;
+// it is the negation of one.
+//
+// What replaced it is NOT nothing: `src/scenarios/ack-concurrency.wiring.test.ts`
+// asserts the new truth on all four of the fronts this case cared about — both
+// callers told the id is cleared, TWO ack events in the log, the FIRST in log
+// order carrying the ledger, and the queue unharmed. The half that mattered most
+// — "the delivery fact is not overwritten by a later empty ack" — survives there
+// as the first-in-log reading rule, which is the same guarantee reached from the
+// reading side instead of the writing side.
+//
+// The 'heartbeat' path is asserted in stall-watchdog.test.ts, on the server that
+// already exercises it — same coverage, one fewer spawn.

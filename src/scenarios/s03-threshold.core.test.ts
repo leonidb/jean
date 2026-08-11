@@ -19,6 +19,30 @@
  * and the next tick tries again. One is "delivered, don't repeat"; the other is
  * "not delivered, so it doesn't count". Both are asserted below, adjacent, so
  * the distinction survives a reader in a hurry.
+ *
+ * ── ONCE PER ANNOUNCEMENT, NOT ONCE PER EVENT (task 046's audit, DRIFTED-2/3) ──
+ *
+ * THIS FILE ENCODED THE DRIFT. Every arrival case here read "an event at or
+ * above it is pushed once" as *each qualifying event earns its own push*, and
+ * drove each case with an agent that had never been shown anything — so the
+ * reading was never put under pressure. The implementation was then built
+ * faithfully to these tests and produced exactly that.
+ *
+ * The words do not support it once S1 is in the room: "an agent making jean
+ * calls learns of new events on its next call — NO INTERRUPTION". And the
+ * obvious repair — don't push to an active agent — is forbidden by a third
+ * sentence, in the foundations: "nothing ever asks whether an agent is busy —
+ * busy and dead are one case". A busy check is the idle gate (042 DEVIATION-1)
+ * under a new name.
+ *
+ * What satisfies all three at once is a fact about the EVENT, not the agent: a
+ * standalone push fires only for what the agent has NOT ALREADY BEEN SHOWN, by
+ * any route. Carriage and push are one announcement with two carriers; either
+ * discharges it. The count that survives is therefore per-ANNOUNCEMENT.
+ *
+ * The drift survived test-writing, the 043 design pass, a sensei review and a
+ * codex pass, because it is a three-way dependency and no single file holds
+ * enough of the canon to see it.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -136,6 +160,81 @@ describe('S3 — below the threshold, counts update silently', () => {
     }
     for (const id of [1, 2, 3, 4]) listener.onEvent(eventWithId(id), targetView({ ...world, now: T0 }))
     expect(deliveries(r)).toBe(1)
+  })
+
+  test('CORRECTED (DRIFTED-3) — a burst of qualifying events is ONE announcement, not one each', () => {
+    // WAS: this file's crowd case above, which happens to hold because only one
+    // of its four events qualifies — so it could not distinguish per-event from
+    // per-announcement, and was read as confirming per-event.
+    //
+    // Here ALL FOUR qualify. Per-event says four pushes; the canon says one
+    // announcement carrying the whole mailbox, because a push hands over the
+    // mailbox rather than the event that triggered it.
+    const { r, listener } = driver()
+    const world = {
+      agent: SENSEI,
+      lastActivityAt: T0,
+      threshold: 2,
+      pending: [
+        [1, 2],
+        [2, 2],
+        [3, 3],
+        [4, 2],
+      ] as [number, number][],
+    }
+    for (const id of [1, 2, 3, 4]) listener.onEvent(eventWithId(id), targetView({ ...world, now: T0 }))
+    expect(deliveries(r)).toBe(1)
+  })
+
+  test('CORRECTED (DRIFTED-2) — an agent already SHOWN the mailbox is not pushed again', () => {
+    // The load-bearing half, and the one nothing asserted. A push and a carried
+    // inbox line are one announcement by two routes: an agent told by carriage
+    // must not then be interrupted about the same events (S1's "no
+    // interruption"), and infra must reach that answer WITHOUT asking whether
+    // the agent is busy (the foundations forbid it).
+    //
+    // Driven through `carried`, which is the carrier's entry point — so this
+    // asserts the rule, not the piggyback's wiring.
+    const { r, listener } = driver()
+    const world = {
+      agent: SENSEI,
+      lastActivityAt: T0,
+      threshold: 2,
+      pending: [
+        [1, 2],
+        [2, 2],
+      ] as [number, number][],
+    }
+    listener.carried(SENSEI, [1, 2])
+    listener.onEvent(eventWithId(2), targetView({ ...world, now: T0 }))
+    expect(deliveries(r)).toBe(0)
+
+    // …and it is discharge, NOT suppression: an event the carrier did not show
+    // is still announced. Without this the rule would be indistinguishable from
+    // "an agent that ever called is never pushed again", which is silence.
+    const later = { ...world, pending: [...world.pending, [3, 2] as [number, number]] }
+    listener.onEvent(eventWithId(3), targetView({ ...later, now: T0 + MINUTE }))
+    expect(deliveries(r)).toBe(1)
+  })
+
+  test('CORRECTED — carriage only ever moves announcement FORWARD', () => {
+    // A subset read (S4's "fetch and ack any subset") must not un-announce what
+    // a fuller carrier already showed, or every partial read would re-arm a push
+    // for events the agent has seen — the re-notification loop, rebuilt.
+    const { r, listener } = driver()
+    const world = {
+      agent: SENSEI,
+      lastActivityAt: T0,
+      threshold: 2,
+      pending: [
+        [1, 2],
+        [2, 2],
+      ] as [number, number][],
+    }
+    listener.carried(SENSEI, [1, 2])
+    listener.carried(SENSEI, [1]) // a narrower slice, later
+    listener.onEvent(eventWithId(2), targetView({ ...world, now: T0 }))
+    expect(deliveries(r)).toBe(0)
   })
 })
 

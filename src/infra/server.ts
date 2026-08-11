@@ -26,30 +26,29 @@ import {
   type StoredEvent,
 } from '../es/index.ts'
 import { INFRA_IDENTITY, type InfraInfo, probeInfra, readRuntimeFiles } from '../probe.ts'
-import { type Board, canTransition, type TaskStatus } from './board.ts'
+import { type Board, canActorTransition, canTransition, type TaskStatus } from './board.ts'
 import { type Bridge, selectBridge } from './bridge.ts'
 import { resolveConfig } from './config.ts'
 import { resolveConnectors } from './connectors/config.ts'
 import { SourceQueue } from './connectors/queue.ts'
 import { createSourceConnector, sourceContext } from './connectors/source.ts'
-import type { AttentionView } from './core/attention.ts'
-import { createAttentionListener } from './core/attention-listener.ts'
 import { createEventBus } from './core/bus.ts'
+import { type AckPair, acknowledgedCount, applyAck, codeFor } from './core/codes.ts'
 import { createDeliveryLedger } from './core/ledger.ts'
-import { claimAckIds, confirmAutoClear, decideAutoClear } from './core/pre-append.ts'
+import { mailboxFor, type RuleContext } from './core/mailbox-rules.ts'
+import { createNotifier, type NotifyView } from './core/notify.ts'
+import { priorityOf, thresholdFor } from './core/priority.ts'
 import {
-  inboxFor,
-  blockingPendingFrom as queueBlockingPendingFrom,
-  hasBlockingPending as queueHasBlockingPending,
-  isBlockingEvent as queueIsBlockingEvent,
   pendingByAgent as queuePendingByAgent,
   pendingEvents as queuePendingEvents,
-  resolveAgent as queueResolveAgent,
   type RoleOf,
   type TaskOwner,
 } from './core/queue.ts'
+import { createSupervisor, type SupervisionView } from './core/supervision.ts'
 import { planTriggers } from './core/triggers.ts'
-import { renderInboxLine } from './inbox.ts'
+import { viewsFor } from './core/views.ts'
+import { buildDigest } from './digest.ts'
+import { buildInbox, renderInboxLine, renderInboxWake } from './inbox.ts'
 import { commitConsolidation, type LibrarianPhase, recoverWikiLayout } from './librarian.ts'
 import { type AgentSession, classifySession, envMs } from './liveness.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
@@ -68,6 +67,7 @@ import {
 import {
   type AckData,
   type AgentIdleData,
+  agentFromEvent,
   agentStream,
   boardReducer,
   type ClearedBy,
@@ -77,7 +77,6 @@ import {
   type MemoryData,
   type MemoryScope,
   migrateBoard,
-  type NudgeData,
   type PendingState,
   type PermissionRequestData,
   PLAYBOOKS_STREAM,
@@ -290,6 +289,15 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         'playbook-removed',
         'ack',
         'wiki-consolidated',
+        // The unification's admissions (2026-08-11). This filter is a
+        // PERFORMANCE gate, not the decision — the reducer's own cases decide
+        // (a send folds in IFF `queued: true`); a type listed here that the
+        // reducer declines is still dropped. Forgetting a type HERE while
+        // adding it THERE silently un-admits it — which is exactly how the
+        // first wiring run of the queued-send path failed.
+        'send',
+        'worker-status',
+        'agent-unresponsive',
       ],
     },
   })
@@ -389,28 +397,50 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   bus.subscribe({ name: 'triggers', apply: (e) => void triggerProjection.apply(e) })
   bus.subscribe({ name: 'playbooks', apply: (e) => void playbookProjection.apply(e) })
 
-  // ── The attention listener — REGISTERED LAST, and that is semantics ───
+  // ── The notifier — REGISTERED LAST, and that is semantics ───────────
   //
-  // It decides against POST-apply projection state (what is pending now, what
-  // is blocking now), so every projection above must have run first. See
-  // core/bus.ts. Its decisions are pure (core/attention.ts); this executor is
-  // the only thing that touches the world, and it never decides anything —
-  // `run()` in the listener owns the commit-iff-landed sequence.
-  const attention = createAttentionListener({
-    deliver: (to, text) => ports.deliver(to, { type: 'deliver', from: 'infra', text }),
-    markBusy: (agent) => {
-      const entry = agents.get(agent)
-      if (entry) entry.idle = false
+  // It decides against POST-apply projection state (what is pending now), so
+  // every projection above must have run first. See core/bus.ts. Its decisions
+  // are pure (core/notify.ts); this executor is the only thing that touches the
+  // world, and it never decides anything — `run()` in the notifier owns the
+  // commit-iff-landed sequence.
+  //
+  // THERE IS NO `markBusy`. Nothing asks whether an agent is busy any more
+  // (canon E3), so nothing sets it either.
+  const notifier = createNotifier(
+    {
+      deliver: (to, text) => ports.deliver(to, { type: 'deliver', from: 'infra', text }),
+      // BY ID, from the decision's own snapshot. The adapter used to pass no ids
+      // and `stampDelivery` defaulted to everything pending — right only while
+      // exactly one agent has a mailbox, and silently wrong the moment a second
+      // one does.
+      stamp: (via, ids) => stampDelivery(via, ids),
+      emit: (type, data) => void record(type, SYSTEM_STREAM, data),
     },
-    stamp: (via) => stampDelivery(via),
-    emitNudge: (data) => void record('nudge', SYSTEM_STREAM, data satisfies NudgeData),
+    (view) => renderPush(view),
+  )
+
+  // The supervision machine (S7/S8/S10/S11). Same two effects, its own clock:
+  // it reads TASKS and AGENT LIVENESS rather than a queue.
+  const supervisor = createSupervisor({
+    deliver: (to, text) => ports.deliver(to, { type: 'deliver', from: 'infra', text }),
+    emit: (type, data) => void record(type, SYSTEM_STREAM, data),
   })
+
   bus.subscribe({
-    name: 'attention',
-    // `hadBlockingBefore` is the pre-append capture from record() (race guard
-    // 1) — it rides the publish context because no subscriber can reconstruct
-    // it after the fact.
-    apply: (e, ctx) => attention.onEvent(e, senseiView(ports.now()), ctx.hadBlockingPending),
+    name: 'notify',
+    // NO `PublishContext` ANY MORE. `hadBlockingPending` existed to carry race
+    // guard 1's pre-append capture to a decision that could not recompute it
+    // ("was anything blocking BEFORE this append?"). The notifier asks no such
+    // question: it compares the mailbox against what the agent has already been
+    // told (`announcedThroughId`), which is knowable entirely after the fact.
+    // The guard retires with the question, not by being weakened.
+    //
+    // PER-AGENT (delivery unification): every recorded event runs a decision
+    // for every driveable mailbox, not only the sensei's. This is the line
+    // that makes an at-threshold arrival push its WORKER immediately — the
+    // retired routeSend fast path's latency, from the one mechanism.
+    apply: () => notifier.sweep(notifyViews(ports.now())),
   })
 
   // Replay folds the projections DIRECTLY and never touches the bus — the
@@ -438,11 +468,21 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
      *  the same slot). Peers and other non-WS agents have no live check. */
     isLive?: () => boolean
     /** Epoch ms of the last INBOUND traffic observed from this agent — any WS
-     *  frame, any HTTP call carrying `x-jean-agent`, its `/agent-idle` posts, its
-     *  register. Attention phase 4 (docs/attention.md §3): liveness is INFERRED
-     *  from traffic infra already sees, never declared by a hook. Read-time only
-     *  — see sessionOf(); it must never gate delivery. */
+     *  frame, any HTTP call carrying `x-jean-agent`. Attention phase 4
+     *  (docs/attention.md §3): liveness is INFERRED from traffic infra already
+     *  sees, never declared by a hook. Read-time only — see sessionOf(); it
+     *  must never gate delivery. UNSET at registration (H7, ruled 2026-08-11:
+     *  the handshake is not activity) and by Stop-hook posts. */
     lastActivityAt?: number
+    /** Epoch ms the entry was created — when watching began. NOT activity
+     *  (H7): the notifier's quiet clock ignores it, which is what nudges a
+     *  fresh session with a waiting mailbox at once. It exists for the
+     *  SUPERVISION bounds, whose silence must be measured from a fixed
+     *  instant: without it, a session that never speaks either reads
+     *  silent-since-epoch (instant human report on connect) or re-bases to
+     *  `now` every tick (S11 structurally blind — the first fix-round run
+     *  shipped exactly that and stall-watchdog.test.ts caught it). */
+    connectedAt?: number
   }
 
   const agents = new Map<string, AgentEntry>()
@@ -523,6 +563,33 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
    * is a separate backlog item, and only matters if a Jean dojo ever runs on a
    * machine with untrusted local users.
    */
+  /**
+   * ── H7, RULED 2026-08-11: what counts as ACTIVITY ──
+   *
+   * The amendment, verbatim: "Activity means a jean-visible call or frame
+   * originated BY the agent. Anything infra sends to it, and anything infra
+   * records about it, is not activity." This function is the whole definition
+   * as implemented:
+   *
+   * WHAT COUNTS (every call site):
+   *   1. Any WS frame from a registered session (`ws.data.agent`, never the
+   *      wire's `from` — the anti-spoof rule).
+   *   2. Any HTTP request carrying `x-jean-agent`, bumped BEFORE handling, so a
+   *      request that 404s still counts.
+   *   3. A bridge user's inbound message (`onInbound`), so a human's traffic
+   *      makes `session` meaningful on GET /agents.
+   *
+   * WHAT DOES NOT COUNT, each per the ruling's confirmed consequences:
+   *   - REGISTERING. The handshake is automatic at session connect, not a
+   *     choice the agent made — so a freshly-connected agent with waiting
+   *     events reads as long-quiet and is nudged AT ONCE, "which is the
+   *     desired behavior" (the ruling's words). This is what makes queued
+   *     offline sends announce on reconnect.
+   *   - A `POST /agent-idle` — the Stop-hook post is the harness's act, not
+   *     the agent's.
+   *   - Anything infra sends TO the agent: a push, a piggyback line, a
+   *     supervision nag. S2's clock measures the agent's silence, not ours.
+   */
   function touchAgent(name: string | null | undefined): void {
     if (!name) return
     const entry = agents.get(name)
@@ -530,12 +597,20 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   }
 
   /** Session class at read time. A disconnected agent is normally absent from the
-   *  registry entirely, which reads as offline to any caller. */
+   *  registry entirely, which reads as offline to any caller.
+   *
+   *  `connectedAt` backs the hint for a session that has not spoken yet: the
+   *  connect is a real OBSERVATION of the session, and this surface answers
+   *  "is the session there?", not "is the agent working?". H7 (which
+   *  removed the register stamp) governs the ACTIVITY clocks — the notifier's
+   *  quiet interval and the supervision bounds — and neither reads this;
+   *  session/quiet is a display hint that gates nothing (the invariant above). */
   function sessionOf(entry: AgentEntry): AgentSession {
+    const observedAt = entry.lastActivityAt ?? entry.connectedAt
     return classifySession(
       {
         role: entry.role,
-        ...(entry.lastActivityAt !== undefined && { lastActivityAt: entry.lastActivityAt }),
+        ...(observedAt !== undefined && { lastActivityAt: observedAt }),
         ...(entry.isLive && { transportLive: entry.isLive() }),
       },
       ports.now(),
@@ -565,36 +640,66 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     })
   }
 
-  /** Route a message to an agent: deliver, mark busy, record 'send' event. Shared by HTTP /send and WS 'send'. */
+  /**
+   * Route a message: record the event, and — for dojo agents — nothing else.
+   * Shared by HTTP /send and WS 'send'.
+   *
+   * ── THE DIRECT-DELIVERY FAST PATH IS RETIRED (ruled 2026-08-11) ──
+   *
+   * Leonid's mandate, verbatim: "The mailbox is for everyone. The difference
+   * in behavior should be only based on the priority of events and possibly a
+   * threshold. The message gets into the mailbox, and from there notifications
+   * work the same for any agent." So a send to a dojo agent (sensei or worker,
+   * connected or not) is recorded `queued: true`, enters the target's mailbox
+   * through the pending fold, and DELIVERY IS THE NOTIFIER'S: an at-threshold
+   * arrival to a connected worker is pushed by the sweep this very `record`
+   * publishes — the fast path's latency, from the one mechanism — and a send
+   * to an OFFLINE worker waits in the mailbox and announces on reconnect
+   * (long-quiet + waiting ⇒ immediate nudge, H7). That closes the task-003
+   * silent-drop class structurally instead of by warning.
+   *
+   * The path used to mark a delivered worker busy (`entry.idle = false`);
+   * that retired with the delivery — nothing here knows or cares what the
+   * target is doing (canon E3).
+   *
+   * SCOPE BOUNDARY, also ruled: bridge users and peers keep their own
+   * delivery adapters — their transports ARE their notification, and infra's
+   * mailbox machinery cannot repeat into another dojo or a chat surface. A
+   * name with no register history anywhere is a caller bug: warned, recorded
+   * unqueued (an event addressed to nobody must not enter pending — the A2
+   * invariant), never silently swallowed.
+   *
+   * AUTO-CLEAR-ON-REPLY IS GONE (the transition, task 045). What stood here
+   * before that was guard 7's entry half; both the snapshot and the mechanism
+   * it protected are deleted. S5: "Acking is explicit {id, code} pairs — THE
+   * ONLY CLEARING PATH."
+   */
   async function routeSend(args: {
     from: string
     to: string
     text: string
     taskId?: string
     attachments?: string[]
-  }): Promise<boolean> {
-    // ── THE WELD (guard 7, entry half) ── Evaluated at ENTRY, before any
-    // await: only an event already visible when this reply was INITIATED may be
-    // auto-cleared. Without that, a follow-up or proactive send could ack a
-    // brand-new message that arrived mid-flight and was never seen. The rule is
-    // core/pre-append.ts's `decideAutoClear`; what must stay here is that
-    // NOTHING AWAITS between this and the function's first statement.
-    // core/boundary.test.ts asserts it structurally.
-    const autoClearId: number | null = decideAutoClear({
-      // Sender role falls back to persisted sensei names — the sensei's HTTP
-      // send keeps working during a WS drop, and auto-clear must not silently
-      // stand down then (review finding).
-      senderRole: agents.get(args.from)?.role ?? (senseiNames.has(args.from) ? 'sensei' : undefined),
-      targetRole: agents.get(args.to)?.role,
-      // EAGER where the pre-refactor code was lazy (review finding): the old
-      // version built this list only after both role checks passed. Kept eager
-      // on purpose — the alternative is to repeat the role conditions at this
-      // call site so they can short-circuit, which puts the rule in two places
-      // that can drift, to save a `filter` over the pending queue. The read is
-      // pure end to end (filter → isBlockingEvent → isUserSender → a Map get
-      // and a Set has), so the only cost is that CPU.
-      blockingFromTarget: blockingPendingFrom(args.to),
-    })
+  }): Promise<{ queued: boolean; delivered?: boolean }> {
+    // If the sender is a registered peer, enrich the event with the
+    // locally-stored description. The peer can't rewrite this per-message —
+    // it's frozen in our own peers.json until we change it.
+    const senderPeer = peers.get(args.from)
+    const stream = args.taskId ? taskStream(args.taskId) : agentStream(args.to)
+    const entry = agents.get(args.to)
+    const isDojoTarget = entry ? entry.role === 'sensei' || entry.role === 'worker' : dojoAgentNames.has(args.to)
+
+    if (isDojoTarget) {
+      await record('send', stream, {
+        agent: args.to,
+        from: args.from,
+        text: args.text,
+        queued: true,
+        ...(args.attachments?.length && { attachments: args.attachments }),
+        ...(senderPeer && { senderRole: 'peer' as const, peerDescription: senderPeer.description }),
+      } satisfies SendData)
+      return { queued: true }
+    }
 
     const delivered = ports.deliver(args.to, {
       type: 'deliver',
@@ -603,15 +708,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       taskId: args.taskId,
       attachments: args.attachments,
     })
-    if (delivered) {
-      const entry = agents.get(args.to)
-      if (entry && entry.role === 'worker') entry.idle = false
-    }
-    // If the sender is a registered peer, enrich the event with the
-    // locally-stored description. The peer can't rewrite this per-message —
-    // it's frozen in our own peers.json until we change it.
-    const senderPeer = peers.get(args.from)
-    const stream = args.taskId ? taskStream(args.taskId) : agentStream(args.to)
     await record('send', stream, {
       agent: args.to,
       from: args.from,
@@ -620,32 +716,14 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       ...(args.attachments?.length && { attachments: args.attachments }),
       ...(senderPeer && { senderRole: 'peer' as const, peerDescription: senderPeer.description }),
     } satisfies SendData)
-    // Tell the sender when nothing was delivered — a missing/offline target must
-    // not look like a successful send (the peer HTTP hop reports its own async
+    // Tell the sender when nothing was delivered — a missing target must not
+    // look like a successful send (the peer HTTP hop reports its own async
     // failures via createPeerDeliver's onUndelivered).
     if (!delivered) {
       notifyUndelivered(args.from, args.to, 'no agent or peer by that name is registered here, or it is offline')
     }
 
-    // Auto-clear-on-reply (attention phase 3, docs/attention.md §5): the sensei
-    // answering a bridge user IS the ack — observation removes a bookkeeping
-    // step, never adds one. THE EXACTLY-ONE RULE (sensei-review gate): auto-clear
-    // fires only when exactly ONE pending blocking event exists from that user;
-    // a multi-message burst requires an explicit ack, converting silent loss of
-    // question #2 into a visible leftover. Double-checked: the entry-snapshot id
-    // must STILL be the sole pending blocking event at the tail — a message that
-    // arrived mid-flight turns this into a burst (stand down), and a concurrent
-    // manual ack makes it a no-op. The recorded ack (auto:'reply') also ends the
-    // blocking episode via the normal drain path.
-    // KNOWN LIMITATION (review, deferred to the delivery-ledger item): bridge
-    // delivery is fire-and-forget — a Telegram/Slack API failure after queueing
-    // still counts as delivered, so the ack can clear a reminder for a reply the
-    // human never received. Bounded: the human re-messages → fresh blocking
-    // event → wake. Proper fix = bridge outcome reporting (ledger).
-    if (delivered && autoClearId !== null && confirmAutoClear(autoClearId, blockingPendingFrom(args.to))) {
-      await recordAck([autoClearId], 'auto-clear')
-    }
-    return delivered
+    return { queued: false, delivered }
   }
 
   // ── WebSocket helpers ────────────────────────────────────────────
@@ -667,20 +745,21 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   // ── Record event (append + project + side effects) ───────────────
 
   async function record(type: string, stream: string, data: unknown): Promise<StoredEvent> {
-    // RACE GUARD 1, and its position is the guard: captured BEFORE the append,
-    // because a blocking arrival starts a new wake episode only when nothing
-    // blocking was already pending (burst coalescing). After the append the
-    // event is in the queue and the question is unanswerable. It rides the
-    // publish context to the attention listener — see core/bus.ts.
-    const hadBlockingBefore = hasBlockingPending()
+    // NOTHING IS CAPTURED BEFORE THE APPEND ANY MORE. Race guard 1 lived on
+    // this line — `hadBlockingBefore = hasBlockingPending()`, riding the publish
+    // context to a decision that could not recompute it. The notifier compares
+    // the mailbox against what the agent has already been told, which is
+    // knowable entirely after the fact, so the capture went with the question
+    // (core/bus.ts records the full retirement). Left in place it would have
+    // been a dead read with a comment calling itself a guard, which is how a
+    // future reader ends up preserving one.
     const event = await store.append({ stream, type, data })
     // Synchronous and ordered: every subscriber runs to completion before this
-    // returns, attention last. That is the whole of record()'s dispatch now —
-    // the queue resets, the arrival decision and the three push paths all live
-    // in core/attention.ts.
-    bus.publish(event, { hadBlockingPending: hadBlockingBefore })
+    // returns, the notifier last. That is the whole of record()'s dispatch —
+    // the queue resets and the push decision live in core/notify.ts.
+    bus.publish(event)
     // These two used to run BEFORE the attention dispatch, which was inline
-    // below them; now attention rides the publish above, so they follow it.
+    // below them; now the notifier rides the publish above, so they follow it.
     // Deliberate and inert: `syncTriggerJobs` only touches the croner job table
     // synchronously (its `fireTrigger` calls are deferred and cannot change
     // pending state before attention has already decided), and `log` carries no
@@ -718,9 +797,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   /** The board lookup, as core/queue.ts's `TaskOwner`. */
   const taskOwner: TaskOwner = (taskId) => boardProjection.state.tasks.find((t) => t.id === taskId)
 
-  function resolveAgent(event: StoredEvent): string | undefined {
-    return queueResolveAgent(event, taskOwner)
-  }
   function pendingEvents(agent?: string): StoredEvent[] {
     return queuePendingEvents(pendingProjection.state, taskOwner, agent)
   }
@@ -748,9 +824,21 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
    *  connected, so the mailbox's clocks keep running across an outage. A Set
    *  cannot answer this: re-registering an existing name does not move it. */
   let lastRegisteredSenseiName: string | undefined
+  /** Dojo-agent identities (sensei or worker) that have EVER registered —
+   *  persisted, symmetric to the two sets above. This is what lets `routeSend`
+   *  tell an OFFLINE worker (queue the send — the mailbox is truth) from a
+   *  name that never existed (warn the sender — an event addressed to nobody
+   *  would enter a mailbox nobody reads). Delivery unification, 2026-08-11.
+   *  KNOWN CORNER (architect's pass, accepted as-is): membership is forever —
+   *  a retired or renamed worker's name still queues, into a mailbox only the
+   *  sensei's universal filter still reads. Acceptable because visible (the
+   *  events sit in the sensei's own queue, not in silence); revisit only if a
+   *  dojo actually retires names in practice. */
+  const dojoAgentNames = new Set<string>()
   for (const e of await store.read({ types: ['register'] })) {
     const d = e.data as RegisterData
     if (d.role === 'user' && d.agent) userAgentNames.add(d.agent)
+    if ((d.role === 'sensei' || d.role === 'worker') && d.agent) dojoAgentNames.add(d.agent)
     if (d.role === 'sensei' && d.agent) {
       senseiNames.add(d.agent)
       lastRegisteredSenseiName = d.agent
@@ -763,10 +851,29 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
    *  shared in the first place. */
   const roleOf: RoleOf = (n) => agents.get(n)?.role ?? (userAgentNames.has(n) ? 'user' : undefined)
 
-  /** The sensei's inbox as of now. `agent` is left undefined — the pending
-   *  queue IS the sensei's queue today, so its inbox is the whole of it. */
-  function senseiInboxNow() {
-    return inboxFor(pendingProjection.state, taskOwner, { now: ports.now(), roleOf })
+  /** The rule context every mailbox filter needs (core/mailbox-rules.ts). */
+  const ruleContext: RuleContext = { roleOf, taskOwner }
+
+  /** ONE agent's mailbox: the one pending list, filtered by that agent's rule.
+   *  No stored per-agent projection — ruling (c), 2026-08-05. */
+  function mailboxOf(agent: string): StoredEvent[] {
+    return mailboxFor(pendingProjection.state, agent, ruleContext)
+  }
+
+  /** The three views of one agent's mailbox (core/views.ts). */
+  function viewsOf(agent: string) {
+    return viewsFor(pendingProjection.state, agent, ruleContext)
+  }
+
+  /** An agent's inbox as of now.
+   *
+   *  AGENT-AWARE, which is 042's DEVIATION-3: this was `senseiInboxNow()` and
+   *  handed the sensei's whole queue to whoever asked, so a worker calling
+   *  `/inbox` got the orchestrator's queue and a worker-side carrier was never
+   *  worth adding. Canon S1 says "AN AGENT", and E6 says one mechanism for
+   *  sensei and worker. */
+  function inboxNow(agent: string) {
+    return buildInbox(mailboxOf(agent), { now: ports.now(), roleOf })
   }
 
   // ── Delivery ledger (attention phase 4 — docs/attention.md "Observability") ──
@@ -786,87 +893,109 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     deliveryLedger.stamp(via, ids ?? pendingProjection.state.map((e) => e.id))
   }
 
-  /** Ids an in-flight recordAck has claimed but not yet written. Reserved
-   *  SYNCHRONOUSLY, because the write straddles an await. */
-  const ackInFlight = new Set<number>()
-
   /**
-   * The one place an `ack` event is written. Materializes the ledger for the ids
-   * it actually clears and drops their in-memory entries (pending is the only
-   * thing keeping them alive, and ack is the only exit from pending). Returns the
-   * ids actually acked, so callers report what happened rather than what they
-   * asked for.
+   * The one place an `ack` event is written.
    *
-   * CONCURRENCY (review finding, deterministic repro): two acks for the same id
-   * used to produce two ack events, the second carrying `clearedBy` with no
-   * `deliveredVia` (the first write already dropped the ledger entry) — so a
-   * reader taking the LATEST ack concluded "delivery unknown" for an event that
-   * was demonstrably woken. A 20-way interleave produced 20 ack events. The
-   * membership check and the claim below happen in ONE synchronous step, with no
-   * await between them, so exactly one writer can own an id; everything else
-   * drops out and no empty ack is ever recorded. (The race predates phase 4 —
-   * duplicate acks were merely redundant before the ledger gave them a way to
-   * lie.)
+   * ── APPEND UNCONDITIONALLY, LET THE FOLD DECIDE (task 041, ruled) ──
+   *
+   * What stood here was the ack CLAIM: a synchronous membership check plus an
+   * `ackInFlight` reservation, welded together so that exactly one writer could
+   * own an id and no second ack event was ever written. It is gone. The pending
+   * reducer's ack case is `state.filter(e => !acked.has(e.id))` — already
+   * idempotent, so unknown ids, duplicates and already-cleared ids are
+   * structural no-ops in the fold. The claim was a redundant second layer, and
+   * `core/fold-decides.test.ts` demonstrates that rather than asserting it.
+   *
+   * ── WHAT THE CALLER IS TOLD ──
+   *
+   * How many of the REQUESTED ids are now cleared, read from POST-publish state.
+   * The same idempotent answer for every caller. Leonid's correction, verbatim:
+   * "Ack is idempotent, you should just know the message is acked." Two racing
+   * ackers of one id BOTH get success; which of them did the clearing is a
+   * distinction nobody needs, and chasing it is what previously required the
+   * claim machinery and then a hook on `record()`.
+   *
+   * ── THE ONE ADJACENCY THAT IS NOT OBVIOUS (task 041, recorded on purpose) ──
+   *
+   * `takeFor` runs HERE, at call entry, while the ledger's reading rule is
+   * FIRST-IN-LOG (core/codes.ts). Those coincide only because store appends
+   * serialize FIFO (the append-serialization commit's write serialization): the caller that took the
+   * ledger entry is therefore also the one whose ack event lands first. **If
+   * append ordering ever stops being FIFO, the reading rule and the ledger
+   * carrier come apart** — the second ack would carry the delivery mark while
+   * the first, authoritative one carried none.
    */
   async function recordAck(eventIds: number[], clearedBy: ClearedBy): Promise<number[]> {
-    // ── THE WELD (guard 6) ── The decision and the reservation are one
-    // synchronous step. `claimAckIds` is pure and lives in core/pre-append.ts,
-    // but the property that makes it a guard is right here: NO AWAIT may appear
-    // between this line and the `ackInFlight.add` below, or two writers can
-    // both claim the same id. core/boundary.test.ts asserts that structurally.
-    const claimed = claimAckIds(eventIds, new Set(pendingProjection.state.map((e) => e.id)), ackInFlight)
-    if (claimed.length === 0) return [] // already cleared, or another writer owns it
-    for (const id of claimed) ackInFlight.add(id)
-    try {
-      const ledger = deliveryLedger.takeFor(claimed, clearedBy)
-      await record('ack', SYSTEM_STREAM, {
-        eventIds: claimed,
-        // `auto: 'reply'` predates the ledger and stays — phase-3 QA (and the
-        // sensei skill) read it; clearedBy is its generalization, not a rename.
-        ...(clearedBy === 'auto-clear' && { auto: 'reply' as const }),
-        ledger,
-      } satisfies AckData)
-      return claimed
-    } finally {
-      // Released only after record() has applied the ack to the pending
-      // projection, so a later writer sees "not pending" rather than a free id.
-      for (const id of claimed) ackInFlight.delete(id)
-    }
+    const requested = [...new Set(eventIds)]
+    if (requested.length === 0) return []
+    // ── FIFO ADJACENCY (see the header) ──
+    // THIS line takes the ledger, and the append two lines down decides log
+    // order. The reading rule is FIRST-IN-LOG, so those two must stay in the
+    // same order for every caller: whoever takes the entry must also be whoever
+    // lands first. They are, only because store appends serialize FIFO. Nothing
+    // local enforces it — if that ever changes, this is the line that breaks.
+    const ledger = deliveryLedger.takeFor(requested, clearedBy)
+    await record('ack', SYSTEM_STREAM, { eventIds: requested, ledger } satisfies AckData)
+    // POST-publish: `record` has already applied this event to the pending
+    // projection synchronously, so this reads the world the caller's ack made.
+    const remaining = new Set(pendingProjection.state.map((e) => e.id))
+    return requested.filter((id) => !remaining.has(id))
   }
 
-  // ── Blocking-event wake (attention phase 2 — docs/attention.md §4) ──
-  // A human-origin event is BLOCKING: someone is holding a phone, unable to tell
-  // thinking from broken. Blocking events wake the sensei REGARDLESS of the idle
-  // flag (mid-turn injection is confirmed working and informative), so a stuck
-  // Stop hook can never starve a waiting human — the measured 3-hour-stall class
-  // dies here. Re-wakes escalate on a backoff schedule while blocking events
-  // remain unhandled; the inbox ages climb in every piggyback in between.
-  // Machine events keep the idle-gated nudge (deliberately conservative: pure
-  // never-wake would regress worker-reply latency to heartbeat-period — the
-  // trap the goals sensei flagged; full machine reclassification lands with the
-  // turn-end drain discipline in later phases).
+  // ── THE BLOCKING-WAKE PATH IS GONE (the transition, task 045) ──
+  //
+  // What stood here: a human-origin event is BLOCKING — someone is holding a
+  // phone, unable to tell thinking from broken — so it woke the sensei
+  // REGARDLESS of the idle flag, on its own backoff schedule, while machine
+  // events kept the idle-gated nudge. Two push paths, two clocks, two vocabularies.
+  //
+  // It is one path now, and the collapse is the point (canon E6): a human on a
+  // bridge is simply the highest-priority SENDER (core/priority.ts), and
+  // priority decides whether an arrival interrupts. Everything the blocking path
+  // guaranteed still holds — a waiting human is never starved by a busy sensei —
+  // but it holds because nothing asks whether the sensei is busy at all, rather
+  // than because one path was allowed to ignore the question.
+  //
+  // (`hasBlockingPending` and `blockingPendingFrom` lived here too — guard 1's
+  //  pre-append input and guard 7's entry/tail comparison. Both guards retired
+  //  with their machinery; the core/queue.ts functions they wrapped are still
+  //  exported and still used by the inbox, which classifies human senders for
+  //  the PAYLOAD even though nothing routes on it any more.)
 
-  /** Is this event a human waiting? Decided in core/queue.ts; the binding is
-   *  the shared `roleOf` above, which is what keeps this in step with the
-   *  inbox's own classification. */
-  function isBlockingEvent(event: StoredEvent): boolean {
-    return queueIsBlockingEvent(event, roleOf)
+  /** One line per parked task, or an explicit nothing. NEVER "and N more":
+   *  S9's third requirement is exactly the rule that a long list is
+   *  inconvenient rather than trimmable. */
+  function renderDigest(lines: string[]): string {
+    if (lines.length === 0) return 'Parked work: nothing waiting on anyone outside the dojo.'
+    return [`Parked work — ${lines.length} item${lines.length === 1 ? '' : 's'}:`, ...lines].join('\n')
   }
 
-  /** Guard 1's input, read immediately before every append. */
-  function hasBlockingPending(): boolean {
-    return queueHasBlockingPending(pendingProjection.state, roleOf)
+  /** The built-in parked-work digest (S9). A normal trigger — see the startup
+   *  block for why infra creates it and why it may be removed. */
+  const DIGEST_TRIGGER_ID = 'parked-digest'
+  /** DIAL: 09:00 daily. */
+  const DIGEST_CRON = process.env.JEAN_DIGEST_CRON ?? '0 9 * * *'
+
+  /** A positive-number env override, or the default. */
+  function envNumber(name: string, fallback: number): number {
+    const raw = Number(process.env[name])
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback
   }
 
-  /** Guard 7 asks this twice — at entry and at the tail — and compares. */
-  function blockingPendingFrom(sender: string): number[] {
-    return queueBlockingPendingFrom(pendingProjection.state, roleOf, sender)
-  }
+  // ── The notifier's dials ────────────────────────────────────────
+  //
+  // The blocking-wake ladder became THE ladder. There is no longer a separate
+  // human-waiting path: a human on a bridge is simply the highest-priority
+  // sender (core/priority.ts), and priority decides whether an arrival pushes.
+  // One mechanism, one set of dials — canon E6.
 
-  /** Re-wake delays AFTER the immediate arrival wake: 2m, 5m, then every 10m.
-   *  Env override (comma-separated ms) exists for tests. */
-  const BLOCKING_BACKOFF_MS: number[] = (() => {
-    const env = process.env.JEAN_BLOCKING_BACKOFF_MS
+  /** S2's interval: how long an agent may stay uninformed of a new event,
+   *  measured from its LAST ACTIVITY. Env override for tests. */
+  const NUDGE_INTERVAL_MS = envNumber('JEAN_NUDGE_INTERVAL_MS', 120_000)
+
+  /** Repeats while a mailbox stays unhandled. Env override (comma-separated). */
+  const NUDGE_BACKOFF_MS: number[] = (() => {
+    const env = process.env.JEAN_NUDGE_BACKOFF_MS
     if (env) {
       const arr = env
         .split(',')
@@ -877,13 +1006,19 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     return [120_000, 300_000, 600_000]
   })()
 
-  // Backoff loop: while blocking events sit unhandled, re-wake on the schedule.
-  // The decision — including the self-healing unstarted-episode case — is
-  // core/attention.ts's `decideBlockingTick`. This callback is a single call
-  // with no branching on state, which is the acceptance check for the
-  // extraction: if a timer callback still branches, it isn't done.
-  const blockingTickMs = Math.min(15_000, ...BLOCKING_BACKOFF_MS)
-  const blockingTick = setInterval(() => attention.tick(senseiView(ports.now())), blockingTickMs)
+  /** How long a parked task waits before its holder is nagged (S7/S8). */
+  const REMINDER_AFTER_MS = envNumber('JEAN_REMINDER_AFTER_MS', 1_800_000)
+  /** H4's silence bound: a session-alive worker holding active work that has
+   *  been jean-silent this long is up-but-stuck. */
+  const STUCK_AFTER_MS = envNumber('JEAN_STUCK_AFTER_MS', 1_800_000)
+  /** "Within bounded time" (S11) — the bound. */
+  const BROKEN_AGENT_AFTER_MS = envNumber('JEAN_BROKEN_AGENT_AFTER_MS', 14_400_000)
+
+  /** Tick grids. Finer than the smallest window they serve, so the guarantee is
+   *  "by the first tick at or after the deadline" rather than a whole window
+   *  late. */
+  const NOTIFY_TICK_MS = Math.min(15_000, NUDGE_INTERVAL_MS, ...NUDGE_BACKOFF_MS)
+  const SUPERVISE_TICK_MS = Math.min(60_000, REMINDER_AFTER_MS, BROKEN_AGENT_AFTER_MS)
 
   /** Attach the compact inbox line as a response header when the request came
    *  from the sensei's channel plugin (`x-jean-agent`). Header-only — response
@@ -905,8 +1040,13 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   function withInboxHeader(req: Request, res: Response): Response {
     const caller = callerFromHeader(req)
     if (!caller) return res
-    if (agents.get(caller)?.role !== 'sensei') return res
-    const inbox = senseiInboxNow()
+    // AGENT-UNIFORM (canon S1: "AN AGENT"; E6: one mechanism for sensei and
+    // worker). This used to be `if (role !== 'sensei') return res` — 042's
+    // DEVIATION-3. The caller must still be a REGISTERED agent: the header is
+    // the identity, and attaching a mailbox line to a response headed somewhere
+    // with no mailbox is the failure the other direction.
+    if (!agents.has(caller)) return res
+    const inbox = inboxNow(caller)
     if (!inbox) return res
     // ATTACH-LEVEL, NOT CONFIRMED READ (review finding [D]). Marking these
     // 'piggyback' records that infra ATTACHED the inbox line to a response headed
@@ -916,7 +1056,21 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // model; the alternative — not stamping — would under-report every event whose
     // only delivery was a piggyback, which is the common case. Kept, with the
     // claim stated precisely here and on DeliveredVia (reducers.ts).
-    stampDelivery('piggyback')
+    const shown = mailboxOf(caller).map((e) => e.id)
+    stampDelivery('piggyback', shown)
+    // ── CARRIAGE DISCHARGES ANNOUNCEMENT (task 046's audit) ──
+    //
+    // The line about to go out IS the agent being told, so a standalone push
+    // for the same events would be telling it twice — and S1 says an agent
+    // making jean calls learns "on its next call, NO INTERRUPTION". Before this
+    // line the two mechanisms openly contradicted each other: the ledger
+    // recorded `piggyback` while the episode still considered the events
+    // unannounced and pushed them anyway.
+    //
+    // Note what is NOT being asked here: whether the agent is busy. This is a
+    // fact about the EVENTS — they have been shown — which is why it satisfies
+    // S1 without reintroducing the idle gate the foundations forbid.
+    notifier.carried(caller, shown)
     const headers = new Headers(res.headers)
     headers.set('x-jean-inbox', renderInboxLine(inbox))
     return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
@@ -1022,60 +1176,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
 
   // ── Sensei nudge ──────────────────────────────────────────────────
 
-  // ── Machine-nudge episode backoff (attention phase 4) ────────────
-  //
-  // The goals dojo's event 10077: SIX re-nudges in ~25s on ONE deliberately-held
-  // event. Not timer-driven — every turn-end posts /agent-idle, which sets
-  // idle=true and calls nudgeSenseiIfIdle(), which had zero suppression. So the
-  // loop rate WAS the reply rate: the sensei's own answer re-armed the interrupt
-  // that produced it, and a deliberately deferred event nagged forever.
-  //
-  // Fix: an EPISODE (spanning a non-empty pending queue) nudges when it has
-  // something new to say, not whenever the agent draws breath:
-  //   1. first nudge of the episode — always;
-  //   2. CONTENT CHANGED — an event entered pending since the last nudge (this is
-  //      what keeps worker-reply latency at turn-end speed, the regression the
-  //      goals review warned about);
-  //   3. BACKOFF ELAPSED — the same held queue is worth one reminder per window.
-  // Everything else is silence, on purpose. The queue is still readable (delivery
-  // is pull), the piggyback still rides every infra call with climbing ages, the
-  // stall watchdog is still the backstop, and blocking (human) events are a
-  // separate path that this never touches.
-
-  /** Re-nudge delays for a queue whose CONTENT hasn't changed: 1m, 2m, 5m, then
-   *  every 10m. Same structure and env-override form as BLOCKING_BACKOFF_MS. */
-  const NUDGE_BACKOFF_MS: number[] = (() => {
-    const env = process.env.JEAN_NUDGE_BACKOFF_MS
-    if (env) {
-      const arr = env
-        .split(',')
-        .map(Number)
-        .filter((n) => Number.isFinite(n) && n > 0)
-      if (arr.length > 0) return arr
-    }
-    return [60_000, 120_000, 300_000, 600_000]
-  })()
-
-  // The episode bookkeeping this backoff needs — counters, the content-changed
-  // signal, the idle gate — is core/attention.ts's `decideNudge`. Its state is
-  // per-agent now (sensei the only populated key), which is what makes the
-  // phase-5 worker queues a matter of adding keys rather than adding globals.
-
-  // ── Stall watchdog ────────────────────────────────────────────────
-  // A missed Stop hook leaves the sensei stuck at idle:false, which suppresses
-  // every nudge above: pending grows and the dojo silently stalls (recurring on
-  // live dojos — worst observed: a 3-hour stall behind five queued messages).
-  // Stopgap until delivery is ungated from idle (BACKLOG: attention-management
-  // redesign): when pending has sat non-empty for STALL_NUDGE_AFTER_MS with no
-  // nudge fired, force one that ignores the idle flag. Quiet when healthy —
-  // fires only while events are actually undrained, then re-arms for a full
-  // window, so a wedged sensei gets one reminder per window, not a flood.
-  // The rule itself — including standing down while blocking is pending — is
-  // core/attention.ts's `decideStallTick`.
-
-  const stallEnv = Number(process.env.JEAN_STALL_NUDGE_MS)
-  const STALL_NUDGE_AFTER_MS = Number.isFinite(stallEnv) && stallEnv > 0 ? stallEnv : 10 * 60_000
-
   /**
    * The world as the attention decisions are allowed to see it — built FRESH at
    * every decision point, never cached.
@@ -1094,93 +1194,159 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
    * own `findSensei()` check had passed.
    */
   /**
-   * WHOSE MAILBOX the attention machinery acts on. The sensei's, today.
+   * WHOSE MAILBOX the notifier acts on when nobody named it.
    *
-   * OWNER IS NOT DELIVERABLE. The owner outlives the connection, because the
-   * mailbox's clocks have to keep running while nobody is attached: an arrival
-   * during a sensei outage must still start the stall window, so a sensei
-   * connecting ten minutes later gets the watchdog immediately rather than a
-   * fresh window. That was measured on the pre-reshape core and is pinned in
-   * attention.test.ts.
-   *
-   * Resolution order, as ruled (task 040 Q1): the connected sensei, else the
-   * most-recently-registered persisted sensei name. `undefined` only on a dojo
-   * where no sensei has EVER registered — the accepted corner, where nothing is
-   * armed until one does.
+   * OWNER IS NOT DELIVERABLE — task 040's split, and it survives the transition
+   * unchanged. The owner outlives the connection because the mailbox's clocks
+   * have to keep running while nobody is attached. Resolution order (task 040
+   * Q1): the connected sensei, else the most-recently-registered persisted
+   * sensei name. `undefined` only on a dojo where no sensei has EVER registered.
    */
   function senseiMailboxOwner(): string | undefined {
     return findSensei()?.name ?? lastRegisteredSenseiName
   }
 
   /**
-   * An agent's mailbox: the slice of pending it owns.
+   * One mailbox, as the notifier is allowed to see it — built FRESH at every
+   * decision point, never cached.
    *
-   * THE SENSEI'S MAILBOX IS THE WHOLE QUEUE (ruled on the merits, task 040 Q2):
-   * the orchestrator's "everything it needs to know" IS the whole queue, so
-   * worker slices OVERLAP it rather than partitioning it. A partition would
-   * mean the sensei stops seeing worker-owned events — a different system, not
-   * foreclosed, but not this commit.
+   * That freshness is a guard, not a style choice (S6): the delivered payload
+   * and the `pendingCount` recorded on the event both come out of this one
+   * snapshot, so they cannot disagree. `now` is a PARAMETER rather than a
+   * `ports.now()` call inside, so the clock is read at the call site — the
+   * position rule from stage 2 (ports.ts).
    *
-   * Worker slices are reachable today and nothing calls them: `viewFor('w1',
-   * now)` builds a real per-worker mailbox view, which is what the per-agent
-   * scenario tests needed and could not have.
+   * NOTE WHAT IS NOT BUILT HERE ANY MORE: `idle`. Nothing asks whether an agent
+   * is busy (canon E3), so the adapter has nothing to report.
    */
-  function mailboxOf(agent: string): StoredEvent[] {
-    return senseiNames.has(agent) ? [...pendingProjection.state] : pendingEvents(agent)
-  }
-
-  /**
-   * One mailbox, as the attention decisions are allowed to see it — built FRESH
-   * at every decision point, never cached.
-   *
-   * That freshness is a guard, not a style choice: the delivered inbox and the
-   * `pendingCount` recorded on the `nudge` event both come out of this one
-   * snapshot, so they cannot disagree. A cached inbox is exactly the bug
-   * scenario 6 pins (counts 1 → 2 → 1 — the falling leg is what a stale
-   * snapshot gets wrong).
-   *
-   * `now` is a PARAMETER rather than a `ports.now()` call inside, so the clock
-   * is read at the call site: the position rule from stage 2 (see ports.ts).
-   *
-   * `idle` is reported FALSE whenever the mailbox is not deliverable, so `idle`
-   * implies `deliverable` and the machine-nudge path needs no separate check.
-   * The inbox is likewise built only when there is someone to push to, matching
-   * the pre-refactor paths, which all called `senseiInboxNow()` only after their
-   * own `findSensei()` check had passed.
-   */
-  function viewFor(agent: string | undefined, now: number): AttentionView {
-    const live = findSensei()
-    const deliverable = agent !== undefined && live?.name === agent
+  function notifyView(agent: string | undefined, now: number): NotifyView {
+    const entry = agent === undefined ? undefined : agents.get(agent)
     const pending = agent === undefined ? [] : mailboxOf(agent)
     return {
       now,
       agent: agent ?? null,
-      deliverable,
-      idle: deliverable ? (live?.entry.idle ?? false) : false,
-      pendingIds: pending.map((e) => e.id),
-      blockingPendingIds: pending.filter(isBlockingEvent).map((e) => e.id),
-      inbox: deliverable ? inboxFor(pending, taskOwner, { now, roleOf }) : null,
-      blockingBackoffMs: BLOCKING_BACKOFF_MS,
+      deliverable: entry !== undefined,
+      // The datum S2 measures from. It has existed on the registry entry all
+      // along, touched on every WS frame and every `x-jean-agent` request; it
+      // simply never reached a decision (042 DEVIATION-2). Absent (an owner
+      // with no live entry) reads as "silent since the epoch", which is the
+      // right answer: an agent we have never seen act is maximally quiet.
+      lastActivityAt: entry?.lastActivityAt ?? 0,
+      threshold: thresholdFor(entry?.role ?? (agent && senseiNames.has(agent) ? 'sensei' : 'worker')),
+      pending: pending.map((e) => ({
+        id: e.id,
+        priority: priorityOf(e, { roleOf }),
+        from: agentFromEvent(e) ?? e.stream,
+      })),
+      nudgeIntervalMs: NUDGE_INTERVAL_MS,
       nudgeBackoffMs: NUDGE_BACKOFF_MS,
-      stallAfterMs: STALL_NUDGE_AFTER_MS,
     }
   }
 
-  /** The sensei mailbox's view — what all three attention entry points use. */
-  function senseiView(now: number): AttentionView {
-    return viewFor(senseiMailboxOwner(), now)
+  /**
+   * EVERY driveable mailbox's view — what all three notifier entry points use
+   * (delivery unification, ruled 2026-08-11). One view per dojo agent: the
+   * sensei mailbox OWNER (which outlives its connection — task 040's split)
+   * plus every REGISTERED sensei/worker. A disconnected worker's mailbox needs
+   * no view of its own: `deliverable` would be false so no decision could
+   * push, and its announce-on-reconnect is driven by the register event's
+   * sweep the moment an entry exists. Bridge users and peers are outside the
+   * unification's scope — their delivery adapters are their notification.
+   */
+  function notifyViews(now: number): NotifyView[] {
+    const owners = new Set<string>()
+    const senseiOwner = senseiMailboxOwner()
+    if (senseiOwner) owners.add(senseiOwner)
+    for (const [name, entry] of agents) {
+      if (entry.role === 'sensei' || entry.role === 'worker') owners.add(name)
+    }
+    return [...owners].map((owner) => notifyView(owner, now))
   }
 
-  // Boot state, once, AFTER catch-up and never during it: counters at zero and
-  // the stall clock armed from the replayed queue. The listener has no replay
-  // path — see core/bus.ts, "REPLAY NEVER PUBLISHES".
-  attention.hydrate(senseiView(ports.now()))
+  /** What the notifier's push actually says. Pulled (not pushed) so the payload
+   *  and the decision come from the same snapshot — the inbox-is-core-state
+   *  ruling, unchanged. */
+  function renderPush(view: NotifyView): string {
+    const inbox = view.agent ? inboxNow(view.agent) : null
+    return inbox ? renderInboxWake(inbox) : 'Events pending. Check the board.'
+  }
 
-  // The second of the two timer callbacks, and like the first it is one call
-  // with no branching on state. Both drive the SAME `core.tick`; the stall
-  // check therefore also runs on the blocking interval's faster grid, which can
-  // only shorten the latency AFTER its threshold, never fire before it.
-  const stallTick = setInterval(() => attention.tick(senseiView(ports.now())), Math.min(STALL_NUDGE_AFTER_MS, 60_000))
+  /** The supervision view: tasks and agent liveness, for S7/S8/S10/S11. */
+  function supervisionView(now: number): SupervisionView {
+    return {
+      now,
+      sensei: senseiMailboxOwner() ?? null,
+      // O3: the human's surface when there is one, the sensei when there is not.
+      bridge: [...userAgentNames].find((n) => agents.has(n)) ?? null,
+      deliverable: [...agents.keys()],
+      tasks: boardProjection.state.tasks
+        .filter((t) => t.status === 'in-progress' || t.status === 'waiting')
+        .map((t) => ({
+          id: t.id,
+          title: t.title,
+          status: t.status,
+          agent: t.agent,
+          blockedOn: t.blockedOn,
+          // WHO GETS NAGGED, resolved here so the decisions never look up a
+          // role: a parked task's holder is the sensei unless the blocker moved
+          // to the human, in which case it is the bridge (S8).
+          holder:
+            t.status === 'waiting'
+              ? t.blockedOn === 'human'
+                ? ([...userAgentNames].find((n) => agents.has(n)) ?? senseiMailboxOwner())
+                : senseiMailboxOwner()
+              : t.agent,
+          lastEventAt: Date.parse(t.updatedAt),
+        })),
+      agents: (() => {
+        const rows = new Map<string, { name: string; role: string; lastActivityAt: number; sessionLive: boolean }>()
+        for (const [name, e] of agents) {
+          if (e.role !== 'sensei' && e.role !== 'worker') continue
+          // A session that has never spoken is silent SINCE IT CONNECTED —
+          // `connectedAt` is the fixed floor that makes the bounds real for it
+          // (H7 removed the register stamp; a `?? now` fallback here re-based
+          // the clock every tick and made S11 blind to never-speaking
+          // sessions — caught by stall-watchdog.test.ts on the first run).
+          rows.set(name, {
+            name,
+            role: e.role,
+            lastActivityAt: e.lastActivityAt ?? e.connectedAt ?? now,
+            sessionLive: e.isLive?.() ?? true,
+          })
+        }
+        // DISCONNECTED WORKERS HOLDING IN-PROGRESS WORK — the registry cannot
+        // see them, so the board is the watch-list (H4). Their silence clock
+        // falls back to their newest held task's own last event: the registry
+        // forgets `lastActivityAt` with the entry, and measuring from the
+        // task keeps the broken bound sane across infra restarts (from-epoch
+        // would report every down worker to the human within one tick).
+        for (const t of boardProjection.state.tasks) {
+          if (t.status !== 'in-progress' || !t.agent || rows.has(t.agent)) continue
+          if (senseiNames.has(t.agent) || userAgentNames.has(t.agent) || peers.has(t.agent)) continue
+          const heldClock = boardProjection.state.tasks
+            .filter((x) => x.status === 'in-progress' && x.agent === t.agent)
+            .reduce((hi, x) => Math.max(hi, Date.parse(x.updatedAt) || 0), 0)
+          rows.set(t.agent, { name: t.agent, role: 'worker', lastActivityAt: heldClock || now, sessionLive: false })
+        }
+        return [...rows.values()]
+      })(),
+      reminderAfterMs: REMINDER_AFTER_MS,
+      stuckAfterMs: STUCK_AFTER_MS,
+      brokenAfterMs: BROKEN_AGENT_AFTER_MS,
+    }
+  }
+
+  // Boot state, once, AFTER catch-up and never during it. The notifier has no
+  // replay path — see core/bus.ts, "REPLAY NEVER PUBLISHES".
+  notifier.hydrate(notifyViews(ports.now()))
+
+  // ONE timer, where there were two. The stall watchdog's interval went with the
+  // watchdog (ruled 2026-08-05): with the idle gate gone the ladder already
+  // pushes unconditionally and never stops, so a second clock had no job. Both
+  // callbacks are still a single call with no branching on state — the
+  // per-agent fan-out lives in core (`sweep`), where it is tested, not here.
+  const notifyTick = setInterval(() => notifier.sweep(notifyViews(ports.now())), NOTIFY_TICK_MS)
+  const superviseTick = setInterval(() => supervisor.tick(supervisionView(ports.now())), SUPERVISE_TICK_MS)
 
   // ── Trigger scheduler ───────────────────────────────────────────
 
@@ -1545,7 +1711,15 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     const delivered = ports.deliver(trigger.agent, {
       type: 'deliver',
       from: 'trigger',
-      text: trigger.prompt,
+      // THE DIGEST CARRIES ITS OWN CONTENT (S9). Every other trigger delivers
+      // its prompt and the agent goes and looks; a digest that did that would
+      // be an interruption asking the sensei to do work, which is the one thing
+      // S9 says it must not be. Built at FIRE time, so the ages are the ages
+      // now — the same freshness rule as every other payload in this system.
+      text:
+        trigger.id === DIGEST_TRIGGER_ID
+          ? renderDigest(buildDigest(boardProjection.state, ports.now()))
+          : trigger.prompt,
     })
     if (delivered) {
       const entry = agents.get(trigger.agent)
@@ -1938,10 +2112,43 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       if (!canTransition(task.status, body.status as TaskStatus)) {
         return Response.json({ error: `invalid transition: ${task.status} → ${body.status}` }, { status: 400 })
       }
+      // BOTH GATES (013 S7; 042 DEVIATION-4). The DAG says whether the move is
+      // legal at all; the ACTOR says whether this caller may make it. `actor`
+      // was recorded and never checked, so any caller could close any task —
+      // "workers still cannot close tasks" shipped as a comment.
+      //
+      // The role comes from the live registry, falling back to the stated
+      // actor's own claim ONLY when it claims to be a worker. An unregistered
+      // caller therefore cannot ESCAPE the worker restriction by omitting its
+      // role, and cannot acquire the sensei's powers by asserting them either:
+      // the sensei path requires a registered sensei.
+      const actorName = body.actor ?? 'api'
+      const actorRole = agents.get(actorName)?.role ?? (body.actorRole === 'worker' ? 'worker' : undefined)
+      if (actorRole && !canActorTransition(actorRole, task.status, body.status as TaskStatus)) {
+        return Response.json({ error: `${actorRole} may not drive ${task.status} → ${body.status}` }, { status: 403 })
+      }
+      // H3: the resume date rides the SAME PATCH that parks — "set at park
+      // time". Validated here (an unparseable date on the task would make the
+      // digest's date comparison silently always-true), and only meaningful
+      // with `blockedOn: 'time'`; recording it on other parks is harmless but
+      // refused for the same reason unknown fields are: a caller that thinks
+      // it scheduled a wake should find out now, not in September.
+      if (body.resumeAt !== undefined) {
+        if (body.blockedOn !== 'time') {
+          return Response.json({ error: 'resumeAt only applies with blockedOn: "time"' }, { status: 400 })
+        }
+        if (Number.isNaN(Date.parse(body.resumeAt))) {
+          return Response.json({ error: `unparseable resumeAt: ${body.resumeAt}` }, { status: 400 })
+        }
+      }
       await record('task-status', taskStream(task.id), {
         from: task.status,
         to: body.status as TaskStatus,
-        actor: body.actor ?? 'api',
+        actor: actorName,
+        ...(actorRole && { actorRole }),
+        ...(body.blockedOn && { blockedOn: body.blockedOn }),
+        ...(body.blockedNote && { blockedNote: body.blockedNote }),
+        ...(body.resumeAt && { resumeAt: body.resumeAt }),
       } satisfies TaskStatusData)
       const updated = boardProjection.state.tasks.find((t) => t.id === task.id)
       return Response.json(updated)
@@ -2146,14 +2353,17 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       if (!body.to || !body.text) {
         return Response.json({ error: 'missing to or text' }, { status: 400 })
       }
-      const delivered = await routeSend({
+      const routed = await routeSend({
         from: body.from ?? 'api',
         to: body.to,
         text: body.text,
         taskId: body.taskId,
         attachments: body.attachments,
       })
-      return Response.json({ delivered })
+      // Two honest answers, mutually exclusive: `queued` (a dojo agent — the
+      // mailbox is truth, the ledger is the delivery record) or `delivered`
+      // (an adapter target — the transport answered synchronously).
+      return Response.json(routed.queued ? { queued: true } : { delivered: routed.delivered ?? false })
     }
 
     // ── Agent idle (stop hook) ──────────────────────────────────
@@ -2195,18 +2405,17 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         return Response.json({ ok: false, error: 'agent not connected' })
       }
 
-      // A Stop-hook post is inbound traffic like any other (phase 4 §3) — it
-      // sharpens liveness even though it no longer carries correctness.
-      touchAgent(agentName)
+      // NO `touchAgent` HERE (H7, ruled 2026-08-11): the Stop-hook post is the
+      // harness's act, not the agent's — "anything infra records about it is
+      // not activity." An agent that merely ends turns without doing anything
+      // jean-visible must keep looking quiet, or S2's clock never fires for
+      // exactly the sessions it exists to chase. The recorded event below
+      // still sweeps the notifier like every other event.
       entry.idle = true
       const role = entry.role
       const taskId = inferTaskId(agentName)
       const stream = taskId ? taskStream(taskId) : agentStream(agentName)
       await record('agent-idle', stream, { agent: agentName, role } satisfies AgentIdleData)
-
-      if (role === 'sensei') {
-        attention.nudge(senseiView(ports.now()))
-      }
 
       return Response.json({ ok: true })
     }
@@ -2453,15 +2662,95 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     // ── Event endpoints ─────────────────────────────────────────
 
     if (path === '/events' && req.method === 'GET') {
-      const agent = url.searchParams.get('agent') ?? undefined
-      return Response.json({ events: pendingEvents(agent).map(withDeliveredVia) })
+      // THE FETCH RUNG (S5). This is the ONLY response that carries ack codes —
+      // `counts` and `summary` deliberately do not, because a code on a cheap
+      // rung would make the cheap rung sufficient to CLEAR and read-before-ack
+      // would hold only by convention.
+      //
+      // ── ADDRESSED READ vs OBSERVER READ, and why the ledger turns on it ──
+      //
+      // ADDRESSED (`?for=`, or the `x-jean-agent` header every channel-tool call
+      // carries): this is one agent reading ITS MAILBOX — the same membership
+      // `counts` and `summary` describe, through the same filter, which is what
+      // makes the ladder three renderings of one list rather than three answers.
+      // It is also a DELIVERY: under S5 this is how an agent obtains a code, so
+      // it is the path most events now reach anyone by, and a ledger that did
+      // not record it would answer "delivery unknown" for very nearly
+      // everything. Stamped BEFORE rendering, so the response describes the
+      // delivery that is happening rather than only the ones that already had.
+      //
+      // OBSERVER (no identity — `jean status`, a dashboard, a test): the whole
+      // queue, or the legacy `?agent=` concern-filter, and NO STAMP. This half
+      // was the transition's own defect, found by four tests that were never on
+      // the casualty list (task 045): stamping unconditionally meant any read of
+      // the queue recorded a delivery to nobody, which is exactly the confident
+      // false "delivered" the ledger exists to prevent — and it silently
+      // overwrote real `wake` stamps, since first-delivery-wins made whichever
+      // observer looked first the recorded carrier.
+      const reader = url.searchParams.get('for') ?? callerFromHeader(req)
+      const fetched = reader ? mailboxOf(reader) : pendingEvents(url.searchParams.get('agent') ?? undefined)
+      if (reader) {
+        const shown = fetched.map((e) => e.id)
+        stampDelivery('fetch', shown)
+        // CARRIAGE DISCHARGES ANNOUNCEMENT (task 046's audit), and this is the
+        // strongest carrier there is: the agent asked for its mailbox and got
+        // every payload plus every code. Pushing it afterwards about what it
+        // just read is the double-telling S1 forbids.
+        notifier.carried(reader, shown)
+      }
+      return Response.json({ events: fetched.map((e) => ({ ...withDeliveredVia(e), code: codeFor(e) })) })
+    }
+
+    // The triage ladder (S4): counts → summary → fetch, over ONE agent's
+    // mailbox. `for` names whose mailbox; without it there is nobody to filter
+    // for and the request is a caller bug rather than a default.
+    const viewMatch = path.match(/^\/events\/(counts|summary)$/)
+    if (viewMatch && req.method === 'GET') {
+      const agent = url.searchParams.get('for') ?? callerFromHeader(req)
+      if (!agent) return Response.json({ error: 'pass ?for=<agent> or the x-jean-agent header' }, { status: 400 })
+      const views = viewsOf(agent)
+      // ── THESE HANDLERS DISCHARGE NOTHING; THE CARRIER ABOVE THEM DOES ──
+      //
+      // An earlier version of this comment claimed the cheap rungs do not
+      // discharge announcement at all, and reasoned about why the asymmetry was
+      // deliberate. IT WAS FALSE AS SHIPPED (architect's adversarial gate, task
+      // 046; re-measured here before correcting it). Nothing in this block calls
+      // `notifier.carried` — but `withInboxHeader` wraps EVERY response at the
+      // serve boundary, and it both stamps `piggyback` and discharges for the
+      // CALLER. So:
+      //
+      //   SELF-QUERY (`?for=me`, or just the header) — DISCHARGES. Not through
+      //     this handler: through the piggyback riding its own response.
+      //     Measured: two events with no delivery mark read `piggyback` after a
+      //     single `GET /events/counts`.
+      //   CROSS-AGENT (`?for=someone-else`) — does not discharge for the agent
+      //     being asked about, because the piggyback is about the CALLER's
+      //     mailbox, not the queried one.
+      //
+      // So the real open question is not "should the cheap rungs discharge" —
+      // it is "should a cheap-rung request carry the piggyback at all", which is
+      // where the two mechanisms meet and neither was designed against the
+      // other. Re-raised for Leonid WITH the measurement, since the previous
+      // framing asked him to rule on behaviour the code did not have.
+      //
+      // Left exactly as it behaves, deliberately: the two errors are not
+      // symmetric — discharging too eagerly means an agent that glanced at a
+      // count is never pushed (silence, the one failure this system cannot see),
+      // discharging too late costs one redundant push. Changing it before the
+      // ruling would trade a documented behaviour for an undocumented one.
+      return Response.json(viewMatch[1] === 'counts' ? { counts: views.counts() } : { summary: views.summary() })
     }
 
     // Inbox summary (attention phase 1) — the WS-path channel tools
     // (reply/comment) fetch this after a successful send to append the
     // piggyback line; also handy for QA. `inbox: null` when empty.
     if (path === '/inbox' && req.method === 'GET') {
-      const inbox = senseiInboxNow()
+      // FOR THE CALLER, not for the sensei (042 DEVIATION-3). This is the
+      // surface a worker-side `reply` carrier needs: `reply` travels over the
+      // WebSocket, so there is no HTTP response to attach a header to, and the
+      // channel plugin's other tools already solve that by fetching here.
+      const caller = callerFromHeader(req)
+      const inbox = caller ? inboxNow(caller) : null
       return Response.json({ inbox, line: inbox ? renderInboxLine(inbox) : null })
     }
 
@@ -2477,63 +2766,82 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     const ackMatch = path.match(/^\/events\/(\d+)\/ack$/)
     if (ackMatch && req.method === 'POST') {
       const id = Number(ackMatch[1])
-      // recordAck rechecks membership itself; `ok` reflects what it actually
-      // cleared, so a duplicate/racing ack reads false instead of claiming a
-      // second clear of the same event.
-      const acked = await recordAck([id], 'ack')
+      // ── THE SINGLE-EVENT FORM STILL NEEDS THE CODE ──
+      //
+      // It did not, and that was a hole straight through S5. "Acking is explicit
+      // `{id, code}` pairs — THE ONLY CLEARING PATH" is worth nothing while a
+      // second endpoint clears on an id alone, and an id is knowable from the
+      // cheap summary rung: an agent (or anything else) could drain a queue it
+      // had never read, one call at a time, which is exactly what deleting
+      // `upToId` and `{ids}` was for. Found by Codex in the transition's
+      // adversarial pass (task 045); not on 043's casualty list, because the
+      // list tracked the BATCH endpoint's selection logic and this route reaches
+      // `recordAck` by its own path.
+      //
+      // A single `{id, code}` IS a pair — the contract is unchanged, only spelled
+      // with the id in the path. So this stays a convenience rather than a
+      // loophole, and `applyAck` validates it exactly as it validates a batch.
+      const body = (await req.json().catch(() => ({}))) as { code?: unknown }
+      if (typeof body.code !== 'string') {
+        return Response.json({ error: 'pass {code} — the code comes from GET /events' }, { status: 400 })
+      }
+      // `applyAck` returns what REMAINS, so the cleared set is the difference —
+      // the same derivation the batch endpoint below makes, and for the same
+      // reason: the codes decide, not the caller.
+      const before = pendingProjection.state
+      const remaining = applyAck(before, [{ id, code: body.code }])
+      const clearedIds = before.filter((e) => !remaining.some((r) => r.id === e.id)).map((e) => e.id)
+      const acked = clearedIds.length > 0 ? await recordAck(clearedIds, 'ack') : []
+      // `ok` reflects what was actually cleared, so a wrong code, an unknown id
+      // and an already-cleared event all read false rather than claiming a clear.
       return Response.json({ ok: acked.length > 0 })
     }
 
     if (path === '/events/ack' && req.method === 'POST') {
-      const body = (await req.json()) as { upToId?: number; ids?: number[]; agent?: string }
-      // Two forms (attention phase 3): `upToId` = drain-all sugar (the common
-      // pattern — everything read gets acked in one call); `ids` = selective
-      // per-event ack (handle the human, leave the machine events queued).
-      const hasIds = Array.isArray(body.ids)
-      const hasUpToId = body.upToId !== undefined
-      if (!hasUpToId && !hasIds) {
-        return Response.json({ error: 'pass upToId (drain-all) or ids (selective)' }, { status: 400 })
+      const body = (await req.json()) as { pairs?: unknown }
+      // ONE FORM (S5): explicit `{id, code}` pairs, and the code exists only in
+      // a fetch response. `upToId` (drain-all sugar) is GONE — it let an agent
+      // clear a queue it had never read, which is the failure read-before-ack
+      // exists to prevent, and E4 ("progress is defined only by ack") is worth
+      // nothing if an ack can be issued without reading. The bare `ids` form
+      // went with it for the same reason: an id is knowable from the cheap
+      // summary rung, a code is not.
+      if (!Array.isArray(body.pairs)) {
+        return Response.json({ error: 'pass pairs: [{id, code}, ...] — codes come from GET /events' }, { status: 400 })
       }
-      if (hasUpToId && hasIds) {
-        return Response.json({ error: 'upToId and ids are mutually exclusive' }, { status: 400 })
-      }
-      let toAck: StoredEvent[]
-      if (hasIds) {
-        const valid = (body.ids as unknown[]).filter((n): n is number => Number.isInteger(n) && (n as number) > 0)
-        // Empty or all-invalid ids is a caller bug — fail loud, not a silent
-        // success-shaped no-op (a model passing string ids would otherwise
-        // believe it acked and the nudge loop resumes).
-        if (valid.length === 0) {
-          return Response.json({ error: 'ids must contain positive integer event ids' }, { status: 400 })
-        }
-        const wanted = new Set(valid)
-        // Intersect with what's actually pending — acking a non-pending id is
-        // a harmless no-op, not an error (it may have been auto-cleared already).
-        toAck = pendingProjection.state.filter((e) => wanted.has(e.id))
-      } else {
-        if (!Number.isInteger(body.upToId) || (body.upToId as number) < 1) {
-          return Response.json({ error: 'upToId must be a positive integer' }, { status: 400 })
-        }
-        toAck = pendingProjection.state.filter((e) => e.id <= (body.upToId as number))
-      }
-      if (body.agent) {
-        toAck = toAck.filter((e) => resolveAgent(e) === body.agent)
-      }
-      // Report what was actually cleared by THIS call: with concurrent acks,
-      // the ids this request selected may already be owned by another writer.
-      const acked = await recordAck(
-        toAck.map((e) => e.id),
-        'ack',
+      const pairs = (body.pairs as unknown[]).filter(
+        (p): p is AckPair =>
+          typeof p === 'object' &&
+          p !== null &&
+          Number.isInteger((p as AckPair).id) &&
+          (p as AckPair).id > 0 &&
+          typeof (p as AckPair).code === 'string',
       )
-      // `remaining` is a SNAPSHOT at reply time, not a transactional count: a
-      // request that loses the race returns before the winner's append lands,
-      // so it can report one too many (review nit [J]). Left as-is on purpose —
-      // no reordering inside this handler can see another request's in-flight
-      // write; making it exact means awaiting the overlapping writers, i.e. a
-      // shared ack queue, which is disproportionate for a display-only field
-      // (and is subsumed by the phase-5 mailbox model). `acknowledged` — the
-      // field a caller acts on — is always exact.
-      return Response.json({ acknowledged: acked.length, remaining: pendingProjection.state.length })
+      // Empty or all-malformed is a caller bug — fail loud, not a
+      // success-shaped no-op. A model that passed the wrong shape would
+      // otherwise believe it acked and be nudged again forever.
+      if (pairs.length === 0) {
+        return Response.json({ error: 'pairs must contain {id, code} objects' }, { status: 400 })
+      }
+      // WHICH ids this ack actually clears is decided HERE, by matching each
+      // code against the event it names (core/codes.ts `applyAck`). A wrong
+      // code clears nothing and is not an error: fail-soft per pair, so an
+      // agent that mistyped one code keeps the nine it got right.
+      const before = pendingProjection.state
+      const cleared = applyAck(before, pairs)
+      const clearedIds = before.filter((e) => !cleared.some((c) => c.id === e.id)).map((e) => e.id)
+      await recordAck(clearedIds, 'ack')
+      // IDEMPOTENT (Leonid, 2026-08-04): how many of the REQUESTED ids are now
+      // cleared, read post-publish. Two racing ackers of one id BOTH get
+      // success — whether yours or theirs did the clearing is a distinction
+      // nobody needs, and chasing it is what the deleted claim machinery was.
+      return Response.json({
+        acknowledged: acknowledgedCount(
+          pairs.map((p) => p.id),
+          pendingProjection.state,
+        ),
+        remaining: pendingProjection.state.length,
+      })
     }
 
     // ── History endpoint ────────────────────────────────────────
@@ -2795,8 +3103,16 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
                 idle,
                 sessionId,
                 tags: msg.tags ?? [],
-                // Registering IS traffic — the session's first observed activity.
-                lastActivityAt: ports.now(),
+                // NO `lastActivityAt` (H7, ruled 2026-08-11). This line used to
+                // stamp the connect — "registering IS traffic" — and the ruling
+                // reversed it: the handshake is automatic at session start, not
+                // a choice the agent made. Absent reads as maximally quiet, so
+                // a fresh session with a waiting mailbox is nudged at once —
+                // the confirmed-desired behavior, and what makes offline sends
+                // announce on reconnect. The agent's first real frame or
+                // header-carrying call starts its clock. `connectedAt` is
+                // bookkeeping, not activity — see its note on AgentEntry.
+                connectedAt: ports.now(),
                 deliver: wsDeliver(ws),
                 close: () => {
                   ws.data.agent = undefined
@@ -2806,6 +3122,10 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
               })
               wsSend(ws, { type: 'registered', agent: msg.agent, role })
               if (role === 'user') userAgentNames.add(msg.agent)
+              // The persisted dojo-agent set feeds routeSend's queue-vs-warn
+              // decision; a worker registered THIS run must queue after it
+              // disconnects, same as one known from history.
+              if (role === 'sensei' || role === 'worker') dojoAgentNames.add(msg.agent)
               if (role === 'sensei') {
                 senseiNames.add(msg.agent)
                 // THE MAILBOX CHANGES HANDS HERE, and this is the only place it
@@ -2815,11 +3135,14 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
                 // A disconnect alone does NOT change the owner — that is the
                 // whole point of the owner/deliverable split.
                 //
-                // The queue clock comes along; the ladder does not. See
-                // attention-listener.ts's `adoptMailbox`.
-                const previousOwner = lastRegisteredSenseiName
-                lastRegisteredSenseiName = msg.agent
-                if (previousOwner !== undefined) attention.adoptMailbox(previousOwner, msg.agent)
+                // NO HANDOVER. `adoptMailbox` used to carry the armed clock from
+                // the previous owner to the new name, because a rename mid-stall
+                // otherwise stranded it on a key nothing read. The notifier needs
+                // none: `episodeOf` answers `freshEpisode()` for a name it has
+                // never seen, so a renamed sensei finds its whole mailbox
+                // unannounced and is pushed AT ONCE. The failure mode inverted
+                // from "silent for a window" to "re-announces immediately" —
+                // the accepted D4 delta, and the safe direction.
               }
               void record('register', agentStream(msg.agent), {
                 agent: msg.agent,
@@ -2911,6 +3234,28 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   await initBridge()
   await initSources()
 
+  // ── The parked-work digest (013 S9; 042 DEVIATION-5) ────────────
+  //
+  // Infra guarantees the digest EXISTS; the schedule is a dial. So it is
+  // created as a NORMAL trigger — visible in `GET /triggers`, editable,
+  // disable-able and removable exactly like any other (ruled 2026-08-05). What
+  // infra owns is that a dojo never silently has no digest at all; what the
+  // human owns is when it runs and whether they want it.
+  //
+  // Created ONCE, keyed by id: `trigger-created` for an id the projection
+  // already knows is skipped, so a restart does not resurrect a trigger someone
+  // deliberately removed... which is exactly why the check is against the
+  // projection rather than a "have I done this before" flag.
+  if (!triggerProjection.state.triggers.some((t) => t.id === DIGEST_TRIGGER_ID)) {
+    await record('trigger-created', TRIGGERS_STREAM, {
+      id: DIGEST_TRIGGER_ID,
+      cron: DIGEST_CRON,
+      agent: senseiMailboxOwner() ?? 'sensei',
+      prompt: 'parked work — daily digest',
+      actor: 'infra',
+    } satisfies TriggerCreatedData)
+  }
+
   // Start scheduled trigger jobs from projection state
   syncTriggerJobs()
 
@@ -2950,8 +3295,8 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   async function stop(): Promise<void> {
     if (stopped) return // idempotent — a double stop must not throw
     stopped = true
-    clearInterval(blockingTick)
-    clearInterval(stallTick)
+    clearInterval(notifyTick)
+    clearInterval(superviseTick)
     // Everything the schedule port was asked to run — not croner's own table,
     // which an injected port never populates.
     for (const id of [...scheduledIds]) ports.unschedule(id)

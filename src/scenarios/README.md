@@ -1,9 +1,12 @@
 # `src/scenarios/` — the red end-test suite for the one-commit transition
 
 Written **before** the transition, against the design rather than against the
-code. Every test here states a requirement from the 013 REFERENCE DESIGN (+ its
-amendment), the ruling chain on tasks 034/035/039/040/041, or the five deviations
-found by the 042 conformance audit. Task 044 built it; task 043 designed it.
+code. Every test here states a requirement from the canon — `docs/canon.md`,
+the 013 REFERENCE DESIGN as amended by the 2026-08-11 rulings (task 046) —
+the ruling chain on tasks 034/035/039/040/041, or the five deviations found by
+the 042 conformance audit. Task 044 built it; task 043 designed it; the fix
+round (task 045, 2026-08-11) extended it with the ruled amendments and the
+delivery unification.
 
 ## Running it
 

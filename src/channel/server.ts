@@ -385,39 +385,29 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (req.params.name === 'ack') {
-    // Two forms (attention phase 3): ids[] = selective, upToId = drain-all.
-    // Exactly one — passing both is ambiguous and errors here, same as the
-    // HTTP endpoint (no silent preference).
-    const rawIds = args.ids
-    if (Array.isArray(rawIds) && args.upToId !== undefined) {
-      return {
-        content: [{ type: 'text' as const, text: 'ack takes `upToId` OR `ids`, not both.' }],
-        isError: true,
-      }
-    }
-    if (Array.isArray(rawIds)) {
-      const ids = rawIds.map(Number).filter((n) => Number.isInteger(n) && n > 0)
-      if (ids.length === 0) {
-        return {
-          content: [{ type: 'text' as const, text: 'ack `ids` must contain at least one positive event id.' }],
-          isError: true,
-        }
-      }
-      return callInfraTool('ack', 'POST', '/events/ack', { ids })
-    }
-    const upToId = Number(args.upToId)
-    if (!Number.isFinite(upToId) || upToId < 1) {
+    // ONE FORM (013 S5): `{id, code}` pairs. `upToId` (drain-all) and the bare
+    // `ids` form are both gone, and the reason is the same for both — an id is
+    // knowable from a cheap summary line, a code is not, so only the pair form
+    // can mean "I read this". Nothing else clears an event any more.
+    const raw = args.pairs
+    const pairs = Array.isArray(raw)
+      ? raw
+          .map((p) => p as { id?: unknown; code?: unknown })
+          .filter((p) => Number.isInteger(Number(p?.id)) && Number(p?.id) > 0 && typeof p?.code === 'string')
+          .map((p) => ({ id: Number(p.id), code: String(p.code) }))
+      : []
+    if (pairs.length === 0) {
       return {
         content: [
           {
             type: 'text' as const,
-            text: 'ack requires `upToId` (drain-all: highest event id processed) or `ids` (selective: exact event ids).',
+            text: 'ack requires `pairs: [{id, code}, ...]`. Codes come from GET /events — fetch first, then ack what you read.',
           },
         ],
         isError: true,
       }
     }
-    return callInfraTool('ack', 'POST', '/events/ack', { upToId })
+    return callInfraTool('ack', 'POST', '/events/ack', { pairs })
   }
 
   if (req.params.name === 'infra') {

@@ -19,16 +19,19 @@ describe('buildTools', () => {
     expect(names).not.toContain('reply')
   })
 
-  test('worker gets reply + comment + memorize + infra (no send, no ack)', () => {
+  test('worker gets reply + comment + memorize + ack + infra (no send)', () => {
+    // OLD: no ack for workers. The delivery unification (ruled 2026-08-11)
+    // gave every dojo agent a mailbox, and a mailbox needs its drain: a
+    // worker's queued dispatches sit in no other drainable mailbox, so
+    // without `ack` the nudge ladder for them never ends.
     const names = buildTools('worker').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'ack', 'infra'])
     expect(names).not.toContain('send')
-    expect(names).not.toContain('ack')
   })
 
   test('user role matches worker (non-sensei has same toolset)', () => {
     const names = buildTools('user').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'ack', 'infra'])
   })
 })
 
@@ -85,13 +88,24 @@ describe('tool shapes', () => {
     expect(scope.enum).toEqual(['dojo', 'user'])
   })
 
-  test('ack requires neither field at schema level (exactly-one-of upToId|ids, handler-enforced)', () => {
-    // `required: ['upToId']` would make the selective ids-only form
-    // schema-invalid — the phase-3 contract needs both forms callable.
-    expect(ACK_TOOL.inputSchema.required).toEqual([])
+  test('ack takes ONE form: pairs of {id, code}', () => {
+    // CASUALTY (043 part 3, executed at the transition — task 045).
+    // OLD CLAIM: the schema requires NOTHING, because exactly-one-of
+    // `upToId | ids` cannot be expressed in JSON Schema and `required:
+    // ['upToId']` would have made the selective form schema-invalid.
+    // NEW CLAIM: there is one form, so it is simply required. Scenario 5 makes
+    // `{id, code}` pairs the only clearing path — an id is knowable from a
+    // cheap summary line and a code is not, which is the whole of
+    // read-before-ack. The awkwardness the old test documented was a symptom of
+    // a two-form contract that no longer exists.
+    expect(ACK_TOOL.inputSchema.required).toEqual(['pairs'])
     const props = propsOf(ACK_TOOL)
-    expect((props.upToId as { type: string }).type).toBe('number')
-    expect((props.ids as { type: string }).type).toBe('array')
+    expect((props.pairs as { type: string }).type).toBe('array')
+    expect(props.upToId).toBeUndefined()
+    expect(props.ids).toBeUndefined()
+    // The code is per EVENT, so it lives on the item, not on the call.
+    const item = (props.pairs as { items: { required: string[] } }).items
+    expect(item.required.sort()).toEqual(['code', 'id'])
   })
 })
 
@@ -195,11 +209,19 @@ describe('buildInstructions', () => {
     expect(instr).toContain("sensei's job")
   })
 
-  test('sensei instructions include ack guidance with upToId; worker does not', () => {
-    const sensei = buildInstructions('sensei', 's')
-    const worker = buildInstructions('worker', 'w')
-    expect(sensei).toContain('ack(')
-    expect(sensei).toContain('upToId')
-    expect(worker).not.toContain('ack(')
+  test('BOTH roles are taught the pair form and the fetch that precedes it', () => {
+    // CASUALTY twice over. OLD CLAIM (pre-transition): the guidance names
+    // `upToId`. FIRST REWRITE: the pair form + the fetch, sensei only —
+    // workers had no mailbox to drain. SECOND (delivery unification, ruled
+    // 2026-08-11): workers have mailboxes and the ack tool now, so guidance
+    // that stayed sensei-only would leave every worker nudged forever about a
+    // queue it was never taught to clear.
+    for (const role of ['sensei', 'worker'] as const) {
+      const instr = buildInstructions(role, 'x')
+      expect(instr).toContain('ack(')
+      expect(instr).toContain('pairs')
+      expect(instr).toContain('GET /events')
+      expect(instr).not.toContain('upToId')
+    }
   })
 })

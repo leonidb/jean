@@ -334,16 +334,19 @@ describe('infrastructure server', () => {
       setTimeout(() => reject(new Error('timeout')), 3000)
     })
 
-    // Send a message via HTTP
+    // Send a message via HTTP. OLD (fix-round casualty, licensed by the
+    // delivery-unification ruling 2026-08-11): {delivered: true} plus the raw
+    // frame at the socket. The send QUEUES in the worker's mailbox now; what
+    // reaches the socket is the notifier's push, and the content is fetched.
     const sendRes = await fetch(`${BASE}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ to: 'routed-agent', from: 'test', text: 'hello routed' }),
     })
-    const sendData = (await sendRes.json()) as { delivered: boolean }
-    expect(sendData.delivered).toBe(true)
+    const sendData = (await sendRes.json()) as { queued?: boolean }
+    expect(sendData.queued).toBe(true)
 
-    // Wait for the message to arrive
+    // Wait for the push to arrive
     await new Promise<void>((resolve) => {
       ws.onmessage = (e) => {
         messages.push(JSON.parse(String(e.data)))
@@ -352,10 +355,15 @@ describe('infrastructure server', () => {
       setTimeout(resolve, 1000)
     })
 
-    const delivered = messages.find((m) => m.type === 'deliver')
-    expect(delivered).toBeDefined()
-    expect(delivered?.text).toBe('hello routed')
-    expect(delivered?.from).toBe('test')
+    const pushed = messages.find((m) => m.type === 'deliver' && m.from === 'infra')
+    expect(pushed).toBeDefined()
+
+    const box = (await (await fetch(`${BASE}/events?for=routed-agent`)).json()) as {
+      events: Array<{ type: string; data: { text?: string; from?: string } }>
+    }
+    const queued = box.events.find((e) => e.type === 'send' && e.data.text === 'hello routed')
+    expect(queued).toBeDefined()
+    expect(queued?.data.from).toBe('test')
 
     ws.close()
   })

@@ -121,9 +121,17 @@ afterAll(async () => {
  *
  * THE FETCH IS PART OF THE SCENARIO, not setup noise: S5 makes the code
  * obtainable only by reading, so a test that clears without fetching would be
- * testing a path the design deletes. Today `/events` returns no `code`, so this
- * throws — the whole file is red on the ack contract before it is red on
- * concurrency, which is the honest order.
+ * testing a path the design deletes.
+ *
+ * AND IT IS ADDRESSED (`?for=`), which is not a detail. The fetch rung
+ * distinguishes an agent reading ITS MAILBOX from an observer reading the queue:
+ * only the addressed read is a delivery, and only a delivery puts a
+ * `deliveredVia` mark in the ledger for the first ack below to carry. The first
+ * draft of this helper read `/events` unaddressed and passed only because the
+ * stamp was unconditional — which meant a `jean status` recorded a delivery to
+ * nobody, and first-delivery-wins made whichever observer looked first the
+ * recorded carrier. Fixed in the server; the fetch here says who is reading,
+ * which is what the scenario meant all along.
  */
 async function seed(title: string): Promise<{ id: number; code: string }> {
   await fetch(`${base}/tasks`, {
@@ -131,7 +139,7 @@ async function seed(title: string): Promise<{ id: number; code: string }> {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ title, description: '', queue: 'builder', actor: 'test' }),
   })
-  const fetched = (await (await fetch(`${base}/events`)).json()) as {
+  const fetched = (await (await fetch(`${base}/events?for=${SENSEI}`)).json()) as {
     events: { id: number; code?: string; data: { title?: string } }[]
   }
   const found = fetched.events.find((e) => e.data?.title === title)

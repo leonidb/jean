@@ -123,6 +123,16 @@ export type UpdateTaskRequest = {
 export type UpdateStatusRequest = {
   status: string
   actor?: string
+  /** What the caller claims to be. Only ever used to APPLY a restriction, never
+   *  to lift one: an unregistered caller cannot escape the worker rules by
+   *  omitting this, and cannot acquire the sensei's powers by asserting them
+   *  (see the actor gate in server.ts). */
+  actorRole?: string
+  /** Set when parking (`→ waiting`) — 013 S7. */
+  blockedOn?: 'sensei' | 'human' | 'external' | 'time'
+  blockedNote?: string
+  /** ISO instant, set when parking on `time` (H3). See Task.resumeAt. */
+  resumeAt?: string
 }
 
 // ── Union types ───────────────────────────────────────────────────

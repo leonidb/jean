@@ -550,12 +550,17 @@ async function cmdSend(agent?: string, text?: string) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ to: agent, from: 'cli', text }),
   })
-  const result = (await res.json()) as { delivered: boolean }
+  const result = (await res.json()) as { delivered?: boolean; queued?: boolean }
 
-  if (result.delivered) {
+  // Dojo agents queue (delivery unification, 2026-08-11): the message sits in
+  // the target's mailbox and infra announces it — connected now or on its next
+  // connect. Adapter targets (the bridge, peers) still answer delivered/not.
+  if (result.queued) {
+    console.log(`Message queued for "${agent}" — infra will announce it (now if connected, else on reconnect).`)
+  } else if (result.delivered) {
     console.log(`Message sent to "${agent}".`)
   } else {
-    console.log(`Agent "${agent}" is not connected. Message dropped.`)
+    console.log(`No agent or peer named "${agent}" is known here. Nothing was sent — check the name (jean agent list).`)
   }
 }
 
