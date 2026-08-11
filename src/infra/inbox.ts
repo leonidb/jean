@@ -234,6 +234,12 @@ export function renderInboxWake(inbox: Inbox): string {
     // an agent are a surface like any other — leaving the old text in place
     // would have every wake teach two calls that now 400, discovered in the
     // middle of triage.
-    `Full payloads: GET /events — each carries an ack code. When done: ack({pairs: [{id, code}, ...]}) for what you actually handled. Reading is not acking; nothing clears until you ack it.`,
+    //
+    // TEACHES THE DRILL-DOWN (task 052): the summary above IS the full
+    // picture; the next gesture is fetching the group being handled — the
+    // blocking `from` keys and queued byType keys are fetchable verbatim —
+    // not pulling everything by reflex. One line, still (the wake test parses
+    // the JSON between header and footer).
+    `Drill down: GET /events?from=<sender> / ?type=<byType key> / ?ids=<ids> — the keys above work verbatim; GET /events fetches everything. Each fetched event carries its ack code. Ack what you have handled or decided on: ack({pairs: [{id, code}, ...]}). Reading is not acking; nothing clears until you ack it.`,
   ].join('\n')
 }

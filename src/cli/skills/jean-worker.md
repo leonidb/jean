@@ -27,19 +27,27 @@ sensei uses; only the dials differ.
 
 When an announcement arrives (or the inbox line shows a queue):
 
-1. **Fetch** — `infra GET /events`. Returns every waiting event in full, each
-   with its ack code.
-2. **Act** on what it says — usually: load the task and start working, or
-   answer via `reply`.
+1. **Fetch** — `infra GET /events`: every waiting event in full, each with its
+   ack code. With more than a handful waiting (~5), read a summary first —
+   `infra GET /inbox` for the grouped picture (blocking per sender, queued as
+   type counts), or `infra GET /events/summary` for one line per event — then
+   fetch just what you are about to handle: `GET /events?ids=41,42` (ids from
+   the summary lines), `?from=<sender>` (a blocking group), or `?type=<key>`
+   (a queued group — the inbox's byType key, verbatim). On an `?ids=` request,
+   ids not in your mailbox come back in an explicit `missing` array.
+2. **Act** on what each event says — usually: load the task and start
+   working, or answer via `reply`.
 3. **Ack what you've read and decided about** — `ack({pairs: [{id, code},
    ...]})`. Reading is not acking: nothing clears until you ack it, and infra
-   keeps nudging you on a backoff ladder while anything sits unacked.
-   Answering via `reply` does not clear anything either — ack is the only
-   clearing path.
+   keeps re-announcing on a backoff ladder while anything sits unacked — that
+   is the engine doing its job, not a deadline. Ack an event because you have
+   handled it or decided about it, never just to quiet the queue. Answering
+   via `reply` does not clear anything either — ack is the only clearing
+   path.
 
 Messages sent while your session was down are not lost: they queue in your
 mailbox and are announced the moment you reconnect. Being away never costs you
-a dispatch — but the queue only drains when you ack.
+a dispatch — the mailbox holds everything until you ack it.
 
 ## Pre-existing knowledge — search before you work (and before you grep)
 

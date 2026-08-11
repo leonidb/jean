@@ -184,7 +184,7 @@ const AGENT_HEADERS = { 'x-jean-agent': HEADER_AGENT_NAME } as const
 // know" beats a slightly cleaner failure message).
 function appendInboxLine(text: string, line: string | null): string {
   if (!line) return text
-  return `${text}\n\n[inbox] ${line} — not acked; drain when you finish the current step.`
+  return `${text}\n\n[inbox] ${line} — not acked; review when you finish the current step.`
 }
 
 /** For the WS-path `comment` tool whose transport carries no response: one
