@@ -94,6 +94,108 @@ export const MEMORIZE_TOOL: Tool = {
   },
 }
 
+/**
+ * The read ladder as ONE operation (task 057; spec = task 056's design
+ * comments). First instance of the noun-tool pattern: one tool per protocol
+ * noun, operations as a parameter, a separate tool only where a contract is
+ * load-bearing at the call site (`ack` stays separate — it is the write, and
+ * its description IS the read-before-ack contract).
+ *
+ * TWO PROPERTIES ARE THE POINT, not incidental:
+ * (1) DEFAULT view:'summary' — the canonical opening move (052) is the
+ *     zero-argument call, mechanical rather than remembered.
+ * (2) The description carries CONTRACTS ONLY — what, params, invariants.
+ *     When/why sentences live in the skills; that boundary is the guard
+ *     against tool-description bloat replacing skill bloat.
+ *
+ * Pure plugin-side mapping (resolveInboxCall below): view → existing
+ * endpoint, selector → query param. Zero new server surface.
+ */
+export const INBOX_TOOL: Tool = {
+  name: 'inbox',
+  description:
+    'Read your mailbox — the one queue behind every announcement, cheapest view first. ' +
+    "'counts': numbers by priority — is anything worth stopping for. " +
+    "'summary' (default): one line per event with ids — the recommended first read. " +
+    "'grouped': {inbox, line} — the grouping a nudge shows: blocking per sender, queued by type. " +
+    "'fetch': full payloads plus each event's ack code — the only view with codes; `ack` needs them. " +
+    "With view:'fetch', narrow with ONE selector: `ids` (from any summary), `from` (a blocking group's sender key), or `type` (a queued byType key, verbatim). " +
+    "Ids no longer in your mailbox come back in `missing` — acked-since-summary is normal; check, don't assume. " +
+    'Fetching is not acking.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      view: {
+        type: 'string',
+        enum: ['counts', 'summary', 'grouped', 'fetch'],
+        description: "Which view of the mailbox. Default: 'summary'.",
+      },
+      ids: {
+        type: 'array',
+        items: { type: 'number' },
+        description: "view:'fetch' only — exactly these event ids.",
+      },
+      from: { type: 'string', description: "view:'fetch' only — one blocking group, by its sender key." },
+      type: { type: 'string', description: "view:'fetch' only — one queued group, by its byType key." },
+    },
+    required: [],
+  },
+}
+
+const INBOX_VIEWS = ['counts', 'summary', 'grouped', 'fetch'] as const
+type InboxView = (typeof INBOX_VIEWS)[number]
+
+const INBOX_PATHS: Record<InboxView, string> = {
+  counts: '/events/counts',
+  summary: '/events/summary',
+  grouped: '/inbox',
+  fetch: '/events',
+}
+
+/**
+ * Map an `inbox` call to the HTTP path it wraps, or a teaching error.
+ *
+ * Pure so the mapping is testable without the MCP subprocess. Validation
+ * mirrors the server's own 051 rules (one selector, loud on malformed) —
+ * the flat JSON schema cannot express "selectors ride view:'fetch' only",
+ * so that contract is enforced here with the remedy named, the same
+ * enforcement class as one-selector-per-request on the server.
+ */
+export function resolveInboxCall(args: Record<string, unknown>): { path: string } | { error: string } {
+  const view = args.view === undefined ? 'summary' : args.view
+  if (typeof view !== 'string' || !(INBOX_VIEWS as readonly string[]).includes(view)) {
+    return { error: `inbox: unknown view "${String(args.view)}" — pass one of counts, summary, grouped, fetch.` }
+  }
+  const present = (['ids', 'from', 'type'] as const).filter((k) => args[k] !== undefined)
+  if (present.length > 0 && view !== 'fetch') {
+    return {
+      error: `inbox: \`${present.join('`/`')}\` narrows view:'fetch' only — pass view:'fetch', or drop the selector.`,
+    }
+  }
+  if (present.length > 1) {
+    return { error: 'inbox: one selector per call — ids, from, or type.' }
+  }
+  const [selector] = present
+  if (selector === 'ids') {
+    const ids = args.ids
+    // Safe-integer bound mirrors the server's own (051): two distinct unsafe
+    // ids collapse to one float, so refuse here with the teaching error
+    // rather than relaying a server 400.
+    if (!Array.isArray(ids) || ids.length === 0 || !ids.every((n) => Number.isSafeInteger(n) && (n as number) > 0)) {
+      return { error: 'inbox: `ids` must be a non-empty array of event ids, e.g. {view: "fetch", ids: [41, 42]}.' }
+    }
+    return { path: `/events?ids=${ids.join(',')}` }
+  }
+  if (selector === 'from' || selector === 'type') {
+    const value = optionalString(args, selector)
+    if (!value) {
+      return { error: `inbox: \`${selector}\` needs a non-empty key — the grouped view shows the keys.` }
+    }
+    return { path: `/events?${selector}=${encodeURIComponent(value)}` }
+  }
+  return { path: INBOX_PATHS[view as InboxView] }
+}
+
 export const ACK_TOOL: Tool = {
   name: 'ack',
   description:
@@ -148,15 +250,16 @@ export const INFRA_MAX_BODY_BYTES = 48 * 1024
 export const INFRA_MAX_BODY_KB = INFRA_MAX_BODY_BYTES / 1024
 
 const SENSEI_INFRA_DESCRIPTION =
-  'Call the Jean infrastructure HTTP API. Use this for board, tasks, triggers, events, playbooks, permissions. ' +
+  'Call the Jean infrastructure HTTP API — the escape hatch for everything without a dedicated tool: ' +
+  'board, tasks, triggers, playbooks, permissions. The mailbox has its own tools (`inbox`, `ack`). ' +
   'Path must start with "/" (e.g. "/board", "/tasks", "/triggers"). ' +
   `Responses above ~${INFRA_MAX_BODY_KB}KB are truncated — always paginate large endpoints (e.g. "/history?last=20").`
 
 const READONLY_INFRA_DESCRIPTION =
-  'Read-only Jean infrastructure HTTP API (GET only). Use this to look up context for the work you are doing — ' +
-  'task comments, the board, related tasks, connected agents. Most useful: ' +
+  'Read-only Jean infrastructure HTTP API (GET only) — the escape hatch for lookups without a dedicated tool. ' +
+  'Use it for the context of the work you are doing: task comments, the board, related tasks, connected agents. Most useful: ' +
   '`/tasks/<id>?include=comments` returns a task plus the curated comments; add `messages` for the full correspondence too. ' +
-  'Use these when you need "what was discussed/decided about this task". ' +
+  'Use these when you need "what was discussed/decided about this task". The mailbox has its own tools (`inbox`, `ack`). ' +
   `Responses above ~${INFRA_MAX_BODY_KB}KB are truncated — paginate with \`?last=N\` on history endpoints. ` +
   "State changes are the sensei's job; if you need something written, ask via `reply`."
 
@@ -192,15 +295,17 @@ export function buildInfraTool(role: AgentRole): Tool {
   }
 }
 
-/** The MCP tool list exposed to Claude for a given role. */
+/** The MCP tool list exposed to Claude for a given role. `inbox` precedes
+ *  `ack` deliberately: the read comes before the write it enables. */
 export function buildTools(role: AgentRole): Tool[] {
-  if (role === 'sensei') return [SEND_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, ACK_TOOL, buildInfraTool(role)]
+  if (role === 'sensei') return [SEND_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, INBOX_TOOL, ACK_TOOL, buildInfraTool(role)]
   // Workers ack too (delivery unification, ruled 2026-08-11: the mailbox is
   // for every agent). A worker's mailbox queues its dispatches now, and its
-  // events sit in NO other drainable mailbox (a sensei-authored send is
+  // events sit in NO other clearable mailbox (a sensei-authored send is
   // self-excluded from the sensei's own) — a worker without `ack` would be
-  // nudged about its queue forever with no way to clear it.
-  return [REPLY_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, ACK_TOOL, buildInfraTool(role)]
+  // nudged about its queue forever with no way to clear it. `inbox` is
+  // role-uniform for the same reason: the mailbox is one mechanism (E6).
+  return [REPLY_TOOL, COMMENT_TOOL, MEMORIZE_TOOL, INBOX_TOOL, ACK_TOOL, buildInfraTool(role)]
 }
 
 /** Read a tool argument that should be a non-empty string. Non-string, empty, or whitespace-only values return undefined. */
@@ -230,6 +335,24 @@ export function formatInfraResponse(
   return { text: isError ? `${status} ${statusText}\n${body}` : body, isError }
 }
 
+/**
+ * Interpret POST /send's response for the `send` tool (task 057's codex pass).
+ *
+ * TWO SUCCESS SHAPES, not one: an adapter-delivered send (bridge, peer,
+ * trigger surfaces) answers `{delivered: true}`; a dojo-agent send answers
+ * `{queued: true}` — the mailbox is the delivery, and the recipient's
+ * notifier announces it (offline recipients hear on reconnect). The plugin
+ * read ONLY `delivered` from the day of the unification, so every queued
+ * dispatch reported "NOT delivered — nothing was sent" while the message sat
+ * safely in the mailbox: a false failure on the system's most common send,
+ * latent because this dojo's live infra predates queued sends. Found by the
+ * 057 adversarial pass.
+ */
+export function sendOutcome(body: { delivered?: boolean; queued?: boolean }): { ok: boolean; queued: boolean } {
+  const queued = body.queued === true
+  return { ok: queued || body.delivered === true, queued }
+}
+
 /** Resolve the taskId to attach to a reply tool call. Explicit arg wins; fall back to the most recent deliver's taskId. */
 export function resolveReplyTaskId(
   args: Record<string, unknown>,
@@ -244,14 +367,14 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
     return [
       `You are the sensei (orchestrator) in the Jean system, agent "${agentName}".`,
       `When you receive any message from Jean, FIRST load BOTH the jean-sensei skill (orchestrator behavior) AND the context skill (wiki-awareness + memorize). Then follow jean-sensei's instructions.`,
-      `Use the \`send\` tool to message any agent or channel (including the human via the Slack channel). Use the \`comment\` tool to record durable decisions/context on a task (visible to workers via ?include=comments). Use the \`infra\` tool for all other API calls (board, tasks, triggers, playbooks, events).`,
-      `After reading the events that prompted a notification — and deciding what (if anything) to do about each — ack them: any fetch (\`GET /events\`, or a selective \`?ids=\`/\`?from=\`/\`?type=\` read) carries each event's ack code; then \`ack({pairs: [{id, code}, ...]})\`. Fetching is not acking, and nothing else clears an event — answering a human does not clear their message; ack it like everything else. Ack also when you choose to "hold"; "hold and acked" is a normal verdict, "hold without ack" is the bug that produces re-notification loops.`,
+      `Use the \`send\` tool to message any agent or channel (including the human via the Slack channel). Use the \`comment\` tool to record durable decisions/context on a task (visible to workers via ?include=comments). Read your mailbox with the \`inbox\` tool; clear events with \`ack\`. Use the \`infra\` tool for the rest of the API (board, tasks, triggers, playbooks).`,
+      `After reading the events that prompted a notification — and deciding what (if anything) to do about each — ack them; the codes come from \`inbox({view: 'fetch'})\`. Fetching is not acking, and nothing else clears an event — answering a human does not clear their message; ack it like everything else. The jean-sensei skill carries the triage flow.`,
     ].join('\n')
   }
   return [
     `You are connected to the Jean orchestration system as agent "${agentName}".`,
     `When you receive any message from Jean, FIRST load the jean-worker skill, then follow its instructions.`,
-    `Messages to you land in YOUR MAILBOX on infra; what reaches your session is infra's announcement (a push or the inbox line on a response). When one arrives: fetch your mailbox — \`GET /events\` for the whole of it, or a selective \`?ids=\`/\`?from=\`/\`?type=\` read for just the part you are handling (each fetched event carries its full content and an ack code) — act on what it says, then \`ack({pairs: [{id, code}, ...]})\` for what you handled or decided about. Reading is not acking — infra keeps re-announcing while anything sits unacked.`,
+    `Messages to you land in YOUR MAILBOX on infra; what reaches your session is infra's announcement (a push or the inbox line on a response). When one arrives: read the mailbox with the \`inbox\` tool (\`view: 'fetch'\` returns full payloads with ack codes), act on what it says, then \`ack({pairs: [{id, code}, ...]})\` for what you handled or decided about. Reading is not acking — infra keeps re-announcing while anything sits unacked.`,
     `Use the \`reply\` tool for conversation with the orchestrator (including short acks, questions, "still working"). Use the \`comment\` tool when you have something substantive worth recording on a task — findings, blocker resolved, phase done. Comments are curated; replies are chat.`,
     `Use the \`infra\` tool (read-only — GET only) to look up context: \`GET /tasks/<id>?include=comments,messages\` for both the curated comments and the full correspondence on a task you're working on, \`GET /board\` for related tasks, \`GET /agents\` to see who else is connected. State changes are the sensei's job — if you need something written, ask via \`reply\`.`,
     `ALWAYS end a turn with \`reply\` — your stdout is invisible to the sensei, and \`agent-idle\` does not wake it. If you finish, hit a blocker, or need to stop, call \`reply\` before stopping. Not doing so means the sensei never learns anything happened.`,

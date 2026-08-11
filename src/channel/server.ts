@@ -19,7 +19,15 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { type AgentRole, type DeliverMsg, type ErrorMsg, isAgentRole, type RegisteredMsg } from '../infra/protocol.ts'
 import { findDojoRootFrom, readRuntimeFiles } from '../probe.ts'
-import { buildInstructions, buildTools, formatInfraResponse, optionalString, resolveReplyTaskId } from './tools.ts'
+import {
+  buildInstructions,
+  buildTools,
+  formatInfraResponse,
+  optionalString,
+  resolveInboxCall,
+  resolveReplyTaskId,
+  sendOutcome,
+} from './tools.ts'
 
 /**
  * Identity is delivered either by env (set per-launch by `jean agent start`) or,
@@ -318,7 +326,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // hallucinated address must not read as a successful send.
     const base = discoverInfraHttpBase()
     if (base === null) return undelivered('Message')
-    let delivered = false
+    let outcome = { ok: false, queued: false }
     let inboxLine: string | null = null
     try {
       const res = await fetch(`${base}/send`, {
@@ -336,14 +344,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         }),
       })
       inboxLine = res.headers.get('x-jean-inbox')
-      delivered = ((await res.json()) as { delivered?: boolean }).delivered ?? false
+      outcome = sendOutcome((await res.json()) as { delivered?: boolean; queued?: boolean })
     } catch (err) {
       return {
         content: [{ type: 'text' as const, text: `send failed — request to infra errored: ${err}` }],
         isError: true,
       }
     }
-    if (!delivered) {
+    if (!outcome.ok) {
       return {
         content: [
           {
@@ -355,11 +363,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
     }
     const attachNote = attachments?.length ? ` with ${attachments.length} attachment(s)` : ''
+    // A queued send is a SUCCESS with a different tense: it sits in the
+    // recipient's mailbox and their notifier announces it (on reconnect if
+    // they are offline). Saying "sent" for both would be fine; naming the
+    // queue keeps the agent's model of offline recipients honest.
+    const verb = outcome.queued ? `Queued to ${to}'s mailbox` : `Sent to ${to}`
     return {
       content: [
         {
           type: 'text' as const,
-          text: appendInboxLine(`Sent to ${to}${taskId ? ` (task ${taskId})` : ''}${attachNote}.`, inboxLine),
+          text: appendInboxLine(`${verb}${taskId ? ` (task ${taskId})` : ''}${attachNote}.`, inboxLine),
         },
       ],
     }
@@ -382,6 +395,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       scope,
       ...(taskId && { taskId }),
     })
+  }
+
+  if (req.params.name === 'inbox') {
+    // The read ladder as one operation (task 057): pure mapping onto the
+    // existing HTTP surface — the resolved GET carries this agent's identity
+    // header, so it is an addressed read of its OWN mailbox, exactly as the
+    // hand-built `infra` call was. Validation (selectors ride view:'fetch'
+    // only, one per call) lives in resolveInboxCall where it is unit-tested.
+    const resolved = resolveInboxCall(args)
+    if ('error' in resolved) {
+      return { content: [{ type: 'text' as const, text: resolved.error }], isError: true }
+    }
+    return callInfraTool('inbox', 'GET', resolved.path)
   }
 
   if (req.params.name === 'ack') {

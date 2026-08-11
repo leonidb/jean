@@ -5,17 +5,20 @@ import {
   buildInstructions,
   buildTools,
   formatInfraResponse,
+  INBOX_TOOL,
   INFRA_MAX_BODY_BYTES,
   MEMORIZE_TOOL,
   REPLY_TOOL,
+  resolveInboxCall,
   resolveReplyTaskId,
   SEND_TOOL,
+  sendOutcome,
 } from './tools.ts'
 
 describe('buildTools', () => {
-  test('sensei gets send + comment + memorize + ack + infra (no reply)', () => {
+  test('sensei gets send + comment + memorize + inbox + ack + infra (no reply)', () => {
     const names = buildTools('sensei').map((t) => t.name)
-    expect(names).toEqual(['send', 'comment', 'memorize', 'ack', 'infra'])
+    expect(names).toEqual(['send', 'comment', 'memorize', 'inbox', 'ack', 'infra'])
     expect(names).not.toContain('reply')
   })
 
@@ -25,13 +28,13 @@ describe('buildTools', () => {
     // worker's queued dispatches sit in no other drainable mailbox, so
     // without `ack` the nudge ladder for them never ends.
     const names = buildTools('worker').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'ack', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'inbox', 'ack', 'infra'])
     expect(names).not.toContain('send')
   })
 
   test('user role matches worker (non-sensei has same toolset)', () => {
     const names = buildTools('user').map((t) => t.name)
-    expect(names).toEqual(['reply', 'comment', 'memorize', 'ack', 'infra'])
+    expect(names).toEqual(['reply', 'comment', 'memorize', 'inbox', 'ack', 'infra'])
   })
 })
 
@@ -209,19 +212,137 @@ describe('buildInstructions', () => {
     expect(instr).toContain("sensei's job")
   })
 
-  test('BOTH roles are taught the pair form and the fetch that precedes it', () => {
-    // CASUALTY twice over. OLD CLAIM (pre-transition): the guidance names
-    // `upToId`. FIRST REWRITE: the pair form + the fetch, sensei only —
-    // workers had no mailbox to drain. SECOND (delivery unification, ruled
-    // 2026-08-11): workers have mailboxes and the ack tool now, so guidance
-    // that stayed sensei-only would leave every worker nudged forever about a
-    // queue it was never taught to clear.
+  test('BOTH roles are taught where codes come from and that ack clears', () => {
+    // CASUALTY three times over. OLD CLAIM (pre-transition): the guidance
+    // names `upToId`. FIRST REWRITE: the pair form + the fetch, sensei only —
+    // workers had no mailbox to clear. SECOND (delivery unification, ruled
+    // 2026-08-11): both roles taught the hand-built `GET /events` fetch.
+    // THIRD (task 057): the mechanics live in the tool definitions — the
+    // pair form's canonical home is ACK_TOOL's own description, and the
+    // instruction text points at `inbox({view: 'fetch'})` as the code
+    // source rather than a hand-built URL.
     for (const role of ['sensei', 'worker'] as const) {
       const instr = buildInstructions(role, 'x')
-      expect(instr).toContain('ack(')
-      expect(instr).toContain('pairs')
-      expect(instr).toContain('GET /events')
+      expect(instr).toContain('ack')
+      expect(instr).toContain('inbox')
+      expect(instr).not.toContain('GET /events')
       expect(instr).not.toContain('upToId')
     }
+  })
+})
+
+// ── The `inbox` tool (task 057) — the read ladder as one operation ──
+//
+// STATUS AT WRITING: RED — INBOX_TOOL and resolveInboxCall do not exist yet.
+// The spec is task 056's three design comments; the two properties that are
+// the point: (1) the ZERO-ARGUMENT call lands on the summary — 052's
+// canonical opening move as the path of least resistance; (2) `fetch` is the
+// only view issuing ack codes, and the 051 selectors ride it verbatim.
+
+describe('INBOX_TOOL — one read tool, contracts only', () => {
+  test('the view parameter covers the ladder, and nothing is required', () => {
+    const view = (INBOX_TOOL.inputSchema.properties as Record<string, { enum?: string[] }>).view
+    expect(view?.enum).toEqual(['counts', 'summary', 'grouped', 'fetch'])
+    expect(INBOX_TOOL.inputSchema.required ?? []).toEqual([])
+  })
+
+  test('the description carries the load-bearing contracts', () => {
+    // Contracts, not judgment: default view, codes-only-on-fetch, one
+    // selector, the `missing` semantics, fetching-is-not-acking. The
+    // when/why sentences live in the skills — asserting their ABSENCE by
+    // keyword would be brittle, so only the contract presence is pinned.
+    const d = INBOX_TOOL.description ?? ''
+    expect(d).toContain("'summary' (default)")
+    expect(d).toContain('ack code')
+    expect(d).toContain('ONE selector')
+    expect(d).toContain('missing')
+    expect(d).toContain('Fetching is not acking')
+  })
+
+  test('both roles carry inbox — the mailbox is role-uniform', () => {
+    for (const role of ['sensei', 'worker', 'user'] as const) {
+      expect(buildTools(role).map((t) => t.name)).toContain('inbox')
+    }
+  })
+})
+
+describe('resolveInboxCall — the view → endpoint mapping, pure', () => {
+  test('THE ZERO-ARGUMENT CALL is the summary — the canonical opening move needs no memory', () => {
+    expect(resolveInboxCall({})).toEqual({ path: '/events/summary' })
+  })
+
+  test('each view maps to its endpoint', () => {
+    expect(resolveInboxCall({ view: 'counts' })).toEqual({ path: '/events/counts' })
+    expect(resolveInboxCall({ view: 'summary' })).toEqual({ path: '/events/summary' })
+    expect(resolveInboxCall({ view: 'grouped' })).toEqual({ path: '/inbox' })
+    expect(resolveInboxCall({ view: 'fetch' })).toEqual({ path: '/events' })
+  })
+
+  test('the 051 selectors ride view:fetch verbatim', () => {
+    expect(resolveInboxCall({ view: 'fetch', ids: [41, 42] })).toEqual({ path: '/events?ids=41,42' })
+    expect(resolveInboxCall({ view: 'fetch', from: 'chat-human' })).toEqual({ path: '/events?from=chat-human' })
+    expect(resolveInboxCall({ view: 'fetch', type: 'worker:reply' })).toEqual({
+      path: '/events?type=worker%3Areply',
+    })
+  })
+
+  test('selector values are URL-encoded — a key is data, not path syntax', () => {
+    expect(resolveInboxCall({ view: 'fetch', from: 'chat 42&x=y' })).toEqual({
+      path: '/events?from=chat%2042%26x%3Dy',
+    })
+  })
+
+  test('a selector without view:fetch is refused with the remedy named', () => {
+    const r = resolveInboxCall({ from: 'chat-human' })
+    expect('error' in r).toBe(true)
+    if ('error' in r) expect(r.error).toContain("view:'fetch'")
+  })
+
+  test('two selectors have no defined precedence — refused', () => {
+    const r = resolveInboxCall({ view: 'fetch', ids: [1], from: 'x' })
+    expect('error' in r).toBe(true)
+    if ('error' in r) expect(r.error).toContain('one selector')
+  })
+
+  test('malformed ids are refused, not repaired — empty list, non-integers, junk', () => {
+    for (const ids of [[], [1.5], ['41'], [0], [-3]]) {
+      const r = resolveInboxCall({ view: 'fetch', ids })
+      expect('error' in r).toBe(true)
+    }
+  })
+
+  test('an empty selector string is refused', () => {
+    expect('error' in resolveInboxCall({ view: 'fetch', from: '  ' })).toBe(true)
+    expect('error' in resolveInboxCall({ view: 'fetch', type: '' })).toBe(true)
+  })
+
+  test('an unknown view is refused with the valid views named', () => {
+    const r = resolveInboxCall({ view: 'all' })
+    expect('error' in r).toBe(true)
+    if ('error' in r) expect(r.error).toContain('counts')
+  })
+})
+
+describe('buildInstructions — mechanics live in tool definitions now', () => {
+  test('both roles point at the inbox tool, not at hand-built event paths', () => {
+    for (const role of ['sensei', 'worker'] as const) {
+      const text = buildInstructions(role, 'x')
+      expect(text).toContain('`inbox`')
+      // The retirement that makes the swap a compaction rather than an
+      // addition: the instruction text no longer hand-builds event URLs.
+      expect(text).not.toContain('GET /events')
+    }
+  })
+})
+
+describe('sendOutcome — queued IS a success (the unification made two success shapes)', () => {
+  test('adapter-delivered and mailbox-queued both read as ok', () => {
+    expect(sendOutcome({ delivered: true })).toEqual({ ok: true, queued: false })
+    expect(sendOutcome({ queued: true })).toEqual({ ok: true, queued: true })
+  })
+
+  test('neither flag means the send truly failed — unknown name, offline peer', () => {
+    expect(sendOutcome({})).toEqual({ ok: false, queued: false })
+    expect(sendOutcome({ delivered: false })).toEqual({ ok: false, queued: false })
   })
 })
