@@ -48,7 +48,7 @@ import { createSupervisor, type SupervisionView } from './core/supervision.ts'
 import { planTriggers } from './core/triggers.ts'
 import { viewsFor } from './core/views.ts'
 import { buildDigest } from './digest.ts'
-import { buildInbox, renderInboxLine, renderInboxWake } from './inbox.ts'
+import { buildInbox, inboxGroupOf, renderInboxLine, renderInboxWake } from './inbox.ts'
 import { commitConsolidation, type LibrarianPhase, recoverWikiLayout } from './librarian.ts'
 import { type AgentSession, classifySession, envMs } from './liveness.ts'
 import { createPeerDeliver, identityFromConfig, loadPeers, type Peer, peerLiveness } from './peers.ts'
@@ -850,11 +850,35 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     }
   }
 
-  /** Role lookup: live registry first, then the persisted user set. ONE
-   *  binding, shared by the blocking classification and the inbox, so the two
-   *  cannot drift apart — which is the whole point of `isUserSender` being
-   *  shared in the first place. */
-  const roleOf: RoleOf = (n) => agents.get(n)?.role ?? (userAgentNames.has(n) ? 'user' : undefined)
+  /** Role lookup: live registry first, then the persisted user and sensei
+   *  sets. ONE binding, shared by the blocking classification and the inbox,
+   *  so the two cannot drift apart — which is the whole point of
+   *  `isUserSender` being shared in the first place.
+   *
+   *  THE SENSEI FALLBACK WAS MISSING until task 051 — `RoleOf`'s own contract
+   *  (queue.ts) always said "the live registry plus the persisted user/sensei
+   *  sets", but only the user set was ever consulted (comment-vs-code drift,
+   *  the same class 050's owner fix closed). Consequence: a DISCONNECTED
+   *  sensei resolved to no role, `ruleFor` fell through to the worker rule,
+   *  and the owner's mailbox silently shrank from universal to the
+   *  concern-slice while nobody was attached — even though the owner outlives
+   *  the connection precisely so its mailbox keeps working (task 040's
+   *  owner/deliverable split; `notifyView` was already patching this gap for
+   *  the threshold, but nothing patched membership). Found by the s04
+   *  selective-fetch suite, whose ledger cases read the mailbox of a
+   *  deliberately-disconnected sensei.
+   *
+   *  PRECEDENCE, considered at the codex pass and held: a name in BOTH
+   *  persisted sets (registered user once, sensei later — nothing forbids the
+   *  reuse) resolves 'user' here while disconnected, costing it the universal
+   *  mailbox until it reconnects. Deliberate: the opposite order would let a
+   *  once-sensei name demote a waiting HUMAN's messages out of the blocking
+   *  classification (isUserSender reads this binding), and a missed human is
+   *  the one failure this system treats as worse than a shrunken mailbox.
+   *  Event-time roles on the events themselves are the real fix, and a
+   *  data-model question beyond this dial. */
+  const roleOf: RoleOf = (n) =>
+    agents.get(n)?.role ?? (userAgentNames.has(n) ? 'user' : senseiNames.has(n) ? 'sensei' : undefined)
 
   /** The rule context every mailbox filter needs (core/mailbox-rules.ts). */
   const ruleContext: RuleContext = { roleOf, taskOwner }
@@ -2706,18 +2730,100 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       // false "delivered" the ledger exists to prevent — and it silently
       // overwrote real `wake` stamps, since first-delivery-wins made whichever
       // observer looked first the recorded carrier.
+      // ── SELECTIVE FETCH (task 051, ruled: summary → drill down → handle →
+      // ack). Three selectors, mutually exclusive: `?ids=` for explicit ids,
+      // `?from=` for the summary's blocking key (per-sender), `?type=` for its
+      // queued key (per-type AS THE SUMMARY COALESCES IT — `inboxGroupOf` is
+      // the one classification both surfaces share, so the key an agent read
+      // off the summary is the key this accepts; a raw-type match would be
+      // the translation gap the ruling exists to prevent). Selection happens
+      // INSIDE the reader's mailbox: an id in pending but outside it is a
+      // miss, never a disclosure. Malformed selection is a 400 and ambiguous
+      // selection is a 400 — task 018's lesson that a silently-ignored param
+      // is worse than an absent one; well-formed ids that miss come back in
+      // an explicit `missing` array instead of failing the batch, because a
+      // concurrent ack between summary and fetch is a legitimate race.
       const reader = url.searchParams.get('for') ?? callerFromHeader(req)
-      const fetched = reader ? mailboxOf(reader) : pendingEvents(url.searchParams.get('agent') ?? undefined)
-      if (reader) {
-        const shown = fetched.map((e) => e.id)
-        stampDelivery('fetch', shown)
-        // CARRIAGE DISCHARGES ANNOUNCEMENT (task 046's audit), and this is the
-        // strongest carrier there is: the agent asked for its mailbox and got
-        // every payload plus every code. Pushing it afterwards about what it
-        // just read is the double-telling S1 forbids.
-        notifier.carried(reader, shown)
+      const idsParam = url.searchParams.get('ids')
+      const fromParam = url.searchParams.get('from')
+      const typeParam = url.searchParams.get('type')
+      const selectorCount = [idsParam, fromParam, typeParam].filter((p) => p !== null).length
+      if (selectorCount > 1) {
+        return Response.json({ error: 'pass at most one selector — ids, from, or type' }, { status: 400 })
       }
-      return Response.json({ events: fetched.map((e) => ({ ...withDeliveredVia(e), code: codeFor(e) })) })
+      if (selectorCount === 1 && !reader) {
+        return Response.json(
+          { error: 'a selector reads ONE mailbox — pass ?for=<agent> or the x-jean-agent header' },
+          { status: 400 },
+        )
+      }
+      if (!reader) {
+        // OBSERVER read — the whole queue (or the legacy `?agent=` concern
+        // filter), no stamp, no discharge. Unchanged.
+        const observed = pendingEvents(url.searchParams.get('agent') ?? undefined)
+        return Response.json({ events: observed.map((e) => ({ ...withDeliveredVia(e), code: codeFor(e) })) })
+      }
+      const box = mailboxOf(reader)
+      let fetched = box
+      let missing: number[] | undefined
+      if (idsParam !== null) {
+        // EVERY token must be a plain decimal id — including the empty ones a
+        // stray comma produces (`1,,2`, `1,`). Filtering those out first would
+        // quietly normalize a malformed list, which is the silent-repair twin
+        // of the silently-ignored param this endpoint refuses (codex pass).
+        const tokens = idsParam.split(',').map((t) => t.trim())
+        if (tokens.some((t) => !/^\d+$/.test(t))) {
+          return Response.json(
+            { error: 'ids must be a comma-separated list of event ids, e.g. ?ids=41,42' },
+            { status: 400 },
+          )
+        }
+        const wanted = [...new Set(tokens.map(Number))]
+        // Beyond MAX_SAFE_INTEGER two distinct digit strings collapse to one
+        // float, so `missing` could name ids the caller never sent. No real
+        // event id gets near the bound — a 16-digit id is garbage in.
+        if (wanted.some((id) => !Number.isSafeInteger(id))) {
+          return Response.json({ error: 'ids out of range' }, { status: 400 })
+        }
+        const have = new Set(box.map((e) => e.id))
+        fetched = box.filter((e) => have.has(e.id) && wanted.includes(e.id))
+        // LOUD, always present on an ids request — even empty. An absent field
+        // would make "all found" and "silently dropped" the same response.
+        missing = wanted.filter((id) => !have.has(id))
+      } else if (fromParam !== null) {
+        if (fromParam === '') return Response.json({ error: 'from needs a sender name' }, { status: 400 })
+        fetched = box.filter((e) => {
+          const g = inboxGroupOf(e, roleOf)
+          return g.kind === 'blocking' && g.from === fromParam
+        })
+      } else if (typeParam !== null) {
+        if (typeParam === '') return Response.json({ error: 'type needs a summary type key' }, { status: 400 })
+        fetched = box.filter((e) => {
+          const g = inboxGroupOf(e, roleOf)
+          return g.kind === 'queued' && g.type === typeParam
+        })
+      }
+      // THE STAMP SCOPES TO EXACTLY WHAT THIS RESPONSE RETURNS (task 045's
+      // ledger lesson, extended to selection): a selective fetch must not mark
+      // events it did not return. ANNOUNCEMENT DISCHARGE is a different
+      // mechanism and deliberately NOT scoped per-event (ruled: seeing the
+      // inbox state by any rung discharges "you have mail") — `carried` below
+      // keeps its own contract (exactly what this response put on the wire,
+      // an only-forward high-water mark), and the boundary piggyback
+      // (`withInboxHeader`) continues to discharge whole-state for the header
+      // caller on every response. See task 046's rung-asymmetry warning
+      // before assuming these two mechanisms should ever move together.
+      const shown = fetched.map((e) => e.id)
+      stampDelivery('fetch', shown)
+      // CARRIAGE DISCHARGES ANNOUNCEMENT (task 046's audit), and this is the
+      // strongest carrier there is: the agent asked and got payload plus code.
+      // Pushing it afterwards about what it just read is the double-telling
+      // S1 forbids.
+      notifier.carried(reader, shown)
+      return Response.json({
+        events: fetched.map((e) => ({ ...withDeliveredVia(e), code: codeFor(e) })),
+        ...(missing !== undefined && { missing }),
+      })
     }
 
     // The triage ladder (S4): counts → summary → fetch, over ONE agent's

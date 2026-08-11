@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { StoredEvent } from '../es/index.ts'
-import { buildInbox, type Inbox, renderInboxLine, renderInboxWake } from './inbox.ts'
+import { buildInbox, type Inbox, inboxGroupOf, renderInboxLine, renderInboxWake } from './inbox.ts'
 
 const NOW = Date.parse('2026-07-24T12:00:00.000Z')
 
@@ -193,5 +193,73 @@ describe('renderInboxWake', () => {
     // Parseable payload between header and footer lines.
     const jsonPart = wake.split('\n').slice(1, -1).join('\n')
     expect(() => JSON.parse(jsonPart)).not.toThrow()
+  })
+})
+
+describe('inboxGroupOf — ONE classification for the summary and the fetch selectors (task 051)', () => {
+  // The contract this pins: the key a summary surface SHOWS is the key a
+  // selector ACCEPTS, because both come from this one function. A drift here
+  // is the translation gap the 051 ruling exists to prevent — most visibly
+  // `playbook`, where the summary's key covers three raw event types and a
+  // raw-type match would fetch nothing.
+  test('a user reply groups as blocking, keyed by its sender', () => {
+    expect(inboxGroupOf(ev(1, 'reply', { agent: 'chat-1000000001', text: 'hi' }), roleOf)).toEqual({
+      kind: 'blocking',
+      from: 'chat-1000000001',
+    })
+  })
+
+  test('a worker reply groups as queued worker:reply — the sender is not a blocking key', () => {
+    expect(inboxGroupOf(ev(2, 'reply', { agent: 'researcher', text: 'done' }), roleOf)).toEqual({
+      kind: 'queued',
+      type: 'worker:reply',
+    })
+  })
+
+  test('the summary keys that differ from raw event types are the selector keys too', () => {
+    expect(inboxGroupOf(ev(3, 'playbook-updated', { id: 'deploy' }), roleOf)).toEqual({
+      kind: 'queued',
+      type: 'playbook',
+    })
+    expect(inboxGroupOf(ev(4, 'trigger-fired', { triggerId: 'daily-digest', agent: 'sensei' }), roleOf)).toEqual({
+      kind: 'queued',
+      type: 'trigger:daily-digest',
+    })
+    expect(inboxGroupOf(ev(5, 'task-comment', { agent: 'researcher', role: 'worker', text: 'x' }), roleOf)).toEqual({
+      kind: 'queued',
+      type: 'worker:comment',
+    })
+  })
+
+  test('an unlisted machine type keys as itself', () => {
+    expect(inboxGroupOf(ev(6, 'task-created', { title: 't' }), roleOf)).toEqual({
+      kind: 'queued',
+      type: 'task-created',
+    })
+  })
+
+  test('PARTITION: buildInbox files every event exactly where inboxGroupOf says', () => {
+    // Structural agreement, asserted over a mixed list: blocking entries carry
+    // exactly the ids the classifier calls blocking, and the byType counts
+    // match a fold of the classifier's queued keys. If buildInbox ever grows a
+    // second opinion, this is the case that names it.
+    const events = [
+      ev(1, 'reply', { agent: 'chat-1', text: 'q1' }),
+      ev(2, 'reply', { agent: 'researcher', text: 'r1' }),
+      ev(3, 'playbook-created', { id: 'p' }),
+      ev(4, 'playbook-removed', { id: 'p' }),
+      ev(5, 'task-created', { title: 't' }),
+      ev(6, 'reply', { agent: 'chat-1', text: 'q2' }),
+    ]
+    const inbox = buildInbox(events, { now: NOW, roleOf }) as Inbox
+    const blockingIds = new Set(inbox.blocking.flatMap((b) => b.ids))
+    const expectQueued: Record<string, number> = {}
+    for (const e of events) {
+      const g = inboxGroupOf(e, roleOf)
+      if (g.kind === 'blocking') expect(blockingIds.has(e.id)).toBe(true)
+      else expectQueued[g.type] = (expectQueued[g.type] ?? 0) + 1
+    }
+    expect(inbox.queued.byType).toEqual(expectQueued)
+    expect(inbox.queued.count).toBe(events.length - blockingIds.size)
   })
 })

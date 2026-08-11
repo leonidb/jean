@@ -104,29 +104,45 @@ function queuedType(e: StoredEvent, roleOf: BuildOpts['roleOf']): string {
   }
 }
 
+/**
+ * Which summary group an event files under — ONE classification, two consumers
+ * (task 051): `buildInbox`'s grouping AND the fetch rung's group selectors
+ * (`GET /events?from=` / `?type=`, server.ts). The key a summary surface SHOWS
+ * must be the key a selector ACCEPTS; deriving both from this one function is
+ * what makes that structural rather than two implementations agreeing.
+ *
+ * FIFTH-INSTANCE SEED, noted not fixed (architect's F1, 2026-08-11): the
+ * blocking split is `reply`-only, so a user-AUTHORED queued `send` — a shape
+ * no current path produces — would price EXTERNAL in `priorityOf` (which
+ * reads `senderOf`) yet file here as machine `queued`, and the inbox line
+ * would under-report a waiting human. If a bridge or peer ever records human
+ * traffic as `send`, this branch needs `senderOf` too — behavior change
+ * requires a ruling; the comment is the tripwire.
+ */
+export type InboxGroup = { kind: 'blocking'; from: string } | { kind: 'queued'; type: string }
+
+export function inboxGroupOf(e: StoredEvent, roleOf: BuildOpts['roleOf']): InboxGroup {
+  const d = e.data as { agent?: unknown }
+  const sender = typeof d.agent === 'string' ? d.agent : undefined
+  if (e.type === 'reply' && sender && isUserSender(sender, roleOf)) return { kind: 'blocking', from: sender }
+  return { kind: 'queued', type: queuedType(e, roleOf) }
+}
+
 /** Build the inbox for the given pending events. Returns null when empty —
  *  the empty case must cost zero everywhere downstream. */
 export function buildInbox(events: StoredEvent[], opts: BuildOpts): Inbox | null {
   if (events.length === 0) return null
 
   const byUser = new Map<string, StoredEvent[]>()
-  const machine: StoredEvent[] = []
+  const machine: { e: StoredEvent; type: string }[] = []
   for (const e of events) {
-    const d = e.data as { agent?: unknown }
-    const sender = typeof d.agent === 'string' ? d.agent : undefined
-    // FIFTH-INSTANCE SEED, noted not fixed (architect's F1, 2026-08-11): this
-    // split is `reply`-only, so a user-AUTHORED queued `send` — a shape no
-    // current path produces — would price EXTERNAL in `priorityOf` (which
-    // reads `senderOf`) yet file here as machine `queued`, and the inbox line
-    // would under-report a waiting human. If a bridge or peer ever records
-    // human traffic as `send`, this branch needs `senderOf` too — behavior
-    // change requires a ruling; the comment is the tripwire.
-    if (e.type === 'reply' && sender && isUserSender(sender, opts.roleOf)) {
-      const list = byUser.get(sender) ?? []
+    const group = inboxGroupOf(e, opts.roleOf)
+    if (group.kind === 'blocking') {
+      const list = byUser.get(group.from) ?? []
       list.push(e)
-      byUser.set(sender, list)
+      byUser.set(group.from, list)
     } else {
-      machine.push(e)
+      machine.push({ e, type: group.type })
     }
   }
 
@@ -155,9 +171,10 @@ export function buildInbox(events: StoredEvent[], opts: BuildOpts): Inbox | null
 
   const byType: Record<string, number> = {}
   let oldestMs = 0
-  for (const e of machine) {
-    const t = queuedType(e, opts.roleOf)
-    byType[t] = (byType[t] ?? 0) + 1
+  for (const { e, type } of machine) {
+    // The key was decided by `inboxGroupOf` in the split above — counted here,
+    // never re-derived, so the byType keys and the selector keys cannot drift.
+    byType[type] = (byType[type] ?? 0) + 1
     const age = eventAgeMs(e, opts.now)
     if (age > oldestMs) oldestMs = age
   }
