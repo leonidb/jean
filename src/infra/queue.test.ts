@@ -161,9 +161,8 @@ describe('event queue', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ pairs: replies.slice(0, 2).map((e) => ({ id: e.id, code: e.code })) }),
     })
-    const ackData = (await ackRes.json()) as { acknowledged: number; remaining: number }
+    const ackData = (await ackRes.json()) as { acknowledged: number }
     expect(ackData.acknowledged).toBe(2)
-    expect(typeof ackData.remaining).toBe('number')
 
     // The third reply survives — and so does the `register` that sat BEFORE all
     // three, which under `upToId` would have gone with them. That is the whole
@@ -198,9 +197,14 @@ describe('event queue', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ pairs: pending.events.map((e) => ({ id: e.id, code: e.code })) }),
     })
-    const ackData = (await ackRes.json()) as { acknowledged: number; remaining: number }
+    const ackData = (await ackRes.json()) as { acknowledged: number }
     expect(ackData.acknowledged).toBeGreaterThanOrEqual(2)
-    expect(ackData.remaining).toBe(0)
+    // "Everything drained" used to be read off the response's own `remaining`
+    // field. That field is gone (task 059 — it reported the GLOBAL count to a
+    // caller asking about itself), so the drain is asserted where it is
+    // actually true: the pending queue, read back.
+    const left = (await (await fetch(`${BASE}/events/pending`)).json()) as { events: unknown[] }
+    expect(left.events.length).toBe(0)
   })
 
   test('events ordered FIFO', async () => {

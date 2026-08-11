@@ -1049,10 +1049,6 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   const NOTIFY_TICK_MS = Math.min(15_000, NUDGE_INTERVAL_MS, ...NUDGE_BACKOFF_MS)
   const SUPERVISE_TICK_MS = Math.min(60_000, REMINDER_AFTER_MS, BROKEN_AGENT_AFTER_MS)
 
-  /** Attach the compact inbox line as a response header when the request came
-   *  from the sensei's channel plugin (`x-jean-agent`). Header-only — response
-   *  bodies are never mutated, so no consumer's JSON shape can break. Skips
-   *  non-sensei callers; empty inbox = no header (the empty case costs 0). */
   /** The agent behind an HTTP request, per its `x-jean-agent` header. The channel
    *  plugin percent-encodes the name (HTTP headers are Latin-1-only; a non-ASCII
    *  agent name would otherwise arrive mojibake'd and never match). */
@@ -1066,6 +1062,12 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     }
   }
 
+  /** Attach the compact inbox line as an `x-jean-inbox` response header, on any
+   *  request that identifies a REGISTERED agent (`x-jean-agent`). The line
+   *  reports that agent's OWN mailbox — sensei and worker alike, one mechanism.
+   *  Header-only: response bodies are never mutated, so no consumer's JSON
+   *  shape can break, and this is the response's single source for "what is
+   *  still waiting for you". Empty inbox = no header (the empty case costs 0). */
   function withInboxHeader(req: Request, res: Response): Response {
     const caller = callerFromHeader(req)
     if (!caller) return res
@@ -2956,16 +2958,32 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       const cleared = applyAck(before, pairs)
       const clearedIds = before.filter((e) => !cleared.some((c) => c.id === e.id)).map((e) => e.id)
       await recordAck(clearedIds, 'ack')
-      // IDEMPOTENT (Leonid, 2026-08-04): how many of the REQUESTED ids are now
-      // cleared, read post-publish. Two racing ackers of one id BOTH get
-      // success — whether yours or theirs did the clearing is a distinction
-      // nobody needs, and chasing it is what the deleted claim machinery was.
+      // ONE SOURCE FOR "WHAT IS LEFT", AND IT IS NOT THIS BODY (task 059).
+      //
+      // A `remaining` field lived here reporting `pendingProjection.state.length`
+      // — the GLOBAL pending count, every agent's events summed, answered to a
+      // caller asking about its own mailbox. It read correct only when the
+      // caller happened to hold everything pending, which is the SENSEI's
+      // ordinary condition: the agent most likely to read the field was the
+      // least likely to catch it, and a worker had no reason to distrust it.
+      //
+      // Deleted rather than corrected. This response already carries the
+      // caller's own count in its `x-jean-inbox` header — per-agent, attached
+      // post-ack, agent-uniform (`withInboxHeader`). A scoped body field would
+      // be a SECOND source for one fact, which is how these drifted apart to
+      // begin with. Nothing loses information: a worker is served the same line
+      // the sensei is. Pinned by `inbox-piggyback.test.ts`.
+      //
+      // IDEMPOTENT (Leonid, 2026-08-04): `acknowledged` is how many of the
+      // REQUESTED ids are now cleared, read post-publish. Two racing ackers of
+      // one id BOTH get success — whether yours or theirs did the clearing is a
+      // distinction nobody needs, and chasing it is what the deleted claim
+      // machinery was.
       return Response.json({
         acknowledged: acknowledgedCount(
           pairs.map((p) => p.id),
           pendingProjection.state,
         ),
-        remaining: pendingProjection.state.length,
       })
     }
 

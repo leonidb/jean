@@ -151,6 +151,72 @@ describe('inbox piggyback', () => {
     expect(emptyInbox.line).toBeNull()
   })
 
+  test("an ack response reports the ACKER's own remaining count, and reports it exactly once", async () => {
+    // ── THE GUARD FOR TASK 059 ──
+    //
+    // `POST /events/ack` used to answer "what is left?" TWICE in one response:
+    // a body `remaining` field carrying the GLOBAL pending count, and this
+    // header carrying the caller's own. The body field is deleted; this pins
+    // the survivor, in the one arrangement that can tell the two apart.
+    //
+    // The fixture exists to make them differ. A holds three events and acks
+    // ONE, so A's own answer is 2; B holds one it never touches, and the
+    // sensei's queue holds the register events besides — so the global answer
+    // is strictly larger. A test where one agent holds everything pending
+    // passes under either implementation, which is exactly how the defect
+    // survived in the field: the sensei ordinarily IS that agent.
+    using _a = await connectAgent(WS_URL, 'ack-a')
+    using _b = await connectAgent(WS_URL, 'ack-b')
+    for (const text of ['a1', 'a2', 'a3']) {
+      await fetch(`${BASE}/send`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ from: 'sensei', to: 'ack-a', text }),
+      })
+    }
+    await fetch(`${BASE}/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ from: 'sensei', to: 'ack-b', text: 'b1' }),
+    })
+    await Bun.sleep(200)
+
+    const mine = (await (await fetch(`${BASE}/events`, { headers: { 'x-jean-agent': 'ack-a' } })).json()) as {
+      events: Array<{ id: number; code: string }>
+    }
+    expect(mine.events.length).toBe(3)
+
+    const ack = await fetch(`${BASE}/events/ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-jean-agent': 'ack-a' },
+      body: JSON.stringify({ pairs: mine.events.slice(0, 1).map((e) => ({ id: e.id, code: e.code })) }),
+    })
+
+    // The fixture is only a discriminator if the two answers actually differ —
+    // asserted, not assumed, so a future change to what lands in whose mailbox
+    // degrades this test loudly instead of quietly making it vacuous.
+    const global = (await (await fetch(`${BASE}/events/pending`)).json()) as { events: unknown[] }
+    expect(global.events.length).toBeGreaterThan(2)
+
+    // THE SURVIVING SOURCE: A's own two, not the dojo's total.
+    expect(ack.headers.get('x-jean-inbox')).toContain('2 queued')
+
+    // AND ONLY THAT SOURCE. Keyed on the whole response shape rather than on
+    // `remaining` by name: a reintroduced count fails here whatever it is
+    // called, which is the half of this task that outlives the deletion.
+    const body = (await ack.json()) as Record<string, unknown>
+    expect(Object.keys(body)).toEqual(['acknowledged'])
+    expect(body.acknowledged).toBe(1)
+
+    // Drain so the next test starts from a known queue.
+    const rest = (await (await fetch(`${BASE}/events`)).json()) as { events: Array<{ id: number; code: string }> }
+    await fetch(`${BASE}/events/ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairs: rest.events.map((e) => ({ id: e.id, code: e.code })) }),
+    })
+  })
+
   test("a DISCONNECTED human's pending messages stay blocking (persisted classification)", async () => {
     using sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
     void sensei
