@@ -138,31 +138,77 @@ describe('S10 (H4) — down: a task-holding worker with no live session', () => 
   })
 })
 
-describe('S10 (H4) — up-but-stuck: session alive, jean-silent past the bound, holding active work', () => {
-  test('silence past the bound → ONE "up-but-stuck" event', () => {
+describe('S10 (H4) — up-but-stuck: a probe went UNANSWERED while the worker holds work', () => {
+  // THE VERDICT NOW SITS BEHIND A QUESTION (ruled 2026-08-14). It used to be
+  // rendered straight from `now - lastActivityAt >= stuckAfterMs`, which
+  // declared a worker stuck for the crime of concentrating — observed live at
+  // 31 minutes, on a worker that was mid-implementation and had been told to
+  // take the time it needed. The bound now decides only WHEN TO ASK.
+  test('silence past the bound ASKS; only the unanswered question reports', () => {
     const { r, supervisor } = driver()
-    for (let t = T0; t <= T0 + STUCK_AFTER + MINUTE; t += MINUTE) {
+    // Through the bound: a probe, and no verdict.
+    for (let t = T0; t <= T0 + STUCK_AFTER; t += MINUTE) {
+      supervisor.tick(supervisionView({ now: t, tasks: [held()], agents: [workerRow({ lastActivityAt: T0 })] }))
+    }
+    expect(statusEvents(r)).toHaveLength(0)
+    expect(r.emitted.filter((e) => e.type === 'agent-probe')).toHaveLength(1)
+
+    // Through the answer window with nothing back: NOW it is stuck.
+    for (let t = T0 + STUCK_AFTER; t <= T0 + STUCK_AFTER + PROBE_TIMEOUT + MINUTE; t += MINUTE) {
       supervisor.tick(supervisionView({ now: t, tasks: [held()], agents: [workerRow({ lastActivityAt: T0 })] }))
     }
     expect(statusEvents(r)).toEqual([{ agent: WORKER, status: 'up-but-stuck' }])
   })
 
-  test('silence WITHIN the bound → nothing', () => {
+  test('a worker that ANSWERS its probe is never called stuck', () => {
+    // The 08:06 false alarm, as a regression test: a working worker crosses the
+    // bound, is asked, answers, and nothing is ever reported about it.
     const { r, supervisor } = driver()
-    for (let t = T0; t <= T0 + STUCK_AFTER - MINUTE; t += MINUTE) {
+    for (let t = T0; t <= T0 + STUCK_AFTER; t += MINUTE) {
       supervisor.tick(supervisionView({ now: t, tasks: [held()], agents: [workerRow({ lastActivityAt: T0 })] }))
+    }
+    const answered = T0 + STUCK_AFTER + MINUTE
+    for (let t = answered; t <= answered + PROBE_TIMEOUT + MINUTE; t += MINUTE) {
+      supervisor.tick(supervisionView({ now: t, tasks: [held()], agents: [workerRow({ lastActivityAt: answered })] }))
     }
     expect(statusEvents(r)).toHaveLength(0)
   })
 
+  test('silence WITHIN the bound → nothing, not even a question', () => {
+    const { r, supervisor } = driver()
+    for (let t = T0; t <= T0 + STUCK_AFTER - MINUTE; t += MINUTE) {
+      supervisor.tick(supervisionView({ now: t, tasks: [held()], agents: [workerRow({ lastActivityAt: T0 })] }))
+    }
+    expect(r.emitted).toHaveLength(0)
+  })
+
+  test('THE CLOCK IS SEEDED FROM THE WORK — a fresh dispatch is not judged on an old silence', () => {
+    // The 07:47 false alarm: an idle worker's `lastActivityAt` was 111 minutes
+    // old, and the instant a task became in-progress it was judged against that
+    // clock — a verdict 19 seconds after the dispatch. `holding` comes from the
+    // board and `lastActivityAt` from the registry; nothing reconciled them.
+    const dispatchedAt = T0 + 111 * MINUTE
+    const { r, supervisor } = driver()
+    for (let t = dispatchedAt; t <= dispatchedAt + STUCK_AFTER - MINUTE; t += MINUTE) {
+      supervisor.tick(
+        supervisionView({
+          now: t,
+          tasks: [{ ...held(), lastEventAt: dispatchedAt }],
+          agents: [workerRow({ lastActivityAt: T0 })],
+        }),
+      )
+    }
+    expect(r.emitted).toHaveLength(0)
+  })
+
   test('a stuck worker whose session then dies → "down" announces the change', () => {
     const { r, supervisor } = driver()
-    for (let t = T0; t <= T0 + STUCK_AFTER + MINUTE; t += MINUTE) {
+    for (let t = T0; t <= T0 + STUCK_AFTER + PROBE_TIMEOUT + MINUTE; t += MINUTE) {
       supervisor.tick(supervisionView({ now: t, tasks: [held()], agents: [workerRow({ lastActivityAt: T0 })] }))
     }
     supervisor.tick(
       supervisionView({
-        now: T0 + STUCK_AFTER + 2 * MINUTE,
+        now: T0 + STUCK_AFTER + PROBE_TIMEOUT + 2 * MINUTE,
         tasks: [held()],
         agents: [workerRow({ sessionLive: false, lastActivityAt: T0 })],
       }),
@@ -173,18 +219,27 @@ describe('S10 (H4) — up-but-stuck: session alive, jean-silent past the bound, 
 
 describe('S10 (H4) — recovered', () => {
   test('activity after stuck → ONE "recovered" event, and the cycle can repeat', () => {
+    const STUCK_AT = STUCK_AFTER + PROBE_TIMEOUT + MINUTE
     const { r, supervisor } = driver()
-    for (let t = T0; t <= T0 + STUCK_AFTER + MINUTE; t += MINUTE) {
+    for (let t = T0; t <= T0 + STUCK_AT; t += MINUTE) {
       supervisor.tick(supervisionView({ now: t, tasks: [held()], agents: [workerRow({ lastActivityAt: T0 })] }))
     }
-    const spoke = T0 + STUCK_AFTER + 2 * MINUTE
+    expect(statusEvents(r).map((e) => e.status)).toEqual(['up-but-stuck'])
+
+    const spoke = T0 + STUCK_AT + MINUTE
     supervisor.tick(supervisionView({ now: spoke, tasks: [held()], agents: [workerRow({ lastActivityAt: spoke })] }))
     expect(statusEvents(r).map((e) => e.status)).toEqual(['up-but-stuck', 'recovered'])
 
-    // A second silence is a NEW stuck, not a suppressed repeat — cleared, not
-    // latched, same rule as S11's report.
-    for (let t = spoke; t <= spoke + STUCK_AFTER + MINUTE; t += MINUTE) {
-      supervisor.tick(supervisionView({ now: t, tasks: [held()], agents: [workerRow({ lastActivityAt: spoke })] }))
+    // A second silence is a NEW question and a NEW stuck, not a suppressed
+    // repeat — cleared, not latched, same rule as S11's report.
+    for (let t = spoke; t <= spoke + STUCK_AT; t += MINUTE) {
+      supervisor.tick(
+        supervisionView({
+          now: t,
+          tasks: [{ ...held(), lastEventAt: spoke }],
+          agents: [workerRow({ lastActivityAt: spoke })],
+        }),
+      )
     }
     expect(statusEvents(r).map((e) => e.status)).toEqual(['up-but-stuck', 'recovered', 'up-but-stuck'])
   })

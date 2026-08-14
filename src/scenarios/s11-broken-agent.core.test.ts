@@ -49,6 +49,7 @@ import {
   PROBE_TIMEOUT,
   recorder,
   SENSEI,
+  STUCK_AFTER,
   supervisionView,
   T0,
 } from './harness.ts'
@@ -70,12 +71,15 @@ const silentSince = (at: number, name = WORKER, role = 'worker'): Omit<Supervise
 
 /** In-progress work, so the agent is on the SHORT bound. Without one it is
  *  idle and watched on the 24h clock instead — see the tiered-bound cases. */
-const heldWork = (agent = WORKER): SupervisedTask => ({
+const heldWork = (agent = WORKER, since = T0): SupervisedTask => ({
   id: '001',
   title: 'something',
   status: 'in-progress',
   agent,
-  lastEventAt: T0,
+  // WHEN THE WORK WAS PICKED UP. The stuck clock is seeded from this, so a
+  // fixture that leaves it at T0 while the agent went quiet later is asserting
+  // about the work's age rather than the agent's silence.
+  lastEventAt: since,
 })
 
 /** Tick across a stretch at one-minute resolution with the agent silent since
@@ -94,8 +98,13 @@ const downs = (r: ReturnType<typeof recorder>) => r.emitted.filter((e) => e.type
 
 describe('S11 — the bound ASKS; it does not accuse', () => {
   test('an agent silent past the bound is PROBED, and nothing else happens yet', () => {
+    // A HOLDER is asked at the STUCK bound — the earliest that applies to it.
+    // Once a probe stands between threshold and verdict the bound only decides
+    // when to ASK, so the short one costs a question rather than a false
+    // report (ruled 2026-08-14, after a worker mid-implementation was declared
+    // stuck at 31 minutes).
     const { r, supervisor } = driver()
-    run(supervisor, T0, T0 + BROKEN_AFTER, T0)
+    run(supervisor, T0, T0 + STUCK_AFTER, T0)
     expect(probes(r)).toHaveLength(1)
     expect(downs(r)).toHaveLength(0)
     // The probe is addressed to the agent — that is how it reaches it at all.
@@ -104,7 +113,7 @@ describe('S11 — the bound ASKS; it does not accuse', () => {
 
   test('nothing at all before the bound', () => {
     const { r, supervisor } = driver()
-    run(supervisor, T0, T0 + BROKEN_AFTER - 20 * MINUTE, T0)
+    run(supervisor, T0, T0 + STUCK_AFTER - 5 * MINUTE, T0)
     expect(probes(r)).toHaveLength(0)
     expect(downs(r)).toHaveLength(0)
   })
@@ -112,14 +121,14 @@ describe('S11 — the bound ASKS; it does not accuse', () => {
   test('a live agent is never probed, however long the dojo runs', () => {
     const { r, supervisor } = driver()
     for (let t = T0; t <= T0 + 3 * BROKEN_AFTER; t += 10 * MINUTE) {
-      supervisor.tick(supervisionView({ now: t, agents: [silentSince(t)], tasks: [heldWork()] }))
+      supervisor.tick(supervisionView({ now: t, agents: [silentSince(t)], tasks: [heldWork(WORKER, t)] }))
     }
     expect(r.emitted).toHaveLength(0)
   })
 
   test('the probe does not repeat while its answer is still due', () => {
     const { r, supervisor } = driver()
-    run(supervisor, T0, T0 + BROKEN_AFTER + PROBE_TIMEOUT - MINUTE, T0)
+    run(supervisor, T0, T0 + STUCK_AFTER + PROBE_TIMEOUT - MINUTE, T0)
     expect(probes(r)).toHaveLength(1)
   })
 })
@@ -129,12 +138,12 @@ describe('S11 — silence is the success case', () => {
     // The measured failure this replaces: the old alarm fired, woke the agent,
     // the agent answered in seconds, and the human had already been told.
     const { r, supervisor } = driver()
-    run(supervisor, T0, T0 + BROKEN_AFTER, T0)
+    run(supervisor, T0, T0 + STUCK_AFTER, T0)
     expect(probes(r)).toHaveLength(1)
 
     // It answers one minute later, then stays quiet for a good while.
-    const answered = T0 + BROKEN_AFTER + MINUTE
-    run(supervisor, answered, answered + BROKEN_AFTER - 20 * MINUTE, answered)
+    const answered = T0 + STUCK_AFTER + MINUTE
+    run(supervisor, answered, answered + STUCK_AFTER - 5 * MINUTE, answered)
     expect(downs(r)).toHaveLength(0)
     // …and NOTHING was emitted to say it recovered. The absence of a report is
     // the all-clear; an explicit one would be the metronome wearing a hat.
@@ -146,9 +155,9 @@ describe('S11 — silence is the success case', () => {
 
   test('answering resets the cycle — a later break is probed again', () => {
     const { r, supervisor } = driver()
-    run(supervisor, T0, T0 + BROKEN_AFTER, T0)
-    const answered = T0 + BROKEN_AFTER + MINUTE
-    run(supervisor, answered, answered + BROKEN_AFTER, answered)
+    run(supervisor, T0, T0 + STUCK_AFTER, T0)
+    const answered = T0 + STUCK_AFTER + MINUTE
+    run(supervisor, answered, answered + STUCK_AFTER, answered)
     expect(probes(r)).toHaveLength(2)
     expect(downs(r)).toHaveLength(0)
   })
@@ -194,7 +203,7 @@ describe('S11 — an UNANSWERED probe escalates, once', () => {
     const { r, supervisor } = driver()
     run(supervisor, T0, T0 + BROKEN_AFTER + PROBE_TIMEOUT, T0)
     const returned = T0 + BROKEN_AFTER + PROBE_TIMEOUT + MINUTE
-    run(supervisor, returned, returned + 30 * MINUTE, returned)
+    run(supervisor, returned, returned + 20 * MINUTE, returned)
     expect(r.emitted.filter((e) => e.type.startsWith('agent-')).map((e) => e.type)).toEqual([
       'agent-probe',
       'agent-down',

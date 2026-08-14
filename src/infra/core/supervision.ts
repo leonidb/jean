@@ -287,13 +287,18 @@ type TaskState = { lastNaggedAt: number }
 /**
  * Per-agent liveness bookkeeping (S11).
  *
- * THREE STATES, and the middle one is the whole redesign. `ok` is the implicit
- * initial state; `probed` means a question is outstanding and its answer is
- * still due; `down` means the question went unanswered and the sensei has been
- * told once. Any activity returns an agent to `ok` from either of the others —
- * which is what makes this edge-triggered rather than a metronome.
+ * FOUR STATES, and `probed` is the whole redesign. `ok` is the implicit initial
+ * state; `probed` means a question is outstanding and its answer is still due;
+ * `stuck` means it went unanswered while the agent holds work, and the sensei
+ * has been told once; `down` means the silence has run past the broken bound
+ * and the sensei has been told once more. Any activity returns an agent to `ok`
+ * from any of them — which is what makes this edge-triggered rather than a
+ * metronome.
+ *
+ * `stuck → down` needs no second probe: the first went unanswered and nothing
+ * has happened since, so asking again would add no information.
  */
-type AgentState = { status: 'ok' | 'probed' | 'down'; probedAt: number }
+type AgentState = { status: 'ok' | 'probed' | 'stuck' | 'down'; probedAt: number }
 /** H4's per-worker status machine. `ok` is the implicit initial state: a
  *  worker first observed already-down still announces, because the change is
  *  from the watcher's baseline, not from an unobservable past. */
@@ -331,6 +336,26 @@ function cadenceFor(task: SupervisedTask, view: SupervisionView): number | null 
   }
 }
 
+/**
+ * The clock an agent is judged against — its own last activity, or the moment
+ * it picked up the work it currently holds, whichever is LATER.
+ *
+ * The seed is the fix for a measured defect (2026-08-14 07:47): `holding` comes
+ * from board state while `lastActivityAt` comes from the registry, and nothing
+ * reconciled them — so dispatching to a previously-idle worker judged it
+ * instantly against a clock from before the dispatch. A worker must not be
+ * judged against activity that predates the work it is being judged for.
+ *
+ * EARLIEST held task, not latest: a worker silent for an hour on task A does
+ * not earn a fresh hour by being handed task B.
+ */
+function clockFor(agent: SupervisedAgent, view: SupervisionView): number {
+  const heldSince = view.tasks
+    .filter((t) => holdsWork(t.status) && t.agent === agent.name)
+    .reduce((lo, t) => Math.min(lo, t.lastEventAt), Number.POSITIVE_INFINITY)
+  return Number.isFinite(heldSince) ? Math.max(agent.lastActivityAt, heldSince) : agent.lastActivityAt
+}
+
 export function createSupervisor(exec: SupervisionExecutor): Supervisor {
   const tasks = new Map<string, TaskState>()
   const workers = new Map<string, WorkerStatus>()
@@ -338,6 +363,24 @@ export function createSupervisor(exec: SupervisionExecutor): Supervisor {
 
   return {
     tick(view) {
+      /** The end of the ladder. ADDRESSED TO THE SENSEI ALONE, and the subject
+       *  is deliberately NOT in `data.agent`: that field is what derived
+       *  mailbox membership resolves on, and naming the subject there is
+       *  precisely what used to deliver the alarm to the accused — waking it,
+       *  which cleared the alarm, which is why 23 of these produced zero
+       *  all-clears. `subject` carries the name; membership resolves to nobody,
+       *  so only the sensei's universal mailbox claims it, including when the
+       *  subject IS the sensei — the case that must never orphan. */
+      const emitDown = (name: string, silentMs: number) => {
+        const quietMinutes = Math.round(silentMs / 60_000)
+        exec.emit('agent-down', {
+          subject: name,
+          to: view.sensei ?? undefined,
+          quietMinutes,
+          text: `${name} did not answer a liveness probe — silent ${quietMinutes} min.`,
+          queued: true,
+        })
+      }
       // ── S7/S8 — a parked task nags whoever currently holds the blocker ──
       //
       // WAITING TASKS ONLY. The in-progress arm — the old S10 ladder — is
@@ -387,29 +430,139 @@ export function createSupervisor(exec: SupervisionExecutor): Supervisor {
         exec.emit('task-reminder', { taskId: task.id, to, text, queued: true })
       }
 
-      // ── H4 — worker status, per worker, on change edges only ──
+      // ── THE WATCH-LIST ──
       //
       // WORK INCLUDES `assigned` (ruled 2026-08-14): a worker that stopped
       // holding a dispatched-but-unstarted task used to be watched by nothing
       // at all.
       const holding = new Set(view.tasks.filter((t) => holdsWork(t.status) && t.agent).map((t) => t.agent as string))
+
+      // ── S11 — PROBE, THEN ESCALATE. Never alarm first. ──
+      //
+      // RUNS BEFORE THE STATUS ARM, because `up-but-stuck` is now one of this
+      // machine's verdicts rather than a threshold of its own. Both bounds
+      // reach a report through the same question, which is the whole of the
+      // unifying rule: no verdict about an agent is emitted until the agent has
+      // been given a chance to answer and has not.
+      const stuck = new Set<string>()
+      for (const agent of view.agents) {
+        const state = agents.get(agent.name) ?? { status: 'ok' as const, probedAt: 0 }
+        const holdsAny = holding.has(agent.name)
+        // THE CLOCK IS SEEDED FROM THE WORK, not only from the registry.
+        // Without this, dispatching to a previously-idle worker judges it
+        // against a `lastActivityAt` that predates the dispatch — observed
+        // 2026-08-14 07:47, a verdict rendered NINETEEN SECONDS after a task
+        // was assigned, against a clock 111 minutes old. A worker must not be
+        // judged against activity that predates the work it is judged for.
+        const silentSince = clockFor(agent, view)
+
+        // ANY ACTIVITY ENDS THE EPISODE, from any non-ok state. Measured
+        // against the probe rather than against `now`, because that is the
+        // question actually being asked: did anything happen AFTER we asked?
+        if (state.status !== 'ok' && agent.lastActivityAt > state.probedAt) {
+          agents.set(agent.name, { status: 'ok', probedAt: 0 })
+          continue
+        }
+
+        // ALREADY AT THE END OF THE LADDER. One `agent-down` per episode:
+        // re-emitting on a cycle is the metronome this redesign exists to
+        // delete.
+        if (state.status === 'down') continue
+
+        // REPORTED STUCK, STILL SILENT. The escalation to `agent-down` needs no
+        // second probe: the first went unanswered and nothing has happened
+        // since, so asking again would add no information.
+        if (state.status === 'stuck') {
+          stuck.add(agent.name)
+          if (view.now - silentSince < view.brokenAfterMs) continue
+          agents.set(agent.name, { status: 'down', probedAt: state.probedAt })
+          emitDown(agent.name, view.now - silentSince)
+          continue
+        }
+
+        if (state.status === 'probed') {
+          if (view.now - state.probedAt < view.probeTimeoutMs) continue
+          // The question went unanswered, so now there is something to say —
+          // and WHICH thing depends only on how long the silence has run. A
+          // holder inside the broken bound is stuck (its work is stalled); past
+          // it, or holding nothing at all, it is down.
+          const silentMs = view.now - silentSince
+          if (holdsAny && silentMs < view.brokenAfterMs) {
+            agents.set(agent.name, { status: 'stuck', probedAt: state.probedAt })
+            stuck.add(agent.name)
+            continue
+          }
+          agents.set(agent.name, { status: 'down', probedAt: state.probedAt })
+          emitDown(agent.name, silentMs)
+          continue
+        }
+
+        // ── `ok`: is it time to ASK? ──
+        //
+        // SESSION-ALIVE ONLY. A gone session is not a question — infra already
+        // knows the answer, and `worker-status: down` below reports it on the
+        // edge. Probing a corpse would produce a guaranteed timeout and a
+        // second report of one fact.
+        if (!agent.sessionLive) continue
+        // THE EARLIEST BOUND THAT APPLIES. For a holder that is the stuck
+        // bound; for an idle agent, the long one. Once a probe stands between
+        // threshold and verdict the bound only decides WHEN TO ASK, so a short
+        // one costs a question rather than a false report — which is what makes
+        // 30 minutes reasonable here instead of wrong.
+        const bound = holdsAny ? view.stuckAfterMs : view.brokenAfterIdleMs
+        if (view.now - silentSince < bound) continue
+        const quietMinutes = Math.round((view.now - silentSince) / 60_000)
+        agents.set(agent.name, { status: 'probed', probedAt: view.now })
+        // AN ORDINARY MESSAGE, and that is the point. It is addressed to the
+        // agent, enters its mailbox, and the notifier announces it exactly as
+        // it announces anything else. It accuses nobody and pushes nowhere
+        // else; if the agent answers, this exchange leaves no report at all.
+        //
+        // ── A SAFETY THAT RESTS ON ANNOUNCEMENT BEING SYNCHRONOUS ──
+        //
+        // This event carries `data.agent` and is NOT a self-event, so it is
+        // held JOINTLY by the subject and the sensei — either can ack it, and
+        // the first ack clears it for both. That is survivable only because
+        // "answered" keys on the subject's own `lastActivityAt` rather than on
+        // the probe still being in its mailbox, AND because the announcement is
+        // emitted synchronously inside `record()`: the subject is woken before
+        // the sensei could possibly have cleared the payload out from under it.
+        //
+        // MAKE ANNOUNCEMENT ASYNCHRONOUS AND THIS SILENTLY MANUFACTURES FALSE
+        // DOWN-REPORTS — a sensei draining its queue would delete the probe
+        // before the subject was ever told, and the subject would then be
+        // reported down for failing to answer a question it never received.
+        exec.emit('agent-probe', {
+          agent: agent.name,
+          quietMinutes,
+          text: `Liveness check — you have been quiet for ${quietMinutes} min. Reply to confirm you are alive.`,
+          queued: true,
+        })
+      }
+
+      // ── H4 — worker status, per worker, on change edges only ──
       for (const agent of view.agents) {
         if (agent.role !== 'worker' || !holding.has(agent.name)) continue
-        const current: WorkerStatus = !agent.sessionLive
-          ? 'down'
-          : view.now - agent.lastActivityAt >= view.stuckAfterMs
-            ? 'up-but-stuck'
-            : 'ok'
+        // DOWN IS NOT A SUSPICION, so it needs no probe. A gone session is a
+        // fact infra holds at the instant it drops; the probe path exists for
+        // the case where infra has a QUESTION, and this is not one.
+        //
+        // `up-but-stuck` used to be rendered the same way — straight from a
+        // bare threshold, with nothing asked — and that produced a verdict
+        // about a worker that was simply concentrating. It now comes from the
+        // probe arm above and appears here only once a question has gone
+        // unanswered.
+        const current: WorkerStatus = !agent.sessionLive ? 'down' : stuck.has(agent.name) ? 'up-but-stuck' : 'ok'
         const previous = workers.get(agent.name) ?? 'ok'
         if (current === previous) continue
         workers.set(agent.name, current)
         // `ok → ok` is unreachable here; a transition TO ok is a recovery.
         // The event is the report — the sensei's mailbox delivers it.
         const held = view.tasks
-          .filter((t) => t.status === 'in-progress' && t.agent === agent.name)
+          .filter((t) => holdsWork(t.status) && t.agent === agent.name)
           .map((t) => t.id)
           .join(', ')
-        const quietMinutes = Math.round((view.now - agent.lastActivityAt) / 60_000)
+        const quietMinutes = Math.round((view.now - clockFor(agent, view)) / 60_000)
         const status = current === 'ok' ? 'recovered' : current
         exec.emit('worker-status', {
           agent: agent.name,
@@ -418,7 +571,7 @@ export function createSupervisor(exec: SupervisionExecutor): Supervisor {
             current === 'down'
               ? `${agent.name} is down — no live session; holding ${held}.`
               : current === 'up-but-stuck'
-                ? `${agent.name} looks stuck — session alive, nothing jean-visible for ${quietMinutes} min; holding ${held}.`
+                ? `${agent.name} did not answer a liveness probe — silent ${quietMinutes} min while holding ${held}.`
                 : `${agent.name} recovered.`,
         })
       }
@@ -428,68 +581,6 @@ export function createSupervisor(exec: SupervisionExecutor): Supervisor {
       // worker holding nothing.
       for (const name of [...workers.keys()]) {
         if (!holding.has(name)) workers.delete(name)
-      }
-
-      // ── S11 — PROBE, THEN ESCALATE. Never alarm first. ──
-      for (const agent of view.agents) {
-        const state = agents.get(agent.name) ?? { status: 'ok' as const, probedAt: 0 }
-
-        // ANY ACTIVITY ENDS THE EPISODE, from either non-ok state. Measured
-        // against the probe rather than against `now`, because that is the
-        // question actually being asked: did anything happen AFTER we asked?
-        if (state.status !== 'ok' && agent.lastActivityAt > state.probedAt) {
-          agents.set(agent.name, { status: 'ok', probedAt: 0 })
-          continue
-        }
-
-        // ALREADY REPORTED. One event per down-episode: re-emitting on a cycle
-        // is the metronome this redesign exists to delete.
-        if (state.status === 'down') continue
-
-        if (state.status === 'probed') {
-          if (view.now - state.probedAt < view.probeTimeoutMs) continue
-          // The question went unanswered, so now there is something to say.
-          // ADDRESSED TO THE SENSEI ALONE, and the subject is deliberately NOT
-          // in `data.agent`: that field is what derived mailbox membership
-          // resolves on, and naming the subject there is precisely what used to
-          // deliver the alarm to the accused (waking it, which then cleared the
-          // alarm, which is why 23 of these produced zero all-clears). `subject`
-          // carries the name; membership resolves to nobody, so only the
-          // sensei's universal mailbox claims it — including when the subject
-          // IS the sensei, which is the case that must never orphan.
-          const quietMinutes = Math.round((view.now - agent.lastActivityAt) / 60_000)
-          agents.set(agent.name, { status: 'down', probedAt: state.probedAt })
-          exec.emit('agent-down', {
-            subject: agent.name,
-            to: view.sensei ?? undefined,
-            quietMinutes,
-            text: `${agent.name} did not answer a liveness probe — silent ${quietMinutes} min.`,
-            queued: true,
-          })
-          continue
-        }
-
-        // ── `ok`: is it time to ASK? ──
-        //
-        // SESSION-ALIVE ONLY. A gone session is not a question — infra already
-        // knows the answer, and `worker-status: down` above reports it on the
-        // edge. Probing a corpse would produce a guaranteed timeout and a
-        // second report of one fact.
-        if (!agent.sessionLive) continue
-        const bound = holding.has(agent.name) ? view.brokenAfterMs : view.brokenAfterIdleMs
-        if (view.now - agent.lastActivityAt < bound) continue
-        const quietMinutes = Math.round((view.now - agent.lastActivityAt) / 60_000)
-        agents.set(agent.name, { status: 'probed', probedAt: view.now })
-        // AN ORDINARY MESSAGE, and that is the point. It is addressed to the
-        // agent, enters its mailbox, and the notifier announces it exactly as
-        // it announces anything else. It accuses nobody and pushes nowhere
-        // else; if the agent answers, this exchange leaves no report at all.
-        exec.emit('agent-probe', {
-          agent: agent.name,
-          quietMinutes,
-          text: `Liveness check — you have been quiet for ${quietMinutes} min. Reply to confirm you are alive.`,
-          queued: true,
-        })
       }
     },
   }

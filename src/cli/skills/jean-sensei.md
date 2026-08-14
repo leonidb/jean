@@ -218,7 +218,7 @@ The board convention: `in-progress` means actively worked, `waiting` means parke
 
 The ritual, on a nudge opening `Watchdog:` or when the board informs a dispatch decision:
 1. Scan for `stale: true` tasks. For each, judge — worker still on it (a long silent build is healthy; check `session` and `lastActivityAt` on `/agents`), or drifted?
-2. Still on it → leave it. Drifted or blocked → probe first (see below), then ping the worker on the task or park it to `waiting` with a comment saying why.
+2. Still on it → leave it. Drifted or blocked → probe first (see below), then ping the worker on the task or park it to `waiting` with a `blockedOn` (required — see Parking a task) and a comment saying why.
 3. A task that keeps going stale is a smell worth escalating: wrong scope, wrong worker, or a log wearing a task costume (see Data homes).
 
 <!-- Phase-5 swap boundary: steering policy may rewrite this section wholesale. Keep it self-contained. -->
