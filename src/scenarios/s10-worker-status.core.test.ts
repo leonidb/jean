@@ -35,20 +35,21 @@
  * A worker is watched while it holds in-progress work — derived in core from
  * the tasks the view already carries, per-WORKER, not per-task. Consequence
  * (named at plan review): a down worker whose tasks the sensei reroutes leaves
- * the watch-list and never reaches the broken bound — the human report fires
- * only when a down worker sits UNHANDLED past it. Self-quieting when the
- * sensei does its job, loud when nobody does.
+ * the watch-list and stops being reported at all. Self-quieting when the sensei
+ * does its job, loud when nobody does.
+ *
+ * WORK INCLUDES `assigned` since 2026-08-14 — a worker that stopped holding a
+ * dispatched-but-unstarted task was watched by nothing at all before.
  */
 
 import { describe, expect, test } from 'bun:test'
 import type { SupervisedTask } from '../infra/target/supervision.ts'
 import { createSupervisor } from '../infra/target/supervision.ts'
 import {
-  BRIDGE,
   BROKEN_AFTER,
   deliveries,
   MINUTE,
-  recipients,
+  PROBE_TIMEOUT,
   recorder,
   STUCK_AFTER,
   supervisionView,
@@ -64,7 +65,7 @@ function driver() {
 
 /** An in-progress task held by the worker. */
 function held(id = '044', agent = WORKER): SupervisedTask {
-  return { id, title: `task ${id}`, status: 'in-progress', agent, holder: agent, lastEventAt: T0 }
+  return { id, title: `task ${id}`, status: 'in-progress', agent, lastEventAt: T0 }
 }
 
 /** The worker's agent row. Live and freshly-active unless a case says not. */
@@ -212,19 +213,27 @@ describe('S10 (H4) — no per-task reminders, and the worker is never pushed', (
   })
 })
 
-describe('S10 (H4) × S11 — the broken bound chases down workers too', () => {
-  test('a down worker sitting UNHANDLED past the broken bound is reported to the human', () => {
-    // Ruled at plan review, correcting a proposed carve-out: "a worker past
-    // its broken bound is reported to the human once" — ANY worker, down or
-    // stuck. The watch-list mechanics are what keep this quiet when the
-    // sensei reroutes the work; here nobody does, so it must get loud.
+describe('S10 (H4) × S11 — a DOWN worker is reported once, by the status arm alone', () => {
+  test('no probe is sent to a gone session — `worker-status: down` is the whole report', () => {
+    // What this case used to assert: a down worker past the broken bound was
+    // ALSO reported to the human by S11, so one dead session produced two
+    // reports on two paths. Ruled 2026-08-14: the probe path is for SESSION
+    // ALIVE BUT SILENT only. If the session is gone infra already knows the
+    // answer at the instant it drops, and asking a corpse produces a
+    // guaranteed timeout and a second report of one fact.
     const { r, supervisor } = driver()
-    for (let t = T0; t <= T0 + BROKEN_AFTER + 10 * MINUTE; t += 10 * MINUTE) {
+    for (let t = T0; t <= T0 + BROKEN_AFTER + PROBE_TIMEOUT + 10 * MINUTE; t += 10 * MINUTE) {
       supervisor.tick(
         supervisionView({ now: t, tasks: [held()], agents: [workerRow({ sessionLive: false, lastActivityAt: T0 })] }),
       )
     }
-    expect(recipients(r)).toEqual([BRIDGE])
-    expect(r.emitted.filter((e) => e.type === 'agent-unresponsive')).toHaveLength(1)
+    // Exactly one report, from the edge-triggered status arm.
+    expect(r.emitted.filter((e) => e.type === 'worker-status')).toHaveLength(1)
+    expect(r.emitted.filter((e) => e.type === 'worker-status')[0]?.data.status).toBe('down')
+    // …and nothing from the probe path, which would have been the duplicate.
+    expect(r.emitted.filter((e) => e.type === 'agent-probe')).toHaveLength(0)
+    expect(r.emitted.filter((e) => e.type === 'agent-down')).toHaveLength(0)
+    // …and nothing to the human, on any path.
+    expect(deliveries(r)).toBe(0)
   })
 })

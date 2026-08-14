@@ -111,8 +111,32 @@ function authorOf(event: StoredEvent): string | undefined {
     // caught by this file's own invariant test before it shipped). And the
     // disconnect argument holds on the merits: by the time the subject can
     // read the report, it is a RECOVERED session learning it was reported
-    // broken while it was gone. That is news.
+    // broken while it was gone. That is news. Nothing emits this type any
+    // more; the rule stays because every dojo's log still replays it.
     case 'agent-unresponsive':
+      return undefined
+
+    // ── S11'S TWO HALVES, DECIDED EXPLICITLY RATHER THAN INHERITED ──
+    //
+    // `agent-probe` is a QUESTION FOR ITS SUBJECT, and the whole redesign turns
+    // on it actually arriving. `data.agent` is the subject, so returning
+    // undefined here — not treating it as a self-event — is what keeps it in
+    // that agent's mailbox for the notifier to announce. This is the one place
+    // where "an agent has no use for news about itself" is false: being asked
+    // whether you are alive is precisely news for you.
+    case 'agent-probe':
+      return undefined
+
+    // `agent-down` is a REPORT ABOUT one agent, FOR the sensei. It carries no
+    // `data.agent` at all (the subject rides in `subject`), so `resolveAgent`
+    // finds nobody and only the sensei's universal mailbox claims it. Listed
+    // anyway, with its reasoning, because inheriting this from `default` is how
+    // a later change to the default silently re-routes an alarm: the previous
+    // shape of this event named its subject in `agent` and was thereby
+    // delivered to the accused, which woke it, which cleared the alarm — 23
+    // times in two days with no all-clear ever emitted. Membership for this
+    // type is a decision, not a fallthrough.
+    case 'agent-down':
       return undefined
 
     // `disconnect` IS NOT IN THAT LIST, and the exception is load-bearing.

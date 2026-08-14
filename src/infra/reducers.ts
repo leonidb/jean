@@ -29,10 +29,11 @@ export type TaskStatusData = {
    *  at the API boundary (013 S7); recorded so a replay can audit who closed
    *  what. */
   actorRole?: string
-  /** Set when parking (`→ waiting`). See Task.blockedOn. */
+  /** WHO the task waits on. Required on entry to `waiting`. See Task.blockedOn. */
   blockedOn?: BlockedOn
   blockedNote?: string
-  /** Set when parking on `time` (H3). See Task.resumeAt. */
+  /** The snooze — valid with any blocker, demoting its reminder to a daily
+   *  cadence until the date passes. See Task.resumeAt. */
   resumeAt?: string
 }
 
@@ -51,8 +52,8 @@ export type TaskBlockedData = {
   blockedOn: BlockedOn
   note?: string
   actor?: string
-  /** The wake, when the handoff parks on `time` (H3). Like every park field,
-   *  absent means none was chosen for THIS park — never "keep the old one". */
+  /** The snooze this handoff chooses. Like every park field, absent means none
+   *  was chosen for THIS park — never "keep the old one". */
   resumeAt?: string
 }
 
@@ -515,10 +516,10 @@ export const boardReducer: Reducer<Board> = (state, event) => {
           updated.resumeAt = d.resumeAt
         } else {
           // LEAVING `waiting` CLEARS THE PARK. Sticky `blockedOn` would keep a
-          // task that is actively moving on the nag ladder and in the S9
-          // digest, generating reminders for a blocker that no longer exists —
-          // and a sticky `resumeAt` would re-hide the task from the digest on
-          // its NEXT time-park with a date nobody chose for it (H3).
+          // task that is actively moving on a reminder clock, generating
+          // reminders for a blocker that no longer exists — and a sticky
+          // `resumeAt` would demote its NEXT park to a daily cadence on a date
+          // nobody chose for it.
           updated.blockedOn = undefined
           updated.blockedNote = undefined
           updated.blockedSince = undefined
@@ -529,12 +530,11 @@ export const boardReducer: Reducer<Board> = (state, event) => {
     }
 
     case 'task-blocked': {
-      // S8's handoff. Replaces EVERY park field, not only the holder: a note
-      // left over from the previous holder describes a question that has
-      // already been answered — and a resume date left over from a previous
-      // time-park would HIDE the task until a date nobody chose for this one
-      // (architect's F2: time+date → human → time inherited the stale date and
-      // went dark until September). Clear-or-replace, no third option.
+      // S8's handoff. Replaces EVERY park field, not only the blocker: a note
+      // left over from the previous blocker describes a question that has
+      // already been answered — and a snooze left over from a previous park
+      // would DEMOTE this one to a daily cadence until a date nobody chose for
+      // it (architect's F2). Clear-or-replace, no third option.
       const d = event.data as TaskBlockedData
       if (!taskId) return state
       return updateTask(state, taskId, (t) => ({
@@ -608,12 +608,39 @@ export const pendingReducer: Reducer<PendingState> = (state, event) => {
       return d.queued === true ? [...state, event] : state
     }
 
-    // H4's worker status-change events and S11's broken-agent report: the
-    // sensei's mailbox is how it receives them — "the no-bridge fallback rides
-    // normal mailbox + backstop" (ruling, 2026-08-11). Both are subject-self
-    // events for mailbox purposes (mailbox-rules.ts authorOf): the subject has
-    // no use for its own status notice.
+    // H4's worker status-change events: the sensei's mailbox is how it receives
+    // them. A subject-self event for mailbox purposes (mailbox-rules.ts
+    // authorOf) — the subject has no use for its own status notice.
     case 'worker-status':
+      return [...state, event]
+
+    // S11's two halves, and they are addressed to DIFFERENT agents on purpose.
+    //
+    // `agent-probe` is a question FOR the silent agent: it carries `agent`, so
+    // membership resolves to that agent and the notifier announces it — which
+    // is the whole delivery mechanism, no special push.
+    //
+    // `agent-down` is a report ABOUT it, FOR the sensei. It deliberately does
+    // NOT carry `agent` (the subject is in `subject`), because that field is
+    // what membership resolves on: naming the subject there is exactly what
+    // used to deliver the alarm to the accused, waking it and thereby clearing
+    // the alarm it had just been accused by. With no `agent` it resolves to
+    // nobody and only the sensei's universal mailbox claims it — including when
+    // the subject IS the sensei, which is the case that must never orphan.
+    //
+    // Both are admitted IFF queued, the `send`/`task-reminder` precedent: the
+    // write site decides and this fold applies the decision.
+    case 'agent-probe':
+    case 'agent-down': {
+      const d = event.data as { queued?: unknown }
+      return d.queued === true ? [...state, event] : state
+    }
+
+    // `agent-unresponsive` — S11's PREVIOUS shape, kept in the fold for replay
+    // only. Every dojo's log holds these; a fold that stopped admitting them
+    // would change what an old log means, and one that admitted them
+    // unconditionally would resurrect months of answered alarms at the next
+    // restart. Nothing emits this type any more.
     case 'agent-unresponsive':
       return [...state, event]
 

@@ -19,12 +19,20 @@
 export type TaskStatus = 'todo' | 'assigned' | 'in-progress' | 'waiting' | 'done' | 'cancelled'
 
 /**
- * Who a parked task is waiting on (013 S7). Closed set.
+ * WHO a parked task is waiting on (013 S7). Closed set, and REQUIRED on entry
+ * to `waiting` — a task cannot be parked on nobody.
  *
- * `sensei` is inside the dojo and is chased by the S7/S8 nag ladder; the other
- * three are outside it and are what the S9 digest lists.
+ * The blocker decides the reminder's cadence (core/supervision.ts): `sensei` is
+ * inside the dojo and transitory, so it is chased on a short clock; `human` is
+ * hourly; `external` is daily. Every one of them reminds the SENSEI — infra has
+ * no other recipient.
+ *
+ * WHEN to start reminding again is `resumeAt`, a separate field, because a
+ * blocker names a party and a snooze names a date. Conflating them is what an
+ * earlier `'time'` value did, and it cost the auto-restore: a task converted to
+ * `'time'` had forgotten who it was actually waiting on.
  */
-export type BlockedOn = 'sensei' | 'human' | 'external' | 'time'
+export type BlockedOn = 'sensei' | 'human' | 'external'
 
 export type Task = {
   id: string
@@ -44,12 +52,15 @@ export type Task = {
    *  from creation: measured from creation a just-escalated task reads as
    *  ancient, and never reset a ping-ponged one reads as fresh forever. */
   blockedSince?: string
-  /** H3 (ruled 2026-08-11): a time-parked task carries its resume date, set at
-   *  park time — "the date is the wake, a trigger is optional precision." The
-   *  digest excludes the task until this instant and includes it from then on.
-   *  A time-park WITHOUT a date has no wake and is therefore visible
-   *  immediately: never-silently-vanishes outranks the spam concern. Cleared
-   *  on unpark with the rest of the park fields. */
+  /** THE SNOOZE — valid alongside ANY blocker, because it modifies the clock
+   *  rather than the party. While it is in the future the task reminds daily
+   *  instead of on its blocker's own cadence; the instant it passes, the task
+   *  is back on that cadence automatically, with no transition and nothing
+   *  remembered. That is what makes it a snooze rather than a deferral.
+   *
+   *  A snooze DEMOTES, it never SILENCES: a task snoozed three months out is
+   *  one line a day for three months, which is the floor that keeps parked work
+   *  visible. Cleared on unpark with the rest of the park fields. */
   resumeAt?: string
 }
 

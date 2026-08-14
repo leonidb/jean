@@ -70,9 +70,9 @@ export function foldWith<S>(reducer: (s: S, e: StoredEvent) => S, initial: S, lo
 
 export type Recorder = {
   /** Satisfies both machines' effect contracts: the notifier's three effects
-   *  and the supervisor's two. `pushBridge` (the supervisor's ONLY transport
-   *  effect since task 050 — the notifier owns every agent push) records into
-   *  the same `deliver→` trace so `deliveries`/`recipients` read both alike. */
+   *  and the supervisor's one. The supervisor has NO transport effect at all
+   *  since 2026-08-14 — `pushBridge` and the whole infra→human line are gone —
+   *  so every `deliver→` entry in the trace is now the notifier's. */
   exec: TargetExecutor & SupervisionExecutor
   /** `deliver→<agent>` per push, in order. */
   trace: string[]
@@ -101,11 +101,6 @@ export function recorder(lands = true): Recorder {
     drain: () => trace.splice(0).length,
     exec: {
       deliver: (to, text) => {
-        trace.push(`deliver→${to}`)
-        texts.push(text)
-        return landing
-      },
-      pushBridge: (to, text) => {
         trace.push(`deliver→${to}`)
         texts.push(text)
         return landing
@@ -187,57 +182,64 @@ export type World = {
 }
 
 // ── The supervision dials (S7, S8, S10 as replaced by H4, S11) ───
+//
+// THREE REMINDER CLOCKS, one per blocker, all reminding the SENSEI. There is no
+// bridge dial any more: infra cannot reach the human at all, so a test cannot
+// express one either — the type is the guard.
 
-/** How long a parked task waits before its holder is nagged (S7/S8). */
-export const REMINDER_AFTER = 30 * MINUTE
+/** `blockedOn: 'sensei'` — the short, transitory clock. */
+export const SENSEI_REMINDER = 10 * MINUTE
+/** `blockedOn: 'human'`. */
+export const HUMAN_REMINDER = 1 * HOUR
+/** `blockedOn: 'external'`, and anything snoozed. */
+export const DAILY_REMINDER = 1 * DAY
 /** H4's silence bound: a session-alive worker holding active work that has
  *  been jean-silent this long is up-but-stuck. */
 export const STUCK_AFTER = 30 * MINUTE
-/** "Within bounded time" (S11) — the bound. */
+/** The liveness PROBE bound for an agent holding work. */
 export const BROKEN_AFTER = 4 * HOUR
+/** The same, for an agent holding nothing. */
+export const BROKEN_AFTER_IDLE = 24 * HOUR
+/** How long a probed agent has to answer before it is reported down. */
+export const PROBE_TIMEOUT = 5 * MINUTE
 
 export const SENSEI = 'sensei'
 export const BRIDGE = 'chat-human'
 
 export type SupervisionWorld = {
   now: number
-  /** Defaults to `SENSEI`. Null models a dojo where none has registered. */
+  /** Defaults to `SENSEI`. Null models a dojo where none has registered — and
+   *  is now the ONLY recipient any supervision emission can have. */
   sensei?: string | null
-  /** Defaults to `BRIDGE`. NULL is the case O3 rules on. */
-  bridge?: string | null
-  /** Defaults to "everyone named is reachable". */
-  deliverable?: string[]
   tasks?: SupervisedTask[]
   /** `sessionLive` defaults to true — most cases model a connected agent, and
    *  the down cases say so explicitly. */
   agents?: (Omit<SupervisedAgent, 'sessionLive'> & { sessionLive?: boolean })[]
-  reminderAfterMs?: number
+  senseiReminderMs?: number
+  humanReminderMs?: number
+  dailyReminderMs?: number
   stuckAfterMs?: number
   brokenAfterMs?: number
+  brokenAfterIdleMs?: number
+  probeTimeoutMs?: number
 }
 
 export function supervisionView(w: SupervisionWorld): TargetSupervisionView {
   const sensei = w.sensei === undefined ? SENSEI : w.sensei
-  const bridge = w.bridge === undefined ? BRIDGE : w.bridge
   const tasks = w.tasks ?? []
   const agents = (w.agents ?? []).map((a) => ({ sessionLive: true, ...a }))
-  const everyone = [
-    sensei,
-    bridge,
-    ...tasks.map((t) => t.holder),
-    ...tasks.map((t) => t.agent),
-    ...agents.map((a) => a.name),
-  ]
   return {
     now: w.now,
     sensei,
-    bridge,
-    deliverable: w.deliverable ?? [...new Set(everyone.filter((n): n is string => typeof n === 'string'))],
     tasks,
     agents,
-    reminderAfterMs: w.reminderAfterMs ?? REMINDER_AFTER,
+    senseiReminderMs: w.senseiReminderMs ?? SENSEI_REMINDER,
+    humanReminderMs: w.humanReminderMs ?? HUMAN_REMINDER,
+    dailyReminderMs: w.dailyReminderMs ?? DAILY_REMINDER,
     stuckAfterMs: w.stuckAfterMs ?? STUCK_AFTER,
     brokenAfterMs: w.brokenAfterMs ?? BROKEN_AFTER,
+    brokenAfterIdleMs: w.brokenAfterIdleMs ?? BROKEN_AFTER_IDLE,
+    probeTimeoutMs: w.probeTimeoutMs ?? PROBE_TIMEOUT,
   }
 }
 

@@ -105,11 +105,15 @@ async function createTask(queue: string, title: string): Promise<string> {
   return ((await res.json()) as { id: string }).id
 }
 
+/** `blockedOn` is REQUIRED on entry to `waiting` (ruled 2026-08-14) — a task
+ *  cannot be parked on nobody — so it is supplied here rather than at every
+ *  call site. Any blocker will do for these cases; what they assert is
+ *  liveness and staleness, not who is being waited on. */
 async function setStatus(id: string, status: string) {
   await fetch(`${BASE}/tasks/${id}/status`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ status }),
+    body: JSON.stringify({ status, ...(status === 'waiting' && { blockedOn: 'sensei' }) }),
   })
 }
 

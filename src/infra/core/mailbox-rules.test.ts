@@ -97,6 +97,37 @@ describe('no event admitted to pending is orphaned', () => {
     expect(orphans(pending, [SENSEI, WORKER])).toEqual([])
   })
 
+  test('S11 — the PROBE reaches its subject; the DOWN REPORT reaches only the sensei', () => {
+    // The membership decision behind 2026-08-14's probe-then-escalate, asserted
+    // as a consequence rather than as a field shape. The previous S11 event
+    // named its subject in `data.agent`, so the alarm was delivered TO THE
+    // ACCUSED — which woke it, which cleared the alarm, which is why 23 of them
+    // produced zero all-clears.
+    //
+    // WHAT THIS CASE DOES AND DOES NOT CATCH, stated because the distinction
+    // decides where the guard has to live. It builds its own events, so it pins
+    // THE RULE: a change to `authorOf` or to the worker predicate that let a
+    // subject claim its own down-report turns this red. It CANNOT see the
+    // emitter — an `agent-down` that started writing `agent` instead of
+    // `subject` would still pass here, because the fixture would not change.
+    // That half is pinned where the emitter lives (`s11-broken-agent.core` and
+    // `stall-watchdog`), verified by putting the defect back and watching all
+    // three of those fail. Two halves, two files, on purpose.
+    const probe = pendingFrom([ev(1, 'agent-probe', { agent: WORKER, queued: true })])
+    expect(mailboxFor(probe, WORKER, ctx).map((e) => e.id)).toEqual([1])
+    expect(mailboxFor(probe, SENSEI, ctx).map((e) => e.id)).toEqual([1])
+
+    const report = pendingFrom([ev(2, 'agent-down', { subject: WORKER, to: SENSEI, queued: true })])
+    expect(mailboxFor(report, WORKER, ctx)).toEqual([])
+    expect(mailboxFor(report, SENSEI, ctx).map((e) => e.id)).toEqual([2])
+
+    // …and a report about the SENSEI is still claimable, by the sensei. Odd,
+    // and deliberately preferred to the alternative, which is an event in
+    // nobody's mailbox at all — unfetchable, therefore unackable, forever.
+    const aboutSensei = pendingFrom([ev(3, 'agent-down', { subject: SENSEI, to: SENSEI, queued: true })])
+    expect(mailboxFor(aboutSensei, SENSEI, ctx).map((e) => e.id)).toEqual([3])
+  })
+
   test("an agent's own utterances stay OUT of its mailbox — the rule this must not undo", () => {
     // The fix narrows one case; it must not have widened the self-event rule
     // into uselessness. A worker's own reply is still not its own inbox item.
@@ -175,9 +206,27 @@ describe('no event admitted to pending is orphaned', () => {
     // is why authorOf treats this type like `disconnect`, not like a
     // self-event. The first draft of the unification excluded it and THIS
     // test's invariant caught the orphan before it shipped.
+    // The PREVIOUS S11 shape. Nothing emits it any more, but every dojo's log
+    // replays it, so the reducer still admits it and the rules still have to
+    // claim it.
     'agent-unresponsive': [
       { agent: SENSEI, to: 'chat-human' },
       { agent: WORKER, to: SENSEI },
+    ],
+    // S11's two halves, and they are claimed by DIFFERENT agents on purpose.
+    // The probe carries `agent`, so it lands in the subject's own mailbox —
+    // being asked whether you are alive is the one status notice that IS for
+    // you. The report carries `subject` and no `agent`, so it resolves to
+    // nobody and only the sensei's universal mailbox claims it; the
+    // sensei-subject fixture is the adversarial one, because that is the case
+    // an `agent`-keyed report would orphan.
+    'agent-probe': [
+      { agent: WORKER, queued: true },
+      { agent: SENSEI, queued: true },
+    ],
+    'agent-down': [
+      { subject: WORKER, to: SENSEI, queued: true },
+      { subject: SENSEI, to: SENSEI, queued: true },
     ],
     // The S7/S8 nag (task 050). Infra-authored — `data.agent` deliberately
     // absent (five-meanings trap: the addressee lives in `to`) — so no

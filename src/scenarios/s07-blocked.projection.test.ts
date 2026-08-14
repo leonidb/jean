@@ -31,9 +31,8 @@
 
 import { describe, expect, test } from 'bun:test'
 import type { StoredEvent } from '../es/index.ts'
-import { canTransition, type Task } from '../infra/board.ts'
+import { canTransition } from '../infra/board.ts'
 import { canActorTransition, type TargetBoard, targetBoardReducer } from '../infra/target/blocked.ts'
-import { isParked } from '../infra/target/digest.ts'
 import { ev } from './harness.ts'
 
 const TASK = 'task-044'
@@ -110,8 +109,12 @@ describe('S7 — parking a task records WHO it waits on and WHY', () => {
     expect(t?.blockedOn).toBeUndefined()
   })
 
-  test('the four blockedOn values all fold', () => {
-    for (const on of ['sensei', 'human', 'external', 'time'] as const) {
+  test('the three blockedOn values all fold', () => {
+    // `'time'` was a fourth, deleted 2026-08-14: waiting on a clock is a
+    // SNOOZE (`resumeAt`), not a party, and modelling it as a blocker is what
+    // made the auto-restore expensive. Verified unused in the log before the
+    // deletion — a pure removal with nothing to migrate.
+    for (const on of ['sensei', 'human', 'external'] as const) {
       expect(taskOf([created(), started(), parked(on, `waiting on ${on}`)])?.blockedOn).toBe(on)
     }
   })
@@ -175,39 +178,37 @@ describe('S8 — the blocker moves, and infra does not argue', () => {
     expect(Object.keys(t ?? {})).not.toContain('silenced')
   })
 
-  test('S8 × H3 — the handoff clears a stale resume date: time+date → human → time is VISIBLE', () => {
-    // The architect's F2 (this fix round's adversarial pass): every park field
-    // is replaced when the blocker moves — the reducer's own comment says a
-    // leftover note "describes a question that has already been answered" —
-    // and `resumeAt` is a park field. Left sticky, this exact sequence hides
-    // the task until a date NOBODY CHOSE for the final park: the September
-    // date belonged to the first time-park, the handoff to the human ended
-    // that decision, and the return to `time` recorded no new wake. A
-    // time-park with no date has no wake and must be visible (H3's safe
-    // direction) — a stale inherited one is worse than none, because it looks
-    // chosen.
+  test('S8 — the handoff clears a stale SNOOZE: snoozed → handed on → still parked, and awake', () => {
+    // The architect's F2 (the 2026-08-11 adversarial pass): every park field is
+    // replaced when the blocker moves — the reducer's own comment says a
+    // leftover note "describes a question that has already been answered" — and
+    // `resumeAt` is a park field. Left sticky, this sequence demotes the task to
+    // a daily clock until a date NOBODY CHOSE for the current park: the
+    // September date belonged to the first park, and the handoff ended that
+    // decision. A cleared snooze puts the task back on its blocker's own clock,
+    // which is the safe direction — over-reminding costs a line, under-
+    // reminding is the silent vanish.
     const september = '2026-09-01T09:00:00.000Z'
     const t = taskOf([
       created(),
       started(),
-      ev('task-status', TASK, { from: 'in-progress', to: 'waiting', blockedOn: 'time', resumeAt: september }),
-      moved('human', 'needs Leonid first'),
-      moved('time', 'still scheduled-ish, date TBD'),
+      ev('task-status', TASK, { from: 'in-progress', to: 'waiting', blockedOn: 'human', resumeAt: september }),
+      moved('external', 'vendor first'),
+      moved('human', 'back to Leonid, no date this time'),
     ])
-    expect(t?.blockedOn).toBe('time')
+    expect(t?.blockedOn).toBe('human')
     expect(t?.resumeAt).toBeUndefined()
-    expect(isParked(t as Task, Date.parse('2026-08-11T12:00:00.000Z'))).toBe(true)
   })
 
-  test('S8 × H3 — a handoff CARRYING a resume date records it', () => {
-    // Clear-or-replace, both halves: a handoff back to `time` that does choose
-    // a wake keeps it, exactly like the parking PATCH does.
+  test('S8 — a handoff CARRYING a snooze records it', () => {
+    // Clear-or-replace, both halves: a handoff that does choose a new date
+    // keeps it, exactly like the parking PATCH does.
     const october = '2026-10-01T09:00:00.000Z'
     const t = taskOf([
       created(),
       started(),
       parked('human', 'needs Leonid'),
-      ev('task-blocked', TASK, { blockedOn: 'time', note: 'resume in October', resumeAt: october }),
+      ev('task-blocked', TASK, { blockedOn: 'external', note: 'resume in October', resumeAt: october }),
     ])
     expect(t?.resumeAt).toBe(october)
   })

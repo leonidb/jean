@@ -226,11 +226,14 @@ describe('full lifecycle', () => {
     }
     expect(Object.values(counts.counts).reduce((a, b) => a + b, 0)).toBeGreaterThan(0)
 
-    // 11. Mark task waiting then done
+    // 11. Mark task waiting then done. `blockedOn` is REQUIRED on entry to
+    // `waiting` (ruled 2026-08-14) — a task cannot be parked on nobody, because
+    // an absent blocker used to fall back to nagging the sensei and thereby
+    // invented an answer to "who is this waiting on?".
     const waitRes = await fetch(`${BASE}/tasks/${task.id}/status`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ status: 'waiting' }),
+      body: JSON.stringify({ status: 'waiting', blockedOn: 'sensei' }),
     })
     expect(((await waitRes.json()) as { status: string }).status).toBe('waiting')
     const finalRes = await fetch(`${BASE}/tasks/${task.id}/status`, {

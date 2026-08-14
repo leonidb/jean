@@ -128,10 +128,11 @@ export type UpdateStatusRequest = {
    *  omitting this, and cannot acquire the sensei's powers by asserting them
    *  (see the actor gate in server.ts). */
   actorRole?: string
-  /** Set when parking (`→ waiting`) — 013 S7. */
-  blockedOn?: 'sensei' | 'human' | 'external' | 'time'
+  /** WHO the task waits on. REQUIRED when parking (`→ waiting`) — 013 S7. */
+  blockedOn?: 'sensei' | 'human' | 'external'
   blockedNote?: string
-  /** ISO instant, set when parking on `time` (H3). See Task.resumeAt. */
+  /** ISO instant — the snooze. Valid alongside any blocker; it demotes the
+   *  reminder to a daily cadence until it passes. See Task.resumeAt. */
   resumeAt?: string
 }
 

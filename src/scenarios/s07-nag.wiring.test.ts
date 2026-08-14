@@ -54,7 +54,12 @@ beforeAll(async () => {
   rmSync(ROOT, { recursive: true, force: true })
   mkdirSync(ROOT, { recursive: true })
   process.env.JEAN_REGISTRY_PATH = REGISTRY_PATH
-  process.env.JEAN_REMINDER_AFTER_MS = String(REMINDER_AFTER_MS)
+  process.env.JEAN_SENSEI_REMINDER_MS = String(REMINDER_AFTER_MS)
+  // The blocker picks the clock now (ruled 2026-08-14), so a file that parks on
+  // both `sensei` and `human` has to compress both — setting only one would
+  // silently measure the other's default and time out.
+  process.env.JEAN_HUMAN_REMINDER_MS = String(REMINDER_AFTER_MS)
+  process.env.JEAN_DAILY_REMINDER_MS = String(REMINDER_AFTER_MS)
   // Quiet clock small, backoff huge: the first announcement after an arrival
   // can fire fast, and any SECOND push inside a test window is a failure, not
   // a rung.
@@ -73,7 +78,9 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  delete process.env.JEAN_REMINDER_AFTER_MS
+  delete process.env.JEAN_SENSEI_REMINDER_MS
+  delete process.env.JEAN_HUMAN_REMINDER_MS
+  delete process.env.JEAN_DAILY_REMINDER_MS
   delete process.env.JEAN_NUDGE_INTERVAL_MS
   delete process.env.JEAN_NUDGE_BACKOFF_MS
   sensei?.ws.close()
@@ -261,16 +268,17 @@ describe('the waiting-task nag rides the mailbox (task 050)', () => {
     expect(nag?.code).toBeTruthy()
   }, 15_000)
 
-  test('a HUMAN-parked task nags the bridge surface directly — and the event is still the record (S8)', async () => {
-    // The production path for the bridge-holder leg, end to end, through the
-    // public API — added after the Codex adversarial pass argued the leg was
-    // only pinned by core tests that fabricate holders. Parking ON the human
-    // is one legal PATCH (`in-progress → waiting {blockedOn: 'human'}`), so
-    // the leg is reachable without the (yet route-less) task-blocked handoff:
-    // holder resolves to the CONNECTED user surface, the push carries the raw
-    // nag sentence on the human's own protocol (Leonid's ruling: a foreign
-    // protocol with no mailbox — direct push is the correct shape), and the
-    // emitted event enters pending, claimable from the sensei's mailbox.
+  test('a HUMAN-parked task reminds the SENSEI — and the human is never pushed (S8)', async () => {
+    // THE INVERSION OF WHAT THIS CASE USED TO ASSERT. It was added after a
+    // Codex pass argued the bridge leg was pinned only by core tests that
+    // fabricated holders; it pinned the leg through the public API, and the leg
+    // is now deleted. Ruled 2026-08-14, Leonid: "a reminder to the human was
+    // always, from the start, meant to remind Sensei, not the human… there
+    // shouldn't be automatic messages to the human from infra."
+    //
+    // Parking ON the human is still one legal PATCH, and it still reminds — on
+    // the hourly clock, into the SENSEI's mailbox. What the human gets is
+    // whatever the sensei decides to send them, which is the entire point.
     using human = await connectAgent(ws, 'chat-human', 'user')
 
     const created = (await (
@@ -292,23 +300,18 @@ describe('the waiting-task nag rides the mailbox (task 050)', () => {
       body: JSON.stringify({ status: 'waiting', blockedOn: 'human' }),
     })
 
-    // The human's surface receives the nag ITSELF — raw sentence, its own
-    // protocol, no mailbox involved.
-    expect(
-      await until(() =>
-        human.messages.some(
-          (m): m is DeliverMsg => m.type === 'deliver' && m.from === 'infra' && /is waiting on human/.test(m.text),
-        ),
-      ),
-    ).toBe(true)
-
-    // And the report of record exists regardless of the push: in pending,
-    // addressed to the bridge, claimable (with a code) from the sensei's
-    // universal mailbox — the ruling's one hard condition.
+    // The reminder exists, addressed to the sensei and claimable from its
+    // mailbox with a code — the ruling's one hard condition, unchanged.
+    expect(await until(async () => nagsFor(await observePending(), humanTask).length > 0)).toBe(true)
     const [record] = nagsFor(await observePending(), humanTask)
-    expect(record?.data).toMatchObject({ taskId: humanTask, to: 'chat-human', queued: true })
+    expect(record?.data).toMatchObject({ taskId: humanTask, to: 'sensei', queued: true })
     const senseiCopy = nagsFor(await fetchMailbox(), humanTask)
     expect(senseiCopy).toHaveLength(1)
     expect(senseiCopy[0]?.code).toBeTruthy()
+
+    // AND THE HUMAN HEARD NOTHING. Asserted after the reminder has provably
+    // fired, so this is "it fired and did not reach them" rather than "nothing
+    // has happened yet" — the difference between a real absence and a race.
+    expect(human.messages.filter((m): m is DeliverMsg => m.type === 'deliver' && m.from === 'infra')).toHaveLength(0)
   }, 15_000)
 })

@@ -77,8 +77,11 @@ Each event has: `id`, `type`, `taskId` (if task-related), `agent` (whom it conce
 - **playbook-removed** — a playbook was removed.
 - **wiki-consolidated** — the librarian finished a consolidation run. `data` summarizes what changed (`pagesUpdated`, `pagesCreated`, `corrections`, `tasksDistilled`, `eventsProcessed`). If `data.anomalies` is non-empty, surface those to the human in your next reply — they're things the librarian flagged but didn't auto-fix (stale references, files it couldn't extract, contradictions it punted on). Otherwise just ack and move on; routine consolidations don't warrant a nudge.
 - **worker-status** — a worker's supervision state changed. `data.status`: `down` (no live session), `up-but-stuck` (session alive but jean-silent past the bound while holding active work), `recovered`. Emitted on change only — one per worker, however many tasks it holds. On `down`/`up-but-stuck`: load the worker's task and decide — nudge it, re-dispatch, or reroute the work; on `recovered`: nothing, unless you were mid-intervention. `data.text` carries the one-line story, task ids included.
-- **agent-unresponsive** — an agent sat silent past the broken bound. With a bridge configured the human has already been told directly; when this lands in YOUR mailbox you are the human channel — surface it to the human, don't just ack it.
-- **task-reminder** — a parked task has sat untouched past the reminder window, and `data.to` names who holds the blocker. `data.text` says which task and what it waits on. Addressed to you: act on the task (answer, reroute, escalate) — then ack; acking without acting just means the next reminder comes a window later. Addressed to a bridge user (`data.to` isn't a dojo agent): the human was already pushed directly; this copy is yours to read and ack, and only worth raising if the task looks forgotten.
+- **agent-down** — an agent went silent past its bound, was probed, and did not answer. `data.subject` names it. This only exists once an agent has genuinely failed to respond to a direct question, so treat it as a fact rather than a suspicion: load what it holds, re-dispatch or reroute, and decide whether it is worth telling the human. Nothing was sent to them — infra never messages a person.
+- **agent-probe** — you may see one in your queue; it is a liveness question infra asked an agent, not a report about it. Ack and move on. If the agent answers there is no further event; the absence of `agent-down` is the all-clear.
+- **task-reminder** — a parked task has sat past its blocker's reminder window. `data.text` says which task, what it waits on, and whether it is snoozed. Every one is addressed to YOU, whatever the blocker: infra measures, you decide. Act on the task (answer, chase, escalate, snooze) — then ack; acking without acting just means the next reminder comes a window later.
+
+  **The daily picture is yours to compose.** Externally-blocked and snoozed tasks remind once a day, and several arriving together is the whole parked picture, not a queue to answer one by one. Fold them into ONE message to the human: a compact table — id · what it is (one line) · status · waiting on (who/what, how long). Include the hourly human-blocked items too; they don't generate the daily wake but they belong in the picture. Write it to be skimmed and skipped — no urgency markers, no closing question. If nothing is parked there are no reminders and there is nothing to send.
 
 ## Tasks — the dojo's central unit
 
@@ -186,9 +189,28 @@ infra(method="GET", path="/playbooks/<name>")
 6. If `openTasks > 0` (busy) or `session === "offline"`: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"assigned"})` (queued — dispatch at the worker's next completion boundary)
 7. Ack the task-created event
 8. Wait — you'll be nudged when the worker replies or comments. A worker going idle is silent (no event enters your queue); if in doubt, check the board.
-9. Use `waiting` when a task is paused for external input. Resume to `in-progress` when ready.
+9. Use `waiting` when a task is paused. `blockedOn` is REQUIRED — a task cannot be parked on nobody. Resume to `in-progress` when ready.
 
 **Silence does not mean empty.** Routine machine events do not push at all — they wait for the quiet clock, which is measured from YOUR last activity, so an actively-working sensei is deliberately not interrupted by them. No nudge ≠ no pending. The `[inbox]` piggyback line on your tool results is the live truth; trust it over the absence of a nudge. Once you have been told about a queue, repeats follow a backoff (default ≤10 min), so a known event can stay quiet for a window. The trailer rides tool results — a turn with no tool calls sees neither push nor trailer, so when in doubt and hands-free, `inbox({view: 'counts'})`.
+
+## Parking a task — the status discipline
+
+A parked task always names who it waits on, and that choice sets how often you hear about it:
+
+```
+worker blocks on you        →  waiting / blockedOn: sensei     short clock; transitory
+  you cannot resolve it     →  waiting / blockedOn: human      hourly, through you
+  waiting on someone else   →  waiting / blockedOn: external   daily
+  human says "not now"      →  waiting / <same blocker> + resumeAt   daily until the date
+  human says "not now,      →  todo                            only ever from their decision
+   and not soon"
+```
+
+`blockedOn: sensei` is transitory by design: a worker is stalled the whole time it sits, so its reminder exists to force one question — am I resolving this, or escalating it to the human? Let it drift and a worker drifts with it.
+
+`resumeAt` is a SNOOZE and rides any blocker: it drops the task to a daily reminder and restores its own clock automatically once the date passes. Snoozing does not change what the task waits on, and it does not silence it — a snoozed task is one line a day until its date.
+
+**`todo` is not a silencing mechanism.** A task awaiting the human's verdict belongs in `waiting / blockedOn: human`, where it is visible and reminds. Moving it to `todo` makes it indistinguishable from unscheduled work and it stops reminding entirely — which is how a decision someone is waiting on disappears. Move a task to `todo` only when the human has said, in words, that it is not happening soon.
 
 ## Task housekeeping — keeping in-progress truthful
 

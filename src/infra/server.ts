@@ -47,7 +47,6 @@ import {
 import { createSupervisor, type SupervisionView } from './core/supervision.ts'
 import { planTriggers } from './core/triggers.ts'
 import { viewsFor } from './core/views.ts'
-import { buildDigest } from './digest.ts'
 import { buildInbox, inboxGroupOf, renderInboxLine, renderInboxWake } from './inbox.ts'
 import { commitConsolidation, type LibrarianPhase, recoverWikiLayout } from './librarian.ts'
 import { type AgentSession, classifySession, envMs } from './liveness.ts'
@@ -423,12 +422,11 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   )
 
   // The supervision machine (S7/S8/S10/S11). Its own clock: it reads TASKS
-  // and AGENT LIVENESS rather than a queue. Its emissions enter pending and
-  // ride the mailbox like everything else (task 050 closed the last holdout —
-  // the S7 nag); `pushBridge` is its ONLY transport effect, the direct leg to
-  // the human's surface, which is the one audience outside the unification.
+  // and AGENT LIVENESS rather than a queue. ONE effect, and the singularity is
+  // the guard: every emission enters pending and rides the mailbox like
+  // everything else. There is no transport here at all — infra measures, the
+  // sensei decides who to bother (ruled 2026-08-14).
   const supervisor = createSupervisor({
-    pushBridge: (to, text) => ports.deliver(to, { type: 'deliver', from: 'infra', text }),
     emit: (type, data) => void record(type, SYSTEM_STREAM, data),
   })
 
@@ -991,19 +989,25 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   //  exported and still used by the inbox, which classifies human senders for
   //  the PAYLOAD even though nothing routes on it any more.)
 
-  /** One line per parked task, or an explicit nothing. NEVER "and N more":
-   *  S9's third requirement is exactly the rule that a long list is
-   *  inconvenient rather than trimmable. */
-  function renderDigest(lines: string[]): string {
-    if (lines.length === 0) return 'Parked work: nothing waiting on anyone outside the dojo.'
-    return [`Parked work — ${lines.length} item${lines.length === 1 ? '' : 's'}:`, ...lines].join('\n')
-  }
-
-  /** The built-in parked-work digest (S9). A normal trigger — see the startup
-   *  block for why infra creates it and why it may be removed. */
-  const DIGEST_TRIGGER_ID = 'parked-digest'
-  /** DIAL: 09:00 daily. */
-  const DIGEST_CRON = process.env.JEAN_DIGEST_CRON ?? '0 9 * * *'
+  // ── S9'S DIGEST IS NO LONGER A SCHEDULED JOB (ruled 2026-08-14) ──
+  //
+  // What stood here built a digest string and a `parked-digest` cron trigger
+  // fired it at 09:00 daily. Both are gone, and the requirement they served is
+  // now met by the reminder clocks themselves: a parked task reminds on its
+  // blocker's cadence, `external` and snoozed ones daily, so the whole parked
+  // picture arrives in the sensei's mailbox without a scheduler.
+  //
+  // The property that made the trigger wrong: it fired whether or not anything
+  // was parked. Leonid, verbatim: "Ideally, this one also should not fire if
+  // there are no waiting events. It should not fire at all." A reminder event
+  // IS the wake, so no parked work means no event and no wake — self-gating by
+  // construction, which is the thing a scheduled job had to be told to check
+  // and, in three consecutive firings, never did.
+  //
+  // COMPOSING several reminders into one readable morning message is the
+  // SENSEI's job, in its skill. That is the governing principle applied: infra
+  // emits the facts on the right clocks; judgement about presentation is not
+  // infra's to hold.
 
   /** A positive-number env override, or the default. */
   function envNumber(name: string, fallback: number): number {
@@ -1035,19 +1039,45 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     return [120_000, 300_000, 600_000]
   })()
 
-  /** How long a parked task waits before its holder is nagged (S7/S8). */
-  const REMINDER_AFTER_MS = envNumber('JEAN_REMINDER_AFTER_MS', 1_800_000)
+  // ── The three reminder clocks, one per blocker (ruled 2026-08-14) ────
+  //
+  // Recipient is always the sensei; the blocker picks which of these applies,
+  // and a live `resumeAt` demotes any of them to the daily one.
+
+  /** `blockedOn: 'sensei'` — TRANSITORY BY DESIGN, so this is the tight one.
+   *  A worker is stalled the whole time such a task sits, and the reminder's
+   *  job is to force the question "am I resolving this or escalating it to the
+   *  human?". Ten minutes is short enough that drifting is a choice rather than
+   *  an oversight, and long enough to answer a question in. */
+  const SENSEI_REMINDER_MS = envNumber('JEAN_SENSEI_REMINDER_MS', 600_000)
+  /** `blockedOn: 'human'` — hourly, meant to read as immediate and to expect
+   *  the human to be available. The cadence of a live workday; anything they
+   *  cannot act on today belongs on a snooze, not on this clock. */
+  const HUMAN_REMINDER_MS = envNumber('JEAN_HUMAN_REMINDER_MS', 3_600_000)
+  /** `blockedOn: 'external'`, and any snoozed task. The floor that keeps parked
+   *  work visible: one line a day, written to be skimmed and skipped. */
+  const DAILY_REMINDER_MS = envNumber('JEAN_DAILY_REMINDER_MS', 86_400_000)
   /** H4's silence bound: a session-alive worker holding active work that has
    *  been jean-silent this long is up-but-stuck. */
   const STUCK_AFTER_MS = envNumber('JEAN_STUCK_AFTER_MS', 1_800_000)
-  /** "Within bounded time" (S11) — the bound. */
+  /** The liveness PROBE bound for an agent holding work (in-progress or
+   *  assigned). Reaching it asks a question; it no longer reports anything. */
   const BROKEN_AGENT_AFTER_MS = envNumber('JEAN_BROKEN_AGENT_AFTER_MS', 14_400_000)
+  /** The same bound for an agent holding NOTHING. Far longer on purpose: an
+   *  idle agent that has stopped costs nothing until someone dispatches to it,
+   *  and knowing before that happens is the whole requirement. */
+  const BROKEN_AGENT_IDLE_AFTER_MS = envNumber('JEAN_BROKEN_AGENT_IDLE_AFTER_MS', 86_400_000)
+  /** How long a probed agent has to answer before it is reported down.
+   *  Deliberately conservative — a false down-report is worse than a late one,
+   *  and an agent mid-turn can easily be minutes from its next jean call. */
+  const PROBE_TIMEOUT_MS = envNumber('JEAN_PROBE_TIMEOUT_MS', 300_000)
 
   /** Tick grids. Finer than the smallest window they serve, so the guarantee is
    *  "by the first tick at or after the deadline" rather than a whole window
-   *  late. */
+   *  late. The probe timeout is now the smallest supervision window, so it is
+   *  what the grid has to clear. */
   const NOTIFY_TICK_MS = Math.min(15_000, NUDGE_INTERVAL_MS, ...NUDGE_BACKOFF_MS)
-  const SUPERVISE_TICK_MS = Math.min(60_000, REMINDER_AFTER_MS, BROKEN_AGENT_AFTER_MS)
+  const SUPERVISE_TICK_MS = Math.min(60_000, SENSEI_REMINDER_MS, PROBE_TIMEOUT_MS, BROKEN_AGENT_AFTER_MS)
 
   /** The agent behind an HTTP request, per its `x-jean-agent` header. The channel
    *  plugin percent-encodes the name (HTTP headers are Latin-1-only; a non-ASCII
@@ -1307,42 +1337,33 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
     return {
       now,
       sensei: senseiMailboxOwner() ?? null,
-      // O3: the human's surface when there is one, the sensei when there is not.
-      bridge: [...userAgentNames].find((n) => agents.has(n)) ?? null,
-      deliverable: [...agents.keys()],
+      // NO `bridge`, NO `deliverable`. Both existed only to feed the deleted
+      // `pushBridge`; with infra no longer able to reach the human there is
+      // nothing for either to decide, and leaving them would be an invitation.
       tasks: boardProjection.state.tasks
-        .filter((t) => t.status === 'in-progress' || t.status === 'waiting')
-        .map((t) => {
-          // WHO GETS NAGGED, resolved here so the decisions never look up a
-          // role: a parked task's holder is the sensei unless the blocker moved
-          // to the human, in which case it is the bridge (S8).
-          const holder =
-            t.status === 'waiting'
-              ? t.blockedOn === 'human'
-                ? ([...userAgentNames].find((n) => agents.has(n)) ?? senseiMailboxOwner())
-                : senseiMailboxOwner()
-              : t.agent
-          return {
-            id: t.id,
-            title: t.title,
-            status: t.status,
-            agent: t.agent,
-            blockedOn: t.blockedOn,
-            holder,
-            lastEventAt: Date.parse(t.updatedAt),
-            // An unacked nag for this task addressed to the CURRENT holder
-            // (task 050, decision (a)): while one sits in pending the holder
-            // is told and the notifier repeats — the supervisor must not
-            // duplicate it. Matched per-holder so a handoff's fresh nag is
-            // never gated on the OLD holder's ack.
-            nagOutstanding: pendingProjection.state.some(
-              (e) =>
-                e.type === 'task-reminder' &&
-                (e.data as TaskReminderData).taskId === t.id &&
-                (e.data as TaskReminderData).to === holder,
-            ),
-          }
-        }),
+        // `assigned` joins the watch-list (ruled 2026-08-14): a worker holding a
+        // dispatched-but-unstarted task was covered by nothing before.
+        .filter((t) => t.status === 'in-progress' || t.status === 'assigned' || t.status === 'waiting')
+        .map((t) => ({
+          id: t.id,
+          title: t.title,
+          status: t.status,
+          agent: t.agent,
+          blockedOn: t.blockedOn,
+          // Parsed HERE so the decisions stay clock-free and never see a
+          // string. Unparseable reads as absent — a broken date must not make
+          // the snooze comparison silently always-true.
+          ...(t.resumeAt !== undefined &&
+            !Number.isNaN(Date.parse(t.resumeAt)) && { resumeAt: Date.parse(t.resumeAt) }),
+          lastEventAt: Date.parse(t.updatedAt),
+          // An unacked nag for this task (task 050, decision (a)): while one
+          // sits in pending the sensei is told and the notifier repeats — the
+          // supervisor must not duplicate it. The recipient is always the
+          // sensei now, so this no longer has to match a holder.
+          nagOutstanding: pendingProjection.state.some(
+            (e) => e.type === 'task-reminder' && (e.data as TaskReminderData).taskId === t.id,
+          ),
+        })),
       agents: (() => {
         const rows = new Map<string, { name: string; role: string; lastActivityAt: number; sessionLive: boolean }>()
         for (const [name, e] of agents) {
@@ -1366,18 +1387,22 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
         // task keeps the broken bound sane across infra restarts (from-epoch
         // would report every down worker to the human within one tick).
         for (const t of boardProjection.state.tasks) {
-          if (t.status !== 'in-progress' || !t.agent || rows.has(t.agent)) continue
+          if ((t.status !== 'in-progress' && t.status !== 'assigned') || !t.agent || rows.has(t.agent)) continue
           if (senseiNames.has(t.agent) || userAgentNames.has(t.agent) || peers.has(t.agent)) continue
           const heldClock = boardProjection.state.tasks
-            .filter((x) => x.status === 'in-progress' && x.agent === t.agent)
+            .filter((x) => (x.status === 'in-progress' || x.status === 'assigned') && x.agent === t.agent)
             .reduce((hi, x) => Math.max(hi, Date.parse(x.updatedAt) || 0), 0)
           rows.set(t.agent, { name: t.agent, role: 'worker', lastActivityAt: heldClock || now, sessionLive: false })
         }
         return [...rows.values()]
       })(),
-      reminderAfterMs: REMINDER_AFTER_MS,
+      senseiReminderMs: SENSEI_REMINDER_MS,
+      humanReminderMs: HUMAN_REMINDER_MS,
+      dailyReminderMs: DAILY_REMINDER_MS,
       stuckAfterMs: STUCK_AFTER_MS,
       brokenAfterMs: BROKEN_AGENT_AFTER_MS,
+      brokenAfterIdleMs: BROKEN_AGENT_IDLE_AFTER_MS,
+      probeTimeoutMs: PROBE_TIMEOUT_MS,
     }
   }
 
@@ -1753,18 +1778,13 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       return
     }
 
+    // EVERY trigger delivers its own prompt. The one exception was the built-in
+    // digest, which carried generated content instead; it is gone with the
+    // trigger itself (see the S9 note above `envNumber`).
     const delivered = ports.deliver(trigger.agent, {
       type: 'deliver',
       from: 'trigger',
-      // THE DIGEST CARRIES ITS OWN CONTENT (S9). Every other trigger delivers
-      // its prompt and the agent goes and looks; a digest that did that would
-      // be an interruption asking the sensei to do work, which is the one thing
-      // S9 says it must not be. Built at FIRE time, so the ages are the ages
-      // now — the same freshness rule as every other payload in this system.
-      text:
-        trigger.id === DIGEST_TRIGGER_ID
-          ? renderDigest(buildDigest(boardProjection.state, ports.now()))
-          : trigger.prompt,
+      text: trigger.prompt,
     })
     if (delivered) {
       const entry = agents.get(trigger.agent)
@@ -2172,19 +2192,27 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
       if (actorRole && !canActorTransition(actorRole, task.status, body.status as TaskStatus)) {
         return Response.json({ error: `${actorRole} may not drive ${task.status} → ${body.status}` }, { status: 403 })
       }
-      // H3: the resume date rides the SAME PATCH that parks — "set at park
-      // time". Validated here (an unparseable date on the task would make the
-      // digest's date comparison silently always-true), and only meaningful
-      // with `blockedOn: 'time'`; recording it on other parks is harmless but
-      // refused for the same reason unknown fields are: a caller that thinks
-      // it scheduled a wake should find out now, not in September.
-      if (body.resumeAt !== undefined) {
-        if (body.blockedOn !== 'time') {
-          return Response.json({ error: 'resumeAt only applies with blockedOn: "time"' }, { status: 400 })
-        }
-        if (Number.isNaN(Date.parse(body.resumeAt))) {
-          return Response.json({ error: `unparseable resumeAt: ${body.resumeAt}` }, { status: 400 })
-        }
+      // A TASK CANNOT BE PARKED ON NOBODY (ruled 2026-08-14). `blockedOn` was
+      // optional, and an absent value fell back to nagging the sensei — which
+      // silently invented an answer to "who is this waiting on?" and put the
+      // task where the human could never see it. Required on ENTRY to
+      // `waiting`, so the question is answered by the caller that knows.
+      if (body.status === 'waiting' && !body.blockedOn) {
+        return Response.json(
+          { error: 'parking a task requires blockedOn: "sensei" | "human" | "external"' },
+          { status: 400 },
+        )
+      }
+      // THE SNOOZE rides the same PATCH, and is valid with ANY blocker: it
+      // modifies the CLOCK, not the party. Requiring a particular blocker is
+      // what the deleted `'time'` value did, and it cost the auto-restore —
+      // a task converted to `'time'` had forgotten who it was really waiting
+      // on, so returning it meant remembering what it had been demoted from.
+      // Only the date is checked: an unparseable one would make the snooze
+      // comparison silently always-true, and a caller that thinks it scheduled
+      // something should find out now rather than in September.
+      if (body.resumeAt !== undefined && Number.isNaN(Date.parse(body.resumeAt))) {
+        return Response.json({ error: `unparseable resumeAt: ${body.resumeAt}` }, { status: 400 })
       }
       await record('task-status', taskStream(task.id), {
         from: task.status,
@@ -3387,27 +3415,11 @@ export async function createInfraServer(opts: CreateInfraServerOptions = {}): Pr
   await initBridge()
   await initSources()
 
-  // ── The parked-work digest (013 S9; 042 DEVIATION-5) ────────────
-  //
-  // Infra guarantees the digest EXISTS; the schedule is a dial. So it is
-  // created as a NORMAL trigger — visible in `GET /triggers`, editable,
-  // disable-able and removable exactly like any other (ruled 2026-08-05). What
-  // infra owns is that a dojo never silently has no digest at all; what the
-  // human owns is when it runs and whether they want it.
-  //
-  // Created ONCE, keyed by id: `trigger-created` for an id the projection
-  // already knows is skipped, so a restart does not resurrect a trigger someone
-  // deliberately removed... which is exactly why the check is against the
-  // projection rather than a "have I done this before" flag.
-  if (!triggerProjection.state.triggers.some((t) => t.id === DIGEST_TRIGGER_ID)) {
-    await record('trigger-created', TRIGGERS_STREAM, {
-      id: DIGEST_TRIGGER_ID,
-      cron: DIGEST_CRON,
-      agent: senseiMailboxOwner() ?? 'sensei',
-      prompt: 'parked work — daily digest',
-      actor: 'infra',
-    } satisfies TriggerCreatedData)
-  }
+  // NO BUILT-IN TRIGGER IS SEEDED HERE. A `parked-digest` cron was created at
+  // this point on every boot; it is deleted with the digest job itself (see the
+  // S9 note above `envNumber`). Infra now guarantees parked work is VISIBLE
+  // rather than guaranteeing a scheduled job exists — the reminder clocks carry
+  // it, and they cannot fire when nothing is parked.
 
   // Start scheduled trigger jobs from projection state
   syncTriggerJobs()

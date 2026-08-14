@@ -12,16 +12,26 @@
  *
  * But the RULING on task 043's casualty list was explicit that this is not a
  * whole-file casualty — "something watchdog-shaped survives as the long-wait
- * backstop; its cases get adapted rather than deleted". That survivor is S11:
- * an agent that never acks and never acts is a BROKEN AGENT, reported to the
- * human on a louder channel. Same question the watchdog was asking — "what
- * catches a dojo that has quietly stopped?" — answered by a mechanism that
- * reports rather than one that shouts louder at somebody who is not listening.
+ * backstop; its cases get adapted rather than deleted". That survivor is S11.
  *
- * So the file keeps its name and its two cases keep their shapes: one proves the
- * backstop FIRES, one proves it STANDS DOWN. What moved is the trigger (silence
- * past a bound, not a stuck flag) and the audience (the human's channel, not the
- * sensei's own).
+ * So the file keeps its name and its two cases keep their shapes: one proves
+ * the backstop FIRES, one proves it STANDS DOWN.
+ *
+ * ── THE AUDIENCE CHANGED, AND THAT IS NOW THE SHARPEST ASSERTION ──
+ *
+ * These cases used to end at the HUMAN's socket: silence past a bound produced
+ * a direct push to the bridge. Deleted 2026-08-14 — infra has no line to the
+ * human at all. What happens instead, in order:
+ *
+ *   silent past its bound  → an `agent-probe` addressed to the agent
+ *     answered             → NOTHING. no event, no notification.
+ *     unanswered           → an `agent-down` in the SENSEI's mailbox
+ *
+ * The human is never in that sequence. So the case that used to assert "the
+ * report arrived on the human's channel" now asserts the opposite, and it is
+ * the most valuable line in the file: a reintroduced direct push would light it
+ * up immediately, at the level where a port deletion could still be worked
+ * around by a new call site.
  *
  * ── WHY AT THIS LEVEL AT ALL ──
  *
@@ -53,6 +63,9 @@ const DATA_DIR = '/tmp/jean-test-stall-watchdog'
 /** The bound. Shrunk so "silent past it" is reachable in-test; the supervise
  *  tick is `min(60s, reminderAfter, brokenAfter)`, so this also sets the grid. */
 const BROKEN_AFTER_MS = 700
+/** How long a probed agent has to answer. Short enough that the escalation is
+ *  observable in-test, long enough to be distinguishable from the bound. */
+const PROBE_TIMEOUT_MS = 400
 let server: Subprocess
 
 beforeAll(async () => {
@@ -66,12 +79,18 @@ beforeAll(async () => {
       JEAN_PORT: String(TEST_PORT),
       JEAN_DATA_DIR: DATA_DIR,
       JEAN_BROKEN_AGENT_AFTER_MS: String(BROKEN_AFTER_MS),
+      // The agents here hold no tasks, so it is the IDLE bound that governs
+      // them. Setting only the working one would have measured the 24h default
+      // and timed out — the tiered bound (ruled 2026-08-14) makes this the
+      // dial that actually applies.
+      JEAN_BROKEN_AGENT_IDLE_AFTER_MS: String(BROKEN_AFTER_MS),
+      JEAN_PROBE_TIMEOUT_MS: String(PROBE_TIMEOUT_MS),
       // Park the two clocks that would otherwise deliver into these assertions:
       // the task nag (no tasks here, but its tick shares the grid) and the quiet
       // notifier. OLD: `JEAN_STALL_NUDGE_MS` / `JEAN_BLOCKING_BACKOFF_MS`,
       // neither of which names anything any more — a test setting a dead env var
       // configures nothing and silently measures the defaults.
-      JEAN_REMINDER_AFTER_MS: String(600_000),
+      JEAN_SENSEI_REMINDER_MS: String(600_000),
       JEAN_NUDGE_INTERVAL_MS: String(600_000),
     },
     stdout: 'ignore',
@@ -94,93 +113,101 @@ afterAll(() => {
 const BASE = `http://127.0.0.1:${TEST_PORT}`
 const WS_URL = `ws://127.0.0.1:${TEST_PORT}/ws`
 
-/** The backstop's own voice. OLD: `text.startsWith('Watchdog:')`. The report is
- *  addressed to a human, so it reads like one sentence about one agent rather
- *  than a machine prefix — matching on the agent name and the verb is what
- *  survives a wording change without becoming a match-anything. */
-const isBrokenReport = (m: OutboundMsg, agent: string): m is DeliverMsg =>
-  m.type === 'deliver' && m.from === 'infra' && m.text.startsWith(`${agent} has not responded`)
+/** Supervision's own emissions, read from the log — the only place they exist
+ *  now that nothing is pushed anywhere. */
+async function supervisionEvents(): Promise<Array<{ type: string; data: Record<string, unknown> }>> {
+  const hist = (await (await fetch(`${BASE}/history?last=80`)).json()) as {
+    events: Array<{ type: string; data: Record<string, unknown> }>
+  }
+  return hist.events.filter((e) => e.type === 'agent-probe' || e.type === 'agent-down')
+}
 
-const reports = (msgs: OutboundMsg[], agent: string) => msgs.filter((m) => isBrokenReport(m, agent))
+const probesFor = (rows: Array<{ type: string; data: Record<string, unknown> }>, agent: string) =>
+  rows.filter((e) => e.type === 'agent-probe' && e.data.agent === agent)
+const downsFor = (rows: Array<{ type: string; data: Record<string, unknown> }>, agent: string) =>
+  rows.filter((e) => e.type === 'agent-down' && e.data.subject === agent)
 
-async function until(pred: () => boolean, budgetMs = 6_000): Promise<boolean> {
+/** ANY push that reached a socket from infra. The human must never see one. */
+const infraPushes = (msgs: OutboundMsg[]): DeliverMsg[] =>
+  msgs.filter((m): m is DeliverMsg => m.type === 'deliver' && m.from === 'infra')
+
+async function until(pred: () => boolean | Promise<boolean>, budgetMs = 6_000): Promise<boolean> {
   const deadline = Date.now() + budgetMs
   while (Date.now() < deadline) {
-    if (pred()) return true
+    if (await pred()) return true
     await Bun.sleep(50)
   }
-  return pred()
+  return await pred()
 }
 
 describe('the long-wait backstop (S11)', () => {
   test(
-    'FIRES: an agent silent past the bound is reported — once, on the human’s channel',
+    'FIRES: an agent silent past the bound is PROBED, then reported to the SENSEI — never to the human',
     async () => {
-      // The human is connected FIRST and is the audience: O3 says the report
-      // goes to the bridge when there is one and the sensei only when there is
-      // not. Reporting a broken worker into the queue of the orchestrator that
-      // is already failing to get anything out of it is the shape of an alert
-      // nobody reads.
+      // The human is connected throughout and is the audience that must NOT be
+      // reached. Reporting a broken worker to a person who cannot restart it,
+      // at whatever hour the bound expires, is the behaviour this replaces.
       using human = await connectAgent(WS_URL, 'watch-human', 'user')
       using _sensei = await connectAgent(WS_URL, 'sensei', 'sensei')
       using _worker = await connectAgent(WS_URL, 'w1', 'worker')
 
       // Nothing is stuck and no flag is involved — the worker simply says
-      // nothing. That is the whole precondition now, and it is the one that
-      // covers "busy" and "dead" as a single case (canon E3).
-      expect(await until(() => reports(human.messages, 'w1').length > 0)).toBe(true)
-      const report = reports(human.messages, 'w1')[0]
-      expect(report?.text).toContain('no activity')
+      // nothing. That is the whole precondition, and it covers "busy" and
+      // "dead" as a single case (canon E3).
+      expect(await until(async () => probesFor(await supervisionEvents(), 'w1').length > 0)).toBe(true)
 
-      // ONCE per silence, not once per tick. Several supervise ticks pass here;
-      // a backstop that repeats every window is the pre-fix nudge loop wearing a
-      // different hat.
+      // It never answers, so the question becomes a report — addressed to the
+      // sensei, naming its subject in `subject` rather than `agent`.
+      expect(await until(async () => downsFor(await supervisionEvents(), 'w1').length > 0)).toBe(true)
+      const down = downsFor(await supervisionEvents(), 'w1')[0]
+      expect(down?.data.to).toBe('sensei')
+      expect(down?.data.agent).toBeUndefined()
+
+      // ONCE per episode, not once per tick. Several supervise ticks pass here;
+      // a backstop that repeats every window is the metronome this replaced.
       await Bun.sleep(BROKEN_AFTER_MS * 3)
-      expect(reports(human.messages, 'w1')).toHaveLength(1)
+      const rows = await supervisionEvents()
+      expect(downsFor(rows, 'w1')).toHaveLength(1)
+      expect(probesFor(rows, 'w1')).toHaveLength(1)
 
-      // And it is in the log, addressed, so the answer survives the session.
-      const hist = (await (await fetch(`${BASE}/history?last=40`)).json()) as {
-        events: Array<{ type: string; data: { agent?: string; to?: string } }>
-      }
-      const recorded = hist.events.filter((e) => e.type === 'agent-unresponsive' && e.data.agent === 'w1')
-      expect(recorded).toHaveLength(1)
-      expect(recorded[0]?.data.to).toBe('watch-human')
+      // THE LINE THAT MATTERS MOST: the human heard nothing at any point.
+      expect(infraPushes(human.messages)).toHaveLength(0)
     },
     SLOW_TEST_MS,
   )
 
   test(
-    'STANDS DOWN: any activity clears the report, and a fresh silence earns a fresh one',
+    'STANDS DOWN: an ANSWERED probe reports nothing at all, and a fresh silence asks again',
     async () => {
-      // OLD: `STANDS DOWN while a human is waiting, even before that episode has
-      // fired its first wake` — the watchdog deferring to the blocking path so
-      // two timers would not double-push. With one pusher that question cannot
-      // arise; what CAN still arise, and is the reason this case is worth its
-      // runtime, is a latch that never clears. An alert that stays lit after the
-      // condition ends is how every ignored alerting system begins, and the
-      // decision is written as a restart of the cycle precisely to avoid it —
-      // which is only meaningful if something proves the cycle actually restarts.
+      // Silence is the success case. The old shape could not express this: the
+      // report had already fired and reached a phone before the agent had any
+      // chance to answer, so "it recovered" was unobservable by construction —
+      // 23 alarms in two days, zero all-clears.
       using human = await connectAgent(WS_URL, 'watch-human', 'user')
       using worker = await connectAgent(WS_URL, 'w2', 'worker')
 
-      expect(await until(() => reports(human.messages, 'w2').length > 0)).toBe(true)
-      const afterFirst = reports(human.messages, 'w2').length
+      expect(await until(async () => probesFor(await supervisionEvents(), 'w2').length > 0)).toBe(true)
 
-      // The agent speaks. The report must clear — and stay cleared while it
-      // keeps speaking.
+      // The agent answers, and keeps answering. No report should ever exist for
+      // this episode.
       worker.ws.send(JSON.stringify({ type: 'reply', from: 'w2', text: 'still here' }))
-      await Bun.sleep(200)
       const keepAlive = setInterval(
         () => worker.ws.send(JSON.stringify({ type: 'reply', from: 'w2', text: 'still here' })),
         BROKEN_AFTER_MS / 3,
       )
       await Bun.sleep(BROKEN_AFTER_MS * 3)
       clearInterval(keepAlive)
-      expect(reports(human.messages, 'w2')).toHaveLength(afterFirst)
+      expect(downsFor(await supervisionEvents(), 'w2')).toHaveLength(0)
+      const probesWhileAlive = probesFor(await supervisionEvents(), 'w2').length
 
-      // Then it goes quiet again: a NEW silence is a new report, not a repeat
-      // suppressed by the old one.
-      expect(await until(() => reports(human.messages, 'w2').length > afterFirst)).toBe(true)
+      // Then it goes quiet again: a NEW silence earns a new question, not a
+      // repeat suppressed by the old one. The cycle restarts rather than
+      // latching — a latch that never clears is how every ignored alerting
+      // system begins.
+      expect(await until(async () => probesFor(await supervisionEvents(), 'w2').length > probesWhileAlive)).toBe(true)
+
+      // …and still nothing reached the human, through either path.
+      expect(infraPushes(human.messages)).toHaveLength(0)
     },
     SLOW_TEST_MS,
   )
