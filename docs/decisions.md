@@ -305,3 +305,11 @@ Alternatives considered:
 - **Never include status, rely only on `isError`**: rejected. Empty 5xx bodies or malformed 4xx would lose the status-code signal entirely. Status line has real info when body doesn't.
 
 Why strip-on-success won: our server returns structured JSON on both paths (`{tasks: [...]}` vs `{error: "..."}`), so the body already carries everything the agent needs on 2xx. Status-line prefix adds tokens and one mental skip-past step per call. On error, the status line is kept because empty/unhelpful bodies aren't uncommon and the status carries signal the body might miss. The MCP `isError` flag still tells the agent which mode to parse in.
+
+## 24. Multi-agent attention contract: superseded by the guarantees spec (2026-08-15)
+
+**Chosen: `docs/guarantees.md` (task 065) is the authority on mailbox, acknowledgement, and supervision semantics.** Where an earlier entry in this log describes those mechanisms differently, the earlier entry records what was true when it was decided, and the spec records what is required now.
+
+What changed relative to the world earlier entries describe: pending is no longer the sensei's queue but per-agent mailboxes — the set of unacknowledged (recipient, event) pairs, with acknowledgement state independent per recipient (no agent's ack can consume another's mail); ack requires the content-derived code AND that the caller is a recipient, and the clearing record names the acker; every event kind declares a resolution function for its recipients, possibly empty (an empty resolution is history, not mail); supervision probes before any verdict, reports to the sensei only (machines never message the human, per task 069), and every down-report gets a matching recovery report.
+
+Entries this touches rather than voids: #3 (workers now actively report via `reply`/`comment` — the passive model was retired with the Events API transition), #19 ("any event that enters pending wakes an idle sensei" — the set-of-events-as-policy idea survives, but the mailbox is per-agent now and resolution functions carry the policy), #21 (agent-idle as diagnostic — unchanged, and now stated in the spec's resolution table as an empty-resolution kind).

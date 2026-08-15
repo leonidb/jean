@@ -79,7 +79,7 @@ A framework for multi-agent execution where autonomous coding agents work in par
 **Infrastructure layer** — deterministic Bun/TypeScript process.
 - Channel server: WebSocket connections from channel plugins, transport-agnostic agent registry
 - Event store: append-only JSONL log, all state changes are events
-- Projections: board (task state) and pending (events for sensei to act on), derived from event stream
+- Projections: board (task state) and pending (per-agent mailboxes — each agent's unacknowledged events), derived from event stream
 - Stop hook receiver: agents' stop hooks signal here, forwarded to sensei
 - Chat bridge: optional, registers an external surface as a `user` role agent. Transport-agnostic (`src/infra/bridge.ts`) — **Telegram is the default** (its own bot per dojo, since Telegram allows one `getUpdates` poller per token — but a bot is a seconds-long BotFather step, no app/scopes/URL), **Slack** is retained as a legacy option (one app per dojo — Socket Mode can't be shared, and far more setup)
 - No LLM — fast, reliable plumbing
@@ -103,13 +103,13 @@ States: `todo → assigned → in-progress ↔ waiting → done`. Simple tasks c
 A flow definition that tells sensei how to handle a specific type of work. Not routing (tags handle that), but process: what to do at each lifecycle stage, what to verify, when to ask the human, when to close. Lives in `.jean/playbooks/` as markdown files with SKILL.md-style frontmatter (name, description). Files are input — infrastructure watches the directory, emits events on changes (`playbook-created`, `playbook-updated`, `playbook-removed`), and derives runtime state from events via a projection. Sensei reads playbooks from the API (`GET /playbooks`, `GET /playbooks/:id`). Tasks carry an explicit `playbook` field set at creation time. Playbooks are customizable per project/user — Jean is a framework, the actual flows are project-specific. See [Playbooks](playbooks.md) for the full contract, authoring guidance, and rationale.
 
 ### Event
-All state changes are events, stored in an append-only JSONL log. Event types: `task-created`, `task-status`, `task-updated`, `reply`, `send`, `agent-idle`, `register`, `ack`, `nudge`, `start`, `trigger-created`, `trigger-fired`, `trigger-removed`, `playbook-created`, `playbook-updated`, `playbook-removed`, `permission-request`. Future: `human-interaction` (agent summaries of direct human interaction), `task-feedback` (quality signals). Each event has an ID, stream, type, timestamp, and data payload.
+All state changes are events, stored in an append-only JSONL log. Event types include task lifecycle (`task-created`, `task-status`, `task-updated`, `task-comment`), messaging (`send`, `reply`, `ack`, `nudge`), agent lifecycle and supervision (`register`, `disconnect`, `agent-idle`, `worker-status`, `agent-down`), triggers (`trigger-created`, `trigger-fired`, `trigger-removed`), and playbooks (`playbook-created`, `playbook-updated`, `playbook-removed`). Each event has an ID, stream, type, timestamp, and data payload.
 
 ### Board
 A projection derived from the event stream. Task state is computed by applying board-related events in order (task-created, task-status, task-updated). Snapshots are taken periodically for fast startup. The board is not a file you edit — it's computed state.
 
 ### Pending Events
-A second projection tracking events the sensei needs to act on: replies from agents, new tasks, agent-idle signals. Events are removed from pending when acknowledged. This is how the sensei knows what needs attention.
+A second projection tracking unacknowledged events per recipient. Every agent — sensei and workers alike — has a mailbox: the pending events addressed to it. An event is cleared from a mailbox only by its own recipient's acknowledgement, which requires an ack code issued only in a full-content fetch (read-before-clear). Announcements ("you have mail") repeat on a backoff ladder until the agent acts. This is how any agent knows what needs its attention; the full contract is [guarantees.md](guarantees.md).
 
 ### Queue
 Groups tasks by folder/worktree. One queue = one folder = one active agent.
@@ -126,7 +126,7 @@ Live project data at `.jean/context/` — what the dojo has **learned** about it
 Channel push notification. Task descriptions, follow-up questions ("what's your status?"). Agent receives immediately, even when idle at `>` prompt. Validated Mar 27.
 
 ### Agent → Sensei
-Passive. Agent works until it stops. Stop hook notifies infrastructure → infrastructure creates `agent-idle` event → sensei gets nudged → sensei pings agent via channel → agent replies naturally. The sensei is always the active party.
+The agent reports through channel tools: `reply` for conversation with the sensei, `comment` for durable notes on a task. The message lands in the sensei's mailbox and an announcement wakes it. The Stop hook still records an `agent-idle` event, but as a diagnostic only — it does not wake the sensei; the worker's own reply is the signal that work finished.
 
 ### Human → Sensei
 Chat-bridge messages (Telegram/Slack, bridged as `user` role agent), CLI commands (`jean board`, `jean send`), or direct interaction (`jean peek sensei`).

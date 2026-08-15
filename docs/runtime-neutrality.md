@@ -10,7 +10,7 @@ This generalizes an earlier core idea — *"agents are just Claude."* The truer 
 
 ## The boundary already exists
 
-The WebSocket protocol between infra and the channel plugin **is** the abstraction boundary. Infra speaks a small message protocol (`register` / `reply` / `send` / `task-comment` inbound; `deliver` / `registered` / `error` outbound — `src/infra/protocol.ts`), and that **agent protocol** carries no Claude assumptions — role-based tool gating, the pending-as-sensei-inbox model, nudging, the board, and event sourcing are all runtime-neutral. This is the good news: the core didn't need to be designed for this; it already is.
+The WebSocket protocol between infra and the channel plugin **is** the abstraction boundary. Infra speaks a small message protocol (`register` / `reply` / `send` / `task-comment` inbound; `deliver` / `registered` / `error` outbound — `src/infra/protocol.ts`), and that **agent protocol** carries no Claude assumptions — role-based tool gating, the per-agent mailbox model, nudging, the board, and event sourcing are all runtime-neutral. This is the good news: the core didn't need to be designed for this; it already is.
 
 ## The Claude couplings
 
