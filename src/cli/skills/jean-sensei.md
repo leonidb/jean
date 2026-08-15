@@ -40,7 +40,7 @@ Once the wiki state is in your head, skip re-reading on purely operational nudge
 
 When you receive a nudge from Jean — it opens with `Events pending — inbox summary` and carries a JSON inbox (`blocking`: humans waiting, coalesced per sender with ids/count/age/preview; `queued`: machine events as type counts). There is one push path, so that is the only shape it comes in. The summary IS the full picture — triage from it. **A `blocking` entry means a human is waiting; handle those before anything queued**:
 1. Fetch what you are about to handle. A handful of events (≲5): take the whole mailbox — `inbox({view: 'fetch'})`. More than that: work group by group, one selector per fetch — the grouped summary's own keys work verbatim.
-2. As needed — not ritual: read the board (`GET /board`) and/or connected agents (`GET /agents`) only when the events actually require that context. The summary already gives you the blind triage those calls would otherwise cost.
+2. As needed — not ritual: read the board (`GET /tasks?status=…`, see API reference) and/or connected agents (`GET /agents`) only when the events actually require that context. The summary already gives you the blind triage those calls would otherwise cost.
 3. Decide on each event — act on it, hold it deliberately, or judge it needs nothing. The verdict is per event, not per queue.
 4. Act — use `send` for messages, `infra` for state changes
 5. Ack the events you decided on (see below)
@@ -126,23 +126,38 @@ When the human asks "what did we discuss / decide / find about X":
 The mailbox is the `inbox` tool, not an `infra` path. Read operations:
 ```
 infra(method="GET", path="/agents")                                                // connected agents
-infra(method="GET", path="/board")                                                 // current board
+infra(method="GET", path="/tasks?status=in-progress&queue=<agent>")                // filtered board read — either param alone, or both
+infra(method="GET", path="/board")                                                 // whole board + the staleness surfacing
 infra(method="GET", path="/tasks/<id>?include=comments,playbook")                  // canonical task load — use by default
 infra(method="GET", path="/tasks/<id>?include=comments,messages,playbook")         // add messages when you need the full chat
 infra(method="GET", path="/tasks/<id>")                                            // bare task state — only when neither comments nor playbook are needed
-infra(method="GET", path="/history?taskId=001")                                    // raw event stream (rarely needed)
+infra(method="GET", path="/history?taskId=001")                                    // one task's stream
 infra(method="GET", path="/history?last=20")                                       // recent events across all streams
 ```
+
+**Which board read.** `/tasks?status=&queue=` filters off the same live projection and is the read to reach for by default — `/board` takes no query params at all (a `?status=` on it is ignored, and you get the whole board back: a plausible answer to a different question), and it returns every task's full description, so on a large board it truncates in the tool result. What `/board` alone computes is the staleness surfacing — `lastEventAt` on every task and `stale: true` on quiet in-progress ones — so use it for the housekeeping scan and `/tasks?status=` for everything else. `/tasks` returns the stored task as-is; `updatedAt` is the closest signal it carries.
+
+**`/history` reads `taskId`, `last`, `stream`, `raw`, `diagnostics` — and nothing else.** `?afterId=` in particular does nothing: it is silently ignored, and you get the tail rather than the range you asked for, with no error to tell you. Unknown query params are dropped rather than refused across this API, so a param that exists in another system is not evidence it works here — if a filter matters, verify the result actually narrowed.
 
 Tasks:
 ```
 infra(method="POST",  path="/tasks",
       body={"title":"...","description":"...","queue":"<agent>","actor":"sensei"})
 infra(method="PATCH", path="/tasks/<id>/status",
-      body={"status":"assigned"})          // todo → assigned → in-progress ↔ waiting → done
+      body={"status":"assigned"})          // see the DAG below; `waiting` also requires blockedOn
 infra(method="POST",  path="/tasks/<id>/revert",
       body={"actor":"sensei"})             // undo — pops the most recent status change (e.g. done → in-progress)
 ```
+
+The forward DAG, exactly (`src/infra/board.ts`) — anything not on this list is a 400:
+```
+todo         → assigned | in-progress | cancelled
+assigned     → in-progress | cancelled
+in-progress  → waiting | done | cancelled
+waiting      → in-progress | done | cancelled
+done, cancelled → terminal (revert only)
+```
+Note what is absent: **no `todo → waiting`** and **no `waiting → waiting`**. Both are load-bearing — see "Parking a task" for what they are refusing.
 
 If you mark a task to a wrong status, use `revert` to pop back. It bypasses the forward DAG
 (so `done → in-progress` is only possible this way) and records a distinct `task-reverted`
@@ -189,11 +204,13 @@ infra(method="GET", path="/playbooks/<name>")
 6. If `openTasks > 0` (busy) or `session === "offline"`: `infra(method="PATCH", path="/tasks/<id>/status", body={"status":"assigned"})` (queued — dispatch at the worker's next completion boundary)
 7. Ack the task-created event
 8. Wait — you'll be nudged when the worker replies or comments. A worker going idle is silent (no event enters your queue); if in doubt, check the board.
-9. Use `waiting` when a task is paused. `blockedOn` is REQUIRED — a task cannot be parked on nobody. Resume to `in-progress` when ready.
+9. Use `waiting` when a task **you dispatched** is paused — parking is reached from `in-progress`, never from the `todo` backlog. `blockedOn` is REQUIRED — a task cannot be parked on nobody. Resume to `in-progress` when ready.
 
 **Silence does not mean empty.** Routine machine events do not push at all — they wait for the quiet clock, which is measured from YOUR last activity, so an actively-working sensei is deliberately not interrupted by them. No nudge ≠ no pending. The `[inbox]` piggyback line on your tool results is the live truth; trust it over the absence of a nudge. Once you have been told about a queue, repeats follow a backoff (default ≤10 min), so a known event can stay quiet for a window. The trailer rides tool results — a turn with no tool calls sees neither push nor trailer, so when in doubt and hands-free, `inbox({view: 'counts'})`.
 
 ## Parking a task — the status discipline
+
+**Parking is where IN-FLIGHT work goes when it stalls.** Every row below starts from a task somebody is actually working — `in-progress` — and says where it lands. It is a per-task move, never a pass over the board: a `todo` item nobody has started is not blocked on anybody, so parking it invents a blocker and starts a reminder clock for work no one is waiting on.
 
 A parked task always names who it waits on, and that choice sets how often you hear about it:
 
@@ -208,13 +225,15 @@ worker blocks on you        →  waiting / blockedOn: sensei     short clock; tr
 
 `blockedOn: sensei` is transitory by design: a worker is stalled the whole time it sits, so its reminder exists to force one question — am I resolving this, or escalating it to the human? Let it drift and a worker drifts with it.
 
-`resumeAt` is a SNOOZE and rides any blocker: it drops the task to a daily reminder and restores its own clock automatically once the date passes. Snoozing does not change what the task waits on, and it does not silence it — a snoozed task is one line a day until its date.
+**The API refuses the wrong scope, and the refusal is the signal.** There is no `todo → waiting` edge (`src/infra/board.ts`): reaching `waiting` from `todo` means marking the task `in-progress` first — declaring a worker started work you never dispatched — and there is no `waiting → waiting` edge either (see the snooze below). **If a transition can only be reached by faking earlier states, the API is refusing for a reason — stop.** A 400 on a status change is information, not an obstacle to route around: the next thing to question is your own intent, not the path.
 
-**`todo` is not a silencing mechanism.** A task awaiting the human's verdict belongs in `waiting / blockedOn: human`, where it is visible and reminds. Moving it to `todo` makes it indistinguishable from unscheduled work and it stops reminding entirely — which is how a decision someone is waiting on disappears. Move a task to `todo` only when the human has said, in words, that it is not happening soon.
+`resumeAt` is a SNOOZE and rides any blocker: it drops the task to a daily reminder and restores its own clock automatically once the date passes. Snoozing does not change what the task waits on, and it does not silence it — a snoozed task is one line a day until its date. **It is set on the park itself** — `PATCH /tasks/<id>/status` with `{"status":"waiting","blockedOn":"…","resumeAt":"…"}` — and cannot be added or changed in place afterwards: `PATCH /tasks/<id>` carries only `agent` and `description`, so a `resumeAt` in that body returns 200 and is silently dropped, and re-parking a parked task is the refused `waiting → waiting`. To re-snooze, walk it back and park it again — `{"status":"in-progress"}`, then `{"status":"waiting","blockedOn":"…","resumeAt":"<new date>"}`. Leaving `waiting` clears the whole park, so the second call must re-state the blocker, and the "parked since" clock restarts.
+
+**`todo` is not a silencing mechanism — and it is not a bin to sweep into either.** A task that has been worked and now awaits the human's verdict belongs in `waiting / blockedOn: human`, where it is visible and reminds; moving *that* task to `todo` makes it indistinguishable from unscheduled work and it stops reminding entirely — which is how a decision someone is waiting on disappears. The rule runs one way only. It says where a live task lands; it does not say that everything sitting in `todo` needs re-filing, and a backlog item nobody has started is already in the right place. Move a task to `todo` only when the human has said, in words, that it is not happening soon.
 
 ## Task housekeeping — keeping in-progress truthful
 
-The board convention: `in-progress` means actively worked, `waiting` means parked. `openTasks` is only a trustworthy dispatch signal while that convention holds, and holding it is your job, not a hope. `/board` surfaces the raw material: every task carries `lastEventAt`, and an in-progress task quiet past the staleness threshold (default 24h) carries `stale: true` — surfacing only, never auto-demoted; the statuses stay yours.
+The board convention: `in-progress` means actively worked, `waiting` means parked. `openTasks` is only a trustworthy dispatch signal while that convention holds, and holding it is your job, not a hope. `/board` surfaces the raw material — and is the only read that does: every task carries `lastEventAt`, and an in-progress task quiet past the staleness threshold (default 24h) carries `stale: true` — surfacing only, never auto-demoted; the statuses stay yours.
 
 The ritual, on a nudge opening `Watchdog:` or when the board informs a dispatch decision:
 1. Scan for `stale: true` tasks. For each, judge — worker still on it (a long silent build is healthy; check `session` and `lastActivityAt` on `/agents`), or drifted?
