@@ -116,24 +116,37 @@ describe('actor gates — the role gate and the precedence rule', () => {
 
   test('decideStatus refuses a worker closing a task, with the typed refusal', () => {
     const { state } = withTask('in-progress')
-    const d = tasks.decideStatus(state, { taskId: '001', to: 'done', actor: WORKER_A, actorRole: 'worker' }, NOW)
+    const d = tasks.decideStatus(state, { taskId: '001', to: 'done', actor: WORKER_A, actorRole: 'worker' })
     expect(d.ok).toBe(false)
     if (!d.ok)
       expect(d.refusal).toEqual({ kind: 'actor-forbidden', actorRole: 'worker', from: 'in-progress', to: 'done' })
+  })
+
+  test('unknown-task and illegal-transition refuse with their typed refusals — the adapter renames, never judges', () => {
+    const { state } = withTask('in-progress')
+    const unknown = tasks.decideStatus(state, { taskId: '404', to: 'done', actor: ORCH })
+    expect(unknown.ok).toBe(false)
+    if (!unknown.ok) expect(unknown.refusal).toEqual({ kind: 'unknown-task' })
+    const illegal = tasks.decideStatus(state, { taskId: '001', to: 'assigned', actor: ORCH })
+    expect(illegal.ok).toBe(false)
+    if (!illegal.ok)
+      expect(illegal.refusal).toEqual({ kind: 'illegal-transition', from: 'in-progress', to: 'assigned' })
   })
 })
 
 describe('parking — blocker required, snooze validated, clear-or-replace', () => {
   test('entry to waiting without blockedOn refuses; with a blocker it carries the park data', () => {
     const { state } = withTask('in-progress')
-    const bare = tasks.decideStatus(state, { taskId: '001', to: 'waiting', actor: ORCH }, NOW)
+    const bare = tasks.decideStatus(state, { taskId: '001', to: 'waiting', actor: ORCH })
     expect(bare.ok).toBe(false)
     if (!bare.ok) expect(bare.refusal).toEqual({ kind: 'blocker-required' })
-    const parked = tasks.decideStatus(
-      state,
-      { taskId: '001', to: 'waiting', actor: ORCH, blockedOn: 'human', blockedNote: 'needs answer' },
-      NOW,
-    )
+    const parked = tasks.decideStatus(state, {
+      taskId: '001',
+      to: 'waiting',
+      actor: ORCH,
+      blockedOn: 'human',
+      blockedNote: 'needs answer',
+    })
     expect(parked.ok).toBe(true)
     if (parked.ok) {
       expect(parked.data.blockedOn).toBe('human')
@@ -143,11 +156,13 @@ describe('parking — blocker required, snooze validated, clear-or-replace', () 
 
   test('an unparseable resumeAt refuses loudly — a silently-always-true snooze is the September bug', () => {
     const { state } = withTask('in-progress')
-    const d = tasks.decideStatus(
-      state,
-      { taskId: '001', to: 'waiting', actor: ORCH, blockedOn: 'external', resumeAt: 'not-a-date' },
-      NOW,
-    )
+    const d = tasks.decideStatus(state, {
+      taskId: '001',
+      to: 'waiting',
+      actor: ORCH,
+      blockedOn: 'external',
+      resumeAt: 'not-a-date',
+    })
     expect(d.ok).toBe(false)
     if (!d.ok) expect(d.refusal).toEqual({ kind: 'unparseable-resume', resumeAt: 'not-a-date' })
   })
@@ -180,6 +195,18 @@ describe('parking — blocker required, snooze validated, clear-or-replace', () 
     const reParked = tasks.taskOf(s, '001')
     expect(reParked?.blockedOn).toBe('sensei')
     expect(reParked?.resumeAt).toBeUndefined()
+  })
+
+  test('parking SETS blockedSince to the park event’s time — the cadence clock A5/D9 build on (084 report, gap 1)', () => {
+    const { state, log } = withTask('in-progress')
+    const parkEvent = log.append('task-status', 'task-001', {
+      from: 'in-progress',
+      to: 'waiting',
+      actor: ORCH,
+      blockedOn: 'human',
+    })
+    const s = tasks.fold(state, parkEvent)
+    expect(tasks.taskOf(s, '001')?.blockedSince).toBe(parkEvent.ts)
   })
 })
 
@@ -218,6 +245,13 @@ describe('the handoff — canon 8, a first-class act', () => {
     const backToSensei = tasks.decideHandoff(state, { taskId: '001', blockedOn: 'sensei', actor: ORCH })
     expect(backToSensei.ok).toBe(true)
   })
+
+  test('the snooze law applies to the handoff too: an unparseable resumeAt refuses loudly (084 report, gap 3)', () => {
+    const { state } = withTask('waiting')
+    const d = tasks.decideHandoff(state, { taskId: '001', blockedOn: 'external', actor: ORCH, resumeAt: 'someday' })
+    expect(d.ok).toBe(false)
+    if (!d.ok) expect(d.refusal).toEqual({ kind: 'unparseable-resume', resumeAt: 'someday' })
+  })
 })
 
 describe('revert — stack-pop, and the park-clearing ruling (D-1)', () => {
@@ -234,6 +268,30 @@ describe('revert — stack-pop, and the park-clearing ruling (D-1)', () => {
       const again = tasks.decideRevert(s, '001', ORCH)
       expect(again.ok).toBe(false)
       if (!again.ok) expect(again.refusal).toEqual({ kind: 'nothing-to-revert' })
+    }
+  })
+
+  test('RULED (D-5): revert never lands on waiting — a mistakenly-closed parked task pops PAST it to in-progress', () => {
+    // Stack: todo → in-progress → waiting → done. Without D-5 the pop lands
+    // on `waiting` with no blocker — the parked-on-nobody state the 2026-08-14
+    // ruling abolishes; refusing instead would strand the task (done has no
+    // DAG exit). Popping past keeps the escape hatch honest.
+    const { log } = world()
+    log.append('task-created', 'task-001', { title: 't', description: '', queue: WORKER_A, actor: ORCH })
+    log.append('task-status', 'task-001', { from: 'todo', to: 'in-progress', actor: ORCH })
+    log.append('task-status', 'task-001', { from: 'in-progress', to: 'waiting', actor: ORCH, blockedOn: 'human' })
+    log.append('task-status', 'task-001', { from: 'waiting', to: 'done', actor: ORCH })
+    let s = tasks.initial()
+    for (const e of log.events()) s = tasks.fold(s, e)
+    const d = tasks.decideRevert(s, '001', ORCH)
+    expect(d.ok).toBe(true)
+    if (d.ok) {
+      expect(d.from).toBe('done')
+      expect(d.to).toBe('in-progress') // waiting skipped
+      const after = tasks.fold(s, log.append('task-reverted', 'task-001', d.data))
+      const t = tasks.taskOf(after, '001')
+      expect(t?.status).toBe('in-progress')
+      expect(t?.blockedOn).toBeUndefined() // and no park resurrects
     }
   })
 
@@ -268,6 +326,18 @@ describe('the fold — data compatibility and start semantics', () => {
   test('starting an unassigned task assigns the queue as the agent (extracted as-is; see OPEN Q-1)', () => {
     const { state } = withTask('in-progress')
     expect(tasks.taskOf(state, '001')?.agent).toBe(WORKER_A)
+  })
+
+  test('a duplicate task-created for an existing id is ignored — first wins, replay never doubles a task (084 report, gap 4)', () => {
+    const { state, log } = withTask('in-progress')
+    const s = tasks.fold(
+      state,
+      log.append('task-created', 'task-001', { title: 'impostor', description: '', queue: 'other-q', actor: ORCH }),
+    )
+    expect(tasks.all(s).filter((t) => t.id === '001').length).toBe(1)
+    const t = tasks.taskOf(s, '001')
+    expect(t?.title).toBe('t') // the original, untouched
+    expect(t?.status).toBe('in-progress')
   })
 
   test('the historical task-blocked kind folds as a full park replacement', () => {

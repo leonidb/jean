@@ -61,6 +61,18 @@
  * left them sticky, which contradicts its own clear-or-replace law and kept
  * a reverted task nagging a blocker it no longer had. Accident left behind.
  *
+ * RULED (D-5, task 083): **revert never lands on `waiting` — it pops past
+ * it to the nearest earlier status that is neither `waiting` nor the
+ * current status.** `waiting` requires a blocker only its parker can
+ * supply (blocker-required, ruled 2026-08-14: answered by the caller that
+ * knows); a revert cannot answer "who is this waiting on", and the stack
+ * carries statuses, not park fields — landing there would manufacture the
+ * parked-on-nobody state that ruling abolishes, and restoring the old park
+ * would resurrect a question already answered. Popping past keeps the
+ * escape hatch for a mistakenly-closed parked task (done → revert →
+ * in-progress, not done → refusal → stuck); a caller that wants the task
+ * parked again parks it explicitly, with a fresh blocker.
+ *
  * ── STALENESS (surfacing only) ──
  *
  * An `in-progress` task with no stream activity for the configured bound is
@@ -71,6 +83,10 @@
  *
  * The fold understands the legacy status names real logs hold (`inbox`,
  * `active`, `blocked`, `review`) and the historical `task-blocked` kind.
+ * A duplicate `task-created` for an existing id is ignored — FIRST WINS
+ * (ruled, task 083): the old fold appended a second board entry under the
+ * same id, an accident left behind; logs are permanent and a replay must
+ * not double a task.
  * Starting a task with no agent assigns the QUEUE as the agent — extracted
  * as-is; the queue-name-as-agent-name convention and its interaction with
  * resolution is OPEN QUESTION Q-1 in the report (a non-roster owner would
@@ -151,7 +167,13 @@ export type HandoffCommand = {
   resumeAt?: string
 }
 
-export type HandoffRefusal = { kind: 'unknown-task' } | { kind: 'not-waiting'; status: TaskStatus }
+export type HandoffRefusal =
+  | { kind: 'unknown-task' }
+  | { kind: 'not-waiting'; status: TaskStatus }
+  /** The snooze law applies to the handoff too (ruled, task 083): a
+   *  malformed date must fail loudly here as well, or it rides into the
+   *  record and the reminder comparison goes silently always-true. */
+  | { kind: 'unparseable-resume'; resumeAt: string }
 
 export type HandoffDecision = { ok: true; data: TaskBlockedData } | { ok: false; refusal: HandoffRefusal }
 
@@ -186,8 +208,11 @@ export type TasksContract = {
   resolveActorRole: (claimed: AgentRole | undefined, registered: AgentRole | undefined) => AgentRole | undefined
 
   /** Both gates + park validation, one decision. `ok` carries the event
-   *  data the shell appends as `task-status`. */
-  decideStatus: (state: TasksState, cmd: StatusCommand, now: number) => StatusDecision
+   *  data the shell appends as `task-status`. (`now` was a parameter here
+   *  and is REMOVED — ruled task 083, shape-earns-its-keep: no behaviour
+   *  consults it; validation checks parseability, deliberately not
+   *  future-ness — a past resumeAt simply means already back on cadence.) */
+  decideStatus: (state: TasksState, cmd: StatusCommand) => StatusDecision
   /** Canon 8's act. `ok` carries the event data for `task-blocked`. */
   decideHandoff: (state: TasksState, cmd: HandoffCommand) => HandoffDecision
   /** Stack-pop. `ok` carries the event data for `task-reverted`. */
