@@ -186,6 +186,19 @@ export type AckData = {
   /** Delivery ledger keyed by acked event id. THE READING RULE: one event can
    *  have several acks; the FIRST in log order carries the delivery mark. */
   ledger?: Record<string, { deliveredVia?: DeliveredVia; clearedBy: ClearedBy }>
+  /** ── The attributed form (A2 amendment, additive) ── the rewrite's writer
+   *  fills these three alongside `eventIds`, so an old fold reads a new
+   *  record correctly during a fallback window while the new fold clears
+   *  per-pair (spec §2, P6). THE THREE TRAVEL TOGETHER — `caller` present
+   *  implies `pairs` and `cleared` present (optional independently only
+   *  because TS cannot say all-or-none additively; the conformance suite
+   *  holds it). A record with no `caller` is historical: it clears every
+   *  pair of `eventIds` on replay — refusing that would resurrect months of
+   *  cleared mail. The fold replays `caller`+`cleared`, never `pairs`
+   *  (which is verbatim audit data including misses). */
+  caller?: AgentName
+  pairs?: { id: number; code: string }[]
+  cleared?: { eventId: number; deliveredVia?: DeliveredVia }[]
 }
 
 export type NudgeData = {

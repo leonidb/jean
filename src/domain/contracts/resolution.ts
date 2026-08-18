@@ -41,20 +41,23 @@
  * is the executable form of the table above.
  */
 
-import type { AgentName, AgentRole, StoredEvent } from './vocabulary.ts'
+import type { AgentName, StoredEvent } from './vocabulary.ts'
 
 /**
- * The facts resolution may consult — plain values, two sources kept distinct
- * (design §3): the persisted record answers "who is this" (`roleOf`,
- * `orchestrator`, `taskOwner`); nothing here answers "who is connected",
- * because resolution is decided at creation and must not depend on the live
- * instant (an offline recipient still receives mail — spec P3).
+ * The facts resolution may consult — plain values from the persisted record
+ * ("who is this"); nothing here answers "who is connected", because
+ * resolution is decided at creation and must not depend on the live instant
+ * (an offline recipient still receives mail — spec P3).
+ *
+ * `roleOf` was here and is REMOVED (ruled at D1's report, 2026-08-18): no §4
+ * resolution consults a sender's role — worker and human replies alike go to
+ * the orchestrator. A shape earns its keep only if a caller uses it as
+ * designed (design §6); a module that someday needs role facts asks for them
+ * then, in its own contract.
  */
 export type ResolutionContext = {
   /** The orchestrator's name, if the dojo has one registered in its record. */
   orchestrator: AgentName | undefined
-  /** Persisted role of a name, from the register history. */
-  roleOf: (name: AgentName) => AgentRole | undefined
   /** The task's current agent, from the board fold. */
   taskOwner: (taskId: string) => AgentName | undefined
 }

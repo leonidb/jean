@@ -45,8 +45,6 @@ const HUMAN = 'human-h'
 
 const ctx: ResolutionContext = {
   orchestrator: ORCH,
-  roleOf: (name) =>
-    name === ORCH ? 'sensei' : name === HUMAN ? 'user' : name === WORKER_A || name === WORKER_B ? 'worker' : undefined,
   taskOwner: (taskId) => (taskId === '101' ? WORKER_A : undefined),
 }
 
@@ -83,6 +81,17 @@ describe('spec §4 — message kinds', () => {
     const recipients = resolution.resolve(e, ctx)
     expect(recipients).not.toContain(ORCH)
     expect(resolution.authorOf(e)).toBe(ORCH)
+  })
+
+  test('a send whose author IS the addressee resolves empty — exclusion must actually subtract (079 report, case 3)', () => {
+    const log = build()
+    const e = log.append('send', `agent-${WORKER_A}`, {
+      agent: WORKER_A,
+      from: WORKER_A,
+      text: 'note to self',
+      queued: true,
+    })
+    expect(resolution.resolve(e, ctx)).toEqual([])
   })
 })
 
@@ -126,6 +135,13 @@ describe('spec §4 — the task row: everyone involved, minus the author', () =>
     const e = log.append('task-comment', 'task-101', { agent: WORKER_B, role: 'worker', text: 'drive-by finding' })
     const recipients = [...resolution.resolve(e, ctx)].sort()
     expect(recipients).toEqual([ORCH, WORKER_A].sort())
+  })
+
+  test('the orchestrator owning the task appears ONCE — one recipient is one pair, never two (079 report, case 1)', () => {
+    const log = build()
+    const e = log.append('task-comment', 'task-500', { agent: WORKER_B, role: 'worker', text: 'finding' })
+    const recipients = resolution.resolve(e, { orchestrator: ORCH, taskOwner: () => ORCH })
+    expect(recipients).toEqual([ORCH])
   })
 
   test('task status change by the worker → the orchestrator, and vice versa', () => {
@@ -190,6 +206,17 @@ describe('spec §4 — supervision and liveness kinds', () => {
     const log = build()
     const e = log.append('trigger-fired', 'triggers', { triggerId: 'tr1', agent: WORKER_B, prompt: 'daily sweep' })
     expect(resolution.resolve(e, ctx)).toEqual([WORKER_B])
+  })
+
+  test('trigger-fired kind:headless resolves empty — the run spawns; there is no session to mail (079 report, case 2)', () => {
+    const log = build()
+    const e = log.append('trigger-fired', 'triggers', {
+      triggerId: 'tr2',
+      agent: 'librarian',
+      prompt: 'consolidate',
+      kind: 'headless',
+    })
+    expect(resolution.resolve(e, ctx)).toEqual([])
   })
 })
 

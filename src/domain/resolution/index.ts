@@ -32,14 +32,14 @@
  * names it twice, and one recipient must mean one pair (spec §2 — pending is
  * a SET of (recipient, event) pairs, so a duplicate is not a second pair).
  *
- * ── WHY NOTHING HERE CONSULTS `roleOf` ──
+ * ── `roleOf` WAS REMOVED FROM THE CONTEXT (ruled, task 080) ──
  *
- * `ResolutionContext` offers `roleOf`, and no resolution below needs it: §4
- * addresses replies to the orchestrator whether the speaker is a worker, a
- * human, or a peer, so the branch the field looks like it is for does not
- * exist. Recorded rather than removed — the contract is the architect's, and
- * an unused context field is a question for them, not something an
- * implementation should answer by changing the contract. Flagged on task 079.
+ * `ResolutionContext` offered `roleOf`, and no resolution below needed it:
+ * §4 addresses replies to the orchestrator whether the speaker is a worker,
+ * a human, or a peer, so the branch the field looked like it was for does
+ * not exist. The implementation flagged it on task 079 rather than touching
+ * the contract; the architect removed it — a shape earns its keep only if a
+ * caller uses it as designed.
  *
  * ── LIMITS THIS FILE CANNOT ENFORCE, AND WHAT DOES ──
  *
