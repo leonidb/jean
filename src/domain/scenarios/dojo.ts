@@ -27,8 +27,15 @@
  *    the fold applies it — one source of truth, and the replay path (the
  *    semantics a restart depends on) is exercised on every single ack.
  * 4. ACTIVITY is the agent's own act: speech and task transitions via
- *    `resolution.authorOf`, clearings via the ack record's `caller`, session
- *    arrival via `register`. Machine writes carry no actor.
+ *    `resolution.authorOf`, clearings via the ack record's `caller` — and
+ *    NOT the register handshake (RULED at task 103, resolving this law's
+ *    contradiction with the agents contract and R8: the harness first read
+ *    session arrival as activity, which suppressed the announcement at
+ *    exactly the reconnect moment the ladder exists for and granted a
+ *    returning-but-still-stuck agent an unearned quiet-clock). A returning
+ *    agent's waiting mail announces at the FIRST tick after reconnect, and
+ *    recovery is EARNED by its first real act, never by the handshake.
+ *    Machine writes carry no actor.
  *
  * The seeded rng, injected clock and monotonic log make every run replayable
  * from its seed (spec §5).
@@ -38,7 +45,7 @@ import { agents } from '../agents/index.ts'
 import type { RecipientsOf, ViewFacts } from '../contracts/mailbox.ts'
 import type { NotifierConfig } from '../contracts/notifier.ts'
 import type { SupervisorConfig, SupervisorEffect } from '../contracts/supervisor.ts'
-import type { AckData, RegisterData } from '../contracts/vocabulary.ts'
+import type { AckData } from '../contracts/vocabulary.ts'
 import {
   type AgentName,
   type AgentRole,
@@ -118,13 +125,15 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
       subscribersOf: (id) => tasks.subscribersOf?.(tasksState, id) ?? [],
     })
 
-  /** Whose own act this event is — composition law 4. */
+  /** Whose own act this event is — composition law 4. `register` is
+   *  deliberately NOT an act (ruled, task 103): the handshake is the
+   *  transport arriving, and treating it as activity silenced the
+   *  reconnect announcement. */
   function actorOf(event: StoredEvent): AgentName | undefined {
     if (event.type === 'ack') {
       const caller = (event.data as AckData | undefined)?.caller
       return typeof caller === 'string' ? caller : undefined
     }
-    if (event.type === 'register') return (event.data as RegisterData).agent
     return resolution.authorOf(event)
   }
 

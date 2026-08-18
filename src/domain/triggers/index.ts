@@ -202,6 +202,16 @@ const decideCreate = (
     if (kind !== 'headless' && cmd.retries > 0) return { ok: false, refusal: { kind: 'retries-on-agent-trigger' } }
   }
 
+  // The same bag-shape check the update path makes (symmetry ruled at task
+  // 103): a trigger must not be born with metadata an update would refuse.
+  // The type says Record, but the command crosses an untyped boundary.
+  if (
+    cmd.metadata !== undefined &&
+    (typeof cmd.metadata !== 'object' || cmd.metadata === null || Array.isArray(cmd.metadata))
+  ) {
+    return { ok: false, refusal: { kind: 'invalid-metadata' } }
+  }
+
   if (registry(state).has(cmd.id)) return { ok: false, refusal: { kind: 'duplicate-id', id: cmd.id } }
 
   return {

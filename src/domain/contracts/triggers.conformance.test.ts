@@ -64,6 +64,13 @@ describe('creation — the refusal table', () => {
       [{ ...base, kind: 'headless', agent: 'librarian', retries: 1.5 }, 'invalid-retries'],
       [{ ...base, kind: 'headless', agent: 'not-a-role' }, 'invalid-role-for-headless'],
       [{ ...base, kind: 'headless', agent: 'not-a-role', retries: 99 }, 'invalid-role-for-headless'],
+      // Metadata symmetry (ruled, task 103): the SAME bag-shape refusal the
+      // update path makes — a trigger must not be born with metadata an
+      // update would refuse. Arrays, strings and null all cross the untyped
+      // boundary looking plausible.
+      [{ ...base, metadata: ['a', 'b'] as never }, 'invalid-metadata'],
+      [{ ...base, metadata: 'notes' as never }, 'invalid-metadata'],
+      [{ ...base, metadata: null as never }, 'invalid-metadata'],
     ]
     const { state } = stateWith()
     const ok = triggers.decideCreate(state, base, FACTS)

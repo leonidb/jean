@@ -108,6 +108,10 @@ describe('scenario 2 — blocking beats the quiet-clock; one announcement carrie
       { name: 'human', role: 'user', behaviour: { kind: 'silent' } },
     ])
     dojo.registerAll()
+    // The worker ACTS once, so its quiet-clock is real: register alone is
+    // not activity (ruled, task 103), and without an act the machine mail
+    // below would be due immediately — proving nothing about the interrupt.
+    dojo.reply('worker-w', 'ready')
     dojo.send(SENSEI, 'worker-w', 'status when you can') // machine — waits the quiet-clock
     dojo.clock.advance(30_000)
     dojo.send('human', 'worker-w', 'need this now') // a human is waiting
@@ -115,8 +119,8 @@ describe('scenario 2 — blocking beats the quiet-clock; one announcement carrie
     // The blocking/queued split, from the one classification both views share.
     expect(dojo.counts('worker-w')).toEqual({ blocking: 1, queued: 1, total: 2 })
 
-    dojo.runFor(2 * MIN)
-    const first = dojo.announcements()[0]
+    dojo.runFor(MIN) // one tick — the interrupt needs no more
+    const first = dojo.announcements().find((a) => a.to === 'worker-w')
     expect(first).toBeDefined()
     if (!first) throw new Error('unreachable')
     // Announced at the first tick after the human arrival — 90s after T0,
@@ -131,10 +135,10 @@ describe('scenario 2 — blocking beats the quiet-clock; one announcement carrie
         .map((e) => e.id),
     )
 
-    // Never loud: that one announcement moved both pairs; no second wake.
-    expect(dojo.announcements().length).toBe(1)
+    // Never loud: ONE announcement to the worker moved both pairs.
+    expect(dojo.announcements().filter((a) => a.to === 'worker-w').length).toBe(1)
     assertGroundTruth(dojo)
-    expect(dojo.pendingPairs()).toEqual([])
+    expect(dojo.mailboxIds('worker-w')).toEqual([])
   })
 })
 
@@ -232,14 +236,19 @@ describe('scenario 4 — absence and return: being away costs a report, never a 
     expect(dojo.reports().filter((r) => r.effect.kind === 'report' && r.effect.status === 'down').length).toBe(1)
 
     // The worker returns.
+    const returnedAt = dojo.clock.now()
     dojo.register('worker-x', 'worker')
     dojo.runFor(10 * MIN)
     expect(dojo.reports().filter((r) => r.effect.kind === 'report' && r.effect.status === 'recovered').length).toBe(1)
 
     // Being away never cost the dispatch: it was announced after the return
-    // and acknowledged — the mailbox held it the whole time.
+    // and acknowledged — the mailbox held it the whole time. AND announced
+    // AT ONCE (the ruling's pin, task 103): the handshake is not activity,
+    // so the returning agent's waiting mail is due at the FIRST tick after
+    // reconnect — not a quiet-clock later.
     const wokeWith = dojo.announcements().filter((a) => a.to === 'worker-x' && a.accepted && a.ids.includes(away.id))
     expect(wokeWith.length).toBeGreaterThanOrEqual(1)
+    expect((wokeWith[0]?.at ?? 0) - returnedAt).toBeLessThanOrEqual(MIN)
     expect(dojo.mailboxIds('worker-x')).toEqual([])
 
     assertGroundTruth(dojo)
@@ -369,8 +378,9 @@ describe('scenario 6 — the randomized horizon: two simulated days, five agents
     // independently computed ceiling, never one per tick.
     const horizonEnd = dojo.clock.now()
     let expected = 0
-    // First due: c's register was its activity; the quiet-clock ran from T0.
-    let at = T0 + NOTIFY.nudgeIntervalMs
+    // First due: c has NO activity ever — register is not an act (ruled,
+    // task 103) — so it reads maximally quiet and is due at the first tick.
+    let at = T0 + MIN
     let rung = 0
     while (at <= horizonEnd) {
       expected++

@@ -110,6 +110,13 @@ export type TriggerRefusal =
   | { kind: 'schedule-immutable' }
   | { kind: 'unknown-fields'; fields: readonly string[] }
   | { kind: 'invalid-status'; got: unknown }
+  /** Metadata must be a plain object (a bag of named things — never an
+   *  array, string or null). RETURNED BY BOTH decideCreate AND decideUpdate
+   *  (symmetry ruled at task 103): the check existed only on the update
+   *  path, so a trigger could be BORN with metadata an update would refuse
+   *  — incoherent admission. Commands validate in-domain (R10's command
+   *  half); the adapter's own malformed-JSON refusal is a transport
+   *  concern, one layer out, and stays. */
   | { kind: 'invalid-metadata' }
 
 export type CreateTriggerCommand = {
