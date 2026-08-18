@@ -32,6 +32,27 @@
  *    rather than reaching slice() raw; absent means the default.
  *  - Every hit carries its owning page and description, so a result says
  *    "this lives on page X, which is about Y" without a second lookup.
+ *  - COVERAGE AS ORDERING (ruled, task 096): among hits whose matches sit
+ *    in the same field tier, matching MORE DISTINCT query terms outranks
+ *    matching fewer — and repeating a query term changes nothing (a term's
+ *    weight is its presence, not its count in the query). A coverage FLOOR
+ *    (excluding weak hits) is deliberately NOT stated: the failure
+ *    direction is noise, not a false "nowhere", and a threshold would be
+ *    invented policy — if noise bites in practice, that is a ruling to
+ *    seek, not a number to guess.
+ *  - A query of ONLY stopwords is `empty` — a question made entirely of
+ *    common words has no topical content to find, and `empty` must never
+ *    read false for it (breaking this ends searches with a wrong answer).
+ *
+ * SCOPE POLARITY (ruled, task 096 — the per-field law applied): absence is
+ * `null`/`undefined` ONLY. An empty string is a value the caller SENT
+ * (`?scope=`) — a malformed choice among named things, refused typed. The
+ * same character means "none" for a taskId and "malformed" here; polarity
+ * is per-field, never one rule.
+ *
+ * DUPLICATE DOCUMENT IDS REFUSE LOUDLY (ruled, task 096): the old engine
+ * threw; keeping them silently is the silent-repair class. `buildIndex`
+ * returns a typed refusal naming the first duplicate.
  *
  * ── MEMORY ADMISSION ──
  *
@@ -107,7 +128,9 @@ export type KnowledgeContract = {
   /** Absent → 'all'; invalid → typed refusal, never a silent widen. */
   resolveScope: (scope: string | null | undefined) => ScopeDecision
 
-  buildIndex: (docs: readonly SearchDoc[]) => SearchIndex
+  buildIndex: (
+    docs: readonly SearchDoc[],
+  ) => { ok: true; index: SearchIndex } | { ok: false; refusal: { kind: 'duplicate-doc-id'; id: string } }
   search: (index: SearchIndex, query: string, opts: { topN?: number; scope: SearchScope }) => SearchResult
 
   // Document shaping — pure transforms of typed inputs (the fs walk that

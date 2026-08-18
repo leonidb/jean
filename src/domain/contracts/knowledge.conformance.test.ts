@@ -54,6 +54,13 @@ const DOCS: SearchDoc[] = [
   },
 ]
 
+/** Build and unwrap — the fixture's docs are duplicate-free by construction. */
+function index(docs: SearchDoc[]) {
+  const built = knowledge.buildIndex(docs)
+  if (!built.ok) throw new Error(`fixture: duplicate id ${built.refusal.id}`)
+  return built.index
+}
+
 describe('memory admission', () => {
   test('agent + role + non-empty trimmed text admit; anything less refuses; scope defaults to dojo', () => {
     const good = knowledge.admitMemory({ agent: 'worker-a', role: 'worker', text: '  learned a thing  ' })
@@ -95,8 +102,8 @@ describe('scopes — absent widens, invalid refuses', () => {
 
 describe('ranking — properties, not engine pins', () => {
   test('LOCATION BEATS DENSITY: the page ABOUT a topic outranks the page mentioning it in passing', () => {
-    const index = knowledge.buildIndex(DOCS)
-    const result = knowledge.search(index, 'telecom', { scope: 'all' })
+    const idx = index(DOCS)
+    const result = knowledge.search(idx, 'telecom', { scope: 'all' })
     expect(result.empty).toBe(false)
     expect(result.hits.length).toBeGreaterThanOrEqual(2)
     const first = result.hits[0]
@@ -109,24 +116,24 @@ describe('ranking — properties, not engine pins', () => {
   })
 
   test('scope narrows exactly — non-vacuously; empty means definitively nothing for these terms', () => {
-    const index = knowledge.buildIndex(DOCS)
-    const taskOnly = knowledge.search(index, 'telecom', { scope: 'tasks' })
+    const idx = index(DOCS)
+    const taskOnly = knowledge.search(idx, 'telecom', { scope: 'tasks' })
     expect(taskOnly.hits.length).toBeGreaterThan(0) // the fixture contains a task hit — [] would be vacuous
     expect(taskOnly.hits.every((h) => h.source === 'task')).toBe(true)
-    const knowledgeScope = knowledge.search(index, 'telecom', { scope: 'knowledge' })
+    const knowledgeScope = knowledge.search(idx, 'telecom', { scope: 'knowledge' })
     expect(knowledgeScope.hits.length).toBeGreaterThan(0)
     expect(knowledgeScope.hits.every((h) => h.source === 'wiki' || h.source === 'memory')).toBe(true)
-    const nothing = knowledge.search(index, 'zebra-xylophone', { scope: 'all' })
+    const nothing = knowledge.search(idx, 'zebra-xylophone', { scope: 'all' })
     expect(nothing.empty).toBe(true)
     expect(nothing.hits).toEqual([])
     expect(nothing.total).toBe(0)
   })
 
   test('topN clamps garbage instead of reaching slice() raw', () => {
-    const index = knowledge.buildIndex(DOCS)
+    const idx = index(DOCS)
     let checked = 0
     for (const bad of [-3, 0, 0.5, Number.NaN]) {
-      const r = knowledge.search(index, 'telecom', { scope: 'all', topN: bad })
+      const r = knowledge.search(idx, 'telecom', { scope: 'all', topN: bad })
       expect(r.returned).toBeGreaterThanOrEqual(1) // clamped into a sane bound
       checked++
     }
@@ -162,5 +169,85 @@ describe('document shaping — pure transforms; the fs walk stays adapter-side',
       { who: 'sensei', text: 'on track' },
     ])
     expect(chan.every((d) => d.source === 'channel')).toBe(true)
+  })
+})
+
+describe('the 096 batch — five pins and the three rulings', () => {
+  test('PIN 1 (the serious one): a stopwords-only query is EMPTY — never "everything matched"', () => {
+    const idx = index(DOCS)
+    const r = knowledge.search(idx, 'the and of a', { scope: 'all' })
+    expect(r.empty).toBe(true)
+    expect(r.hits).toEqual([])
+  })
+
+  test('PIN 2: channelDocs with zero and negative windows terminates and still yields docs', () => {
+    const messages = [
+      { who: 'human', text: 'one' },
+      { who: 'sensei', text: 'two' },
+      { who: 'worker', text: 'three' },
+    ]
+    let checked = 0
+    for (const win of [0, -4]) {
+      const docs = knowledge.channelDocs(messages, win)
+      expect(Array.isArray(docs)).toBe(true)
+      expect(docs.length).toBeGreaterThan(0)
+      checked++
+    }
+    counted('window clamps', checked, 2)
+  })
+
+  test('PIN 3: an unrecognised scope reaching search matches NOTHING — visible failure, never a silent widen', () => {
+    const idx = index(DOCS)
+    const r = knowledge.search(idx, 'telecom', { scope: 'knowlege' as never })
+    expect(r.hits).toEqual([])
+    expect(r.empty).toBe(true)
+  })
+
+  test('RULED: resolveScope("") REFUSES — an empty string is a sent value, not absence (per-field polarity)', () => {
+    const d = knowledge.resolveScope('')
+    expect(d.ok).toBe(false)
+    if (!d.ok) expect(d.valid.length).toBeGreaterThan(0)
+  })
+
+  test('PIN 5 + coverage-as-ordering: repeated query terms change nothing, and same-tier coverage outranks density', () => {
+    const idx = index(DOCS)
+    const once = knowledge.search(idx, 'telecom', { scope: 'all' })
+    const thrice = knowledge.search(idx, 'telecom telecom telecom', { scope: 'all' })
+    expect(thrice.hits.map((h) => h.id)).toEqual(once.hits.map((h) => h.id))
+    // Same field tier (body-only): two distinct terms beat one term repeated.
+    const tier: SearchDoc[] = [
+      {
+        id: 'a-dense-one-term', // sorts FIRST: a tie-break win by id would pick this, so covers-both winning proves SCORE (codex pass)
+        source: 'wiki',
+        page: 'dense',
+        title: 'unrelated words here',
+        description: 'unrelated description',
+        headings: '',
+        body: 'harbour harbour harbour harbour harbour harbour harbour harbour',
+      },
+      {
+        id: 'z-covers-both',
+        source: 'wiki',
+        page: 'covers',
+        title: 'different unrelated words',
+        description: 'another unrelated description',
+        headings: '',
+        body: 'harbour lighthouse mentioned together exactly once',
+      },
+    ]
+    const r = knowledge.search(index(tier), 'harbour lighthouse', { scope: 'all' })
+    expect(r.hits[0]?.id).toBe('z-covers-both')
+    // And the dense doc is PRESENT — a coverage FLOOR dropping it would be
+    // the invented policy the ruling declines (codex pass: pins causality).
+    expect(r.hits.map((h) => h.id)).toContain('a-dense-one-term')
+  })
+
+  test('RULED: duplicate document ids REFUSE loudly, naming the first duplicate — silent keeping is silent repair', () => {
+    const dup = knowledge.buildIndex([
+      ...DOCS,
+      { id: 'wiki-deploy', source: 'wiki', page: 'x', title: 'x', description: '', headings: '', body: '' },
+    ])
+    expect(dup.ok).toBe(false)
+    if (!dup.ok) expect(dup.refusal).toEqual({ kind: 'duplicate-doc-id', id: 'wiki-deploy' })
   })
 })

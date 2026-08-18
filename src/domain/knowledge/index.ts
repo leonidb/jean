@@ -310,7 +310,15 @@ export const knowledge: KnowledgeContract = {
     return { ok: false, valid: VALID_SCOPES }
   },
 
-  buildIndex(docs: readonly SearchDoc[]): SearchIndex {
+  buildIndex(docs: readonly SearchDoc[]) {
+    // Duplicate ids refuse loudly (ruled, task 096): the old engine threw;
+    // keeping them silently is the silent-repair class. Mechanical wrap per
+    // the ruling — flagged on the task.
+    const seen = new Set<string>()
+    for (const doc of docs) {
+      if (seen.has(doc.id)) return { ok: false as const, refusal: { kind: 'duplicate-doc-id' as const, id: doc.id } }
+      seen.add(doc.id)
+    }
     const indexed: Indexed[] = docs.map((doc) => ({
       doc,
       fields: new Map<keyof typeof BOOST, ReadonlySet<string>>([
@@ -320,7 +328,7 @@ export const knowledge: KnowledgeContract = {
         ['body', new Set(termsOf(doc.body))],
       ]),
     }))
-    return indexed as unknown as SearchIndex
+    return { ok: true as const, index: indexed as unknown as SearchIndex }
   },
 
   search(index: SearchIndex, query: string, opts: { topN?: number; scope: SearchScope }): SearchResult {
