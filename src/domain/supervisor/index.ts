@@ -5,10 +5,14 @@
  * ── THE TWO ROW-CLOSURES ARE STRUCTURAL, NOT CHECKED ──
  *
  * Register row 8 (an agent with pending mail is probed anyway) cannot be
- * written here, because `hasPendingMail` is the FIRST thing the probe path
- * asks and it returns early. Its ladder is already the probe: silence with
- * mail waiting is answered by the notifier repeating, so a second mechanism
- * asking the same question would only add a message the agent must clear.
+ * written here, because `hasPendingMail` guards BOTH probe-emission sites —
+ * the stuck question and the idle ping — and nothing else emits a probe.
+ * Its ladder is already the probe: silence with mail waiting is answered by
+ * the notifier repeating, so a second mechanism asking the same question
+ * would only add a message the agent must clear. The guard is scoped to
+ * probe EMISSION deliberately (task 102): down, the probed verdict, and
+ * recovery are not probes, and mail never shields them — a probe mints
+ * mail, so a blanket exit made every verdict cancel itself.
  *
  * Register row 7 (a report with no matching return — extended to EVERY
  * report kind, down or up-but-stuck, at task 100's round) cannot be written
@@ -209,14 +213,18 @@ export const supervisor: SupervisorContract = {
         continue
       }
 
-      // REGISTER ROW 8, BY CONSTRUCTION: mail waiting means the notifier's
-      // ladder is already asking this question, so nothing here asks it again.
-      // This must precede every probe path, which is why it is one early exit
-      // rather than a condition repeated in each.
-      if (agent.hasPendingMail) continue
+      // REGISTER ROW 8 gates PROBE EMISSION ONLY (scoped at task 102): mail
+      // waiting means the notifier's ladder is already asking the liveness
+      // question, so no NEW probe is emitted below — but down, the probed
+      // verdict, and recovery are not probes, and mail never shields them.
+      // The earlier blanket exit here made every report unreachable under
+      // composition: a probe MINTS mail (agent-probe is queued, addressed),
+      // so the verdict tick always saw a mail-holder and skipped, and a
+      // disconnected agent with queued dispatches could never read down.
 
       if (!agent.connected) {
-        // No session to probe: the verdict has to come from silence alone.
+        // No session to probe: the verdict has to come from silence alone —
+        // mail or no mail (its ladder is refused wakes, not liveness).
         // Edge-triggered — one report per episode, not a stream.
         if (quiet >= config.stuckAfterMs && episode.reported === undefined && orchestrator !== undefined) {
           effects.push({ kind: 'report', to: orchestrator, subject: agent.name, status: 'down', quietMs: quiet })
@@ -228,7 +236,8 @@ export const supervisor: SupervisorContract = {
       if (agent.holdsWork) {
         // UP-BUT-STUCK: a live session holding work that has gone quiet.
         if (episode.probedAt === undefined) {
-          if (quiet >= config.stuckAfterMs) {
+          // Row 8's actual scope: never probe a mail-holder.
+          if (!agent.hasPendingMail && quiet >= config.stuckAfterMs) {
             effects.push({ kind: 'probe', agent: agent.name, quietMs: quiet })
             agents.set(agent.name, { ...episode, probedAt: view.now })
           }
@@ -258,8 +267,8 @@ export const supervisor: SupervisorContract = {
       // IDLE AND EMPTY: no work, no mail. Pinged once after the configured
       // silence — ordinary addressed mail whose acknowledgement resets the
       // clock. Edge-triggered, so a worker that never comes back accumulates
-      // exactly one.
-      if (quiet >= config.idlePingAfterMs && episode.probedAt === undefined) {
+      // exactly one. Row 8's guard again: a mail-holder is never pinged.
+      if (!agent.hasPendingMail && quiet >= config.idlePingAfterMs && episode.probedAt === undefined) {
         effects.push({ kind: 'probe', agent: agent.name, quietMs: quiet })
         agents.set(agent.name, { ...episode, probedAt: view.now })
       }

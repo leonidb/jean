@@ -80,6 +80,15 @@ function named(value: unknown): readonly (AgentName | undefined)[] {
  *  the same function shape as every other row, returning nobody. */
 const nobody: Resolver = () => []
 
+/** THE ADMISSION GATE (contract, task 102): the five kinds that became mail
+ *  mid-history resolve only when their record carries `queued: true` — the
+ *  vocabulary's admission flag. Without it the record is bookkeeping-era
+ *  history (or a synchronous `delivered` handover) and must not mint pairs
+ *  on replay. Part of the declared resolution, not a check beside it (P2). */
+function queuedOnly(resolver: Resolver): Resolver {
+  return (event, ctx) => ((event.data as { queued?: unknown } | undefined)?.queued === true ? resolver(event, ctx) : [])
+}
+
 /** Every §4 row that reads "orchestrator". Empty when the dojo has none on
  *  record — never a fallback: a mailbox nobody owns is exactly the orphan
  *  class P4 abolishes, so between-boot events are history, not misaddressed
@@ -128,8 +137,8 @@ const triggerFired: Resolver = (event) => {
  * the load-bearing part, not the contents of any one row.
  */
 const RESOLUTIONS: Record<KnownKind, Resolver> = {
-  // Messages
-  send: (event) => named((event.data as SendData)?.agent),
+  // Messages. `send` is admission-gated: only a queued send is mail.
+  send: queuedOnly((event) => named((event.data as SendData)?.agent)),
   reply: orchestratorOnly,
 
   // The task family — one row in §4, one resolver here
@@ -147,11 +156,12 @@ const RESOLUTIONS: Record<KnownKind, Resolver> = {
   'task-subscribed': nobody,
   'task-unsubscribed': nobody,
 
-  // Supervision and liveness
-  'task-reminder': orchestratorOnly,
-  'agent-probe': (event) => named((event.data as AgentProbeData)?.agent),
-  'agent-down': orchestratorOnly,
-  'worker-status': orchestratorOnly,
+  // Supervision and liveness — all admission-gated except `disconnect`
+  // (which never grew a flag: it was always mail to the orchestrator).
+  'task-reminder': queuedOnly(orchestratorOnly),
+  'agent-probe': queuedOnly((event) => named((event.data as AgentProbeData)?.agent)),
+  'agent-down': queuedOnly(orchestratorOnly),
+  'worker-status': queuedOnly(orchestratorOnly),
   disconnect: orchestratorOnly,
   'trigger-fired': triggerFired,
 

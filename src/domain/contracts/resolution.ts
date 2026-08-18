@@ -44,6 +44,19 @@
  * resolve empty — never to a fallback (a mailbox nobody owns is the orphan
  * class P4 abolishes).
  *
+ * THE ADMISSION FLAG (surfaced at A6's composition round, task 102): five
+ * kinds — `send`, `task-reminder`, `agent-probe`, `agent-down`,
+ * `worker-status` — became MAIL mid-history; their shapes carry
+ * `queued?: true`, the vocabulary's admission flag ("the write site
+ * decides, the fold applies"). WITHOUT the flag they resolve to NOBODY:
+ * a bookkeeping-era record, or a send handed over synchronously
+ * (`delivered`), must not mint pairs on replay — the composed system's
+ * first real-log replay would otherwise resurrect months of handled mail
+ * as pending. Admission is part of the DECLARED RESOLUTION — the one
+ * membership source — never a second check beside it (P2). Kinds that
+ * were always mail (`reply`, the task family) carry no flag: their
+ * historical pairs are cleared by the log's own ack records.
+ *
  * What the type system cannot enforce here, and what does: that an
  * implementation's answers actually match the table, that author exclusion
  * holds for every kind, and that unknown kinds resolve empty rather than

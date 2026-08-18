@@ -22,8 +22,25 @@
  */
 
 export { type Capture, createCapture, type Emitted } from './capture.ts'
-export { type CastAgent, type CastSpec, createCast } from './cast.ts'
+export {
+  type Behaviour,
+  type CastAgent,
+  type CastSpec,
+  type Conduct,
+  conducts,
+  createCast,
+  echo,
+  quiet,
+  type Utterance,
+} from './cast.ts'
 export { type Clock, createClock } from './clock.ts'
-export { assertNonCoincident, counted, type PendingPair, type ReplayRules, replayCheck } from './invariants.ts'
+export {
+  assertNonCoincident,
+  counted,
+  type PendingPair,
+  type ReplayResult,
+  type ReplayRules,
+  replayCheck,
+} from './invariants.ts'
 export { createLog, type EventLog } from './log.ts'
 export { createRng, type Rng } from './rng.ts'

@@ -9,7 +9,16 @@
  *    existing mail IS the probe — liveness is inferred from what its
  *    silence does next, not from a dedicated exchange. (Register row 8
  *    closes by construction: `decideSupervision` never probes an agent the
- *    view shows holding mail.)
+ *    view shows holding mail.) SCOPE, made precise at A6's composition
+ *    round (task 102): the rule gates PROBE EMISSION — the stuck-path
+ *    question and the idle ping — and nothing else. Down, the
+ *    probed-verdict, and recovery are not probes, and mail never shields
+ *    them: a disconnected agent with queued mail still reads down from
+ *    silence alone, and a probe's OWN mail (agent-probe is addressed,
+ *    queued mail) must not cancel the verdict it exists to produce — the
+ *    composed system's first full loop showed a blanket mail exit making
+ *    every report unreachable, since real agents hold mail most of the
+ *    time and every probe mints some.
  *  - An IDLE worker — no task, no pending mail — is pinged after a
  *    configurable silence (default a day): ordinary addressed mail whose
  *    acknowledgement resets the clock. EDGE-TRIGGERED: never re-emitted

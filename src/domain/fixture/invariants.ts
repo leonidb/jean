@@ -24,7 +24,15 @@ export type PendingPair = { recipient: AgentName; eventId: number }
 
 export type ReplayRules = {
   resolution: ResolutionContract
+  /** The resolution context. COMPOSED walks (A6): resolution reads state
+   *  AS OF each event — a subscriber added later must not retro-address
+   *  earlier comments — so `ctx` may be a mutable object that `observe`
+   *  advances; replayCheck reads it fresh per event and never copies it. */
   ctx: ResolutionContext
+  /** Called FIRST for every event, before it is resolved — the caller's
+   *  hook to advance an evolving context (fold shadow states, reseat the
+   *  orchestrator). Absent for static-context walks. */
+  observe?: (event: StoredEvent) => void
   /** The pairs an event clears, per the mailbox contract. Return [] for
    *  events that clear nothing. */
   clearedPairsOf: (event: StoredEvent, pending: readonly PendingPair[]) => readonly PendingPair[]
@@ -65,6 +73,7 @@ export function replayCheck(log: readonly StoredEvent[], rules: ReplayRules): Re
   let observedJointHolds = 0
 
   for (const event of log) {
+    rules.observe?.(event)
     const author = rules.resolution.authorOf(event)
     const recipients = rules.resolution.resolve(event, rules.ctx)
 

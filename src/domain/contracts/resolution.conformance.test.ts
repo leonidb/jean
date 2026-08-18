@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { createClock, createLog } from '../fixture/index.ts'
+import { counted, createClock, createLog } from '../fixture/index.ts'
 import type { ResolutionContext, ResolutionContract } from './resolution.ts'
 
 // Dynamic import through a widened string, deliberately: a static import of a
@@ -297,5 +297,37 @@ describe('degenerate contexts — empty, never a fallback', () => {
     const log = build()
     const e = log.appendRaw('kind-from-the-future', 'system', { whatever: true })
     expect(resolution.resolve(e, ctx)).toEqual([])
+  })
+})
+
+describe('the admission flag — five kinds became mail mid-history (surfaced at composition, task 102)', () => {
+  test('without `queued: true` the flagged kinds resolve to NOBODY; the same shapes with it resolve as declared', () => {
+    // Every real log holds these WITHOUT the flag: bookkeeping-era records
+    // and synchronous `delivered` handovers. Resolving them would resurrect
+    // months of handled mail as pending on the first composed replay — the
+    // gap every fixture above hid by always setting the flag.
+    const log = build()
+    const unflagged = [
+      log.append('send', `agent-${WORKER_A}`, {
+        agent: WORKER_A,
+        from: ORCH,
+        text: 'handed over live',
+        delivered: true,
+      }),
+      log.append('task-reminder', 'system', { taskId: '101', to: ORCH, text: 'bookkeeping era' }),
+      log.append('agent-probe', `agent-${WORKER_B}`, { agent: WORKER_B, quietMinutes: 1440, text: 'alive?' }),
+      log.append('agent-down', 'system', { subject: WORKER_A, quietMinutes: 90, text: 'down' }),
+      log.append('worker-status', 'system', { agent: WORKER_A, status: 'recovered', text: 'back' }),
+    ]
+    let checked = 0
+    for (const e of unflagged) {
+      expect(resolution.resolve(e, ctx), `${e.type} without the flag must be history`).toEqual([])
+      checked++
+    }
+    counted('unflagged records resolving empty', checked, 5)
+    // The mirror direction (checklist #3): the gate must ADMIT, not just
+    // refuse — the same shape with the flag is mail, per the table above.
+    const flagged = log.append('send', `agent-${WORKER_A}`, { agent: WORKER_A, from: ORCH, text: 'go', queued: true })
+    expect(resolution.resolve(flagged, ctx)).toEqual([WORKER_A])
   })
 })

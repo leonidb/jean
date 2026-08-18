@@ -253,6 +253,48 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     expect(reportAt - probeAt).toBeGreaterThanOrEqual(CONFIG.probeTimeoutMs) // the answer window elapsed
   })
 
+  test('ROW 8 GATES PROBES ONLY (task 102): mail never shields a verdict — a probe mints mail, and a blanket exit cancelled every report', () => {
+    // (a) A DISCONNECTED agent with queued mail still reads down — its
+    // ladder is refused wakes, not liveness. The first composed run showed
+    // the blanket exit hiding exactly this: dispatches queue to a dead
+    // worker and nobody is ever told it is dead.
+    const goneWithMail = agent({
+      name: WORKER,
+      connected: false,
+      holdsWork: true,
+      hasPendingMail: true,
+      lastActivityAt: T0 - DAY,
+    })
+    const phase1 = run(supervisor.initial(), T0, T0 + 10 * 60_000, (now) => view(now, { agents: [goneWithMail] }))
+    const downs = phase1.collected.flatMap((c) => c.effects).filter((e) => e.kind === 'report' && e.status === 'down')
+    expect(downs.length).toBe(1)
+    // (b) The stuck VERDICT proceeds although the probe's own mail is now
+    // pending: the probe was already asked; the answer window is what runs.
+    const stuck = (pendingMail: boolean) => [
+      agent({ name: 'worker-s', holdsWork: true, hasPendingMail: pendingMail, lastActivityAt: T0 }),
+    ]
+    const probed = run(supervisor.initial(), T0, T0 + CONFIG.stuckAfterMs + 60_000, (now) =>
+      view(now, { agents: stuck(false) }),
+    )
+    expect(probed.collected.flatMap((c) => c.effects).filter((e) => e.kind === 'probe').length).toBe(1)
+    const verdict = run(
+      probed.state,
+      T0 + CONFIG.stuckAfterMs + 2 * 60_000,
+      T0 + 2 * HOUR,
+      (now) => view(now, { agents: stuck(true) }), // the probe now sits in its mailbox
+    )
+    const reports = verdict.collected
+      .flatMap((c) => c.effects)
+      .filter((e) => e.kind === 'report' && e.status === 'up-but-stuck')
+    expect(reports.length).toBe(1)
+    // (c) The MIRROR stays: a mail-holding quiet worker is still never
+    // asked a NEW question — no probe, however silent (row 8's actual rule,
+    // already pinned above; re-asserted here against this fixture's shape).
+    const quietWithMail = agent({ name: 'worker-q', hasPendingMail: true, holdsWork: true, lastActivityAt: T0 - DAY })
+    const noProbe = run(supervisor.initial(), T0, T0 + 2 * HOUR, (now) => view(now, { agents: [quietWithMail] }))
+    expect(noProbe.collected.flatMap((c) => c.effects).filter((e) => e.kind === 'probe')).toEqual([])
+  })
+
   test('the idle ping RE-ARMS after acknowledgement (codex, task 100): activity clears the outstanding probe; new silence earns a new ping', () => {
     // Probed once (idle a day already)…
     const phase1 = run(supervisor.initial(), T0, T0 + 10 * 60_000, (now) =>
