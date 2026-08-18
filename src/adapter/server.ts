@@ -47,7 +47,7 @@
 import { type FSWatcher, mkdirSync, watch } from 'node:fs'
 import { resolve as resolvePath } from 'node:path'
 import { agents as agentsModule } from '../domain/agents/index.ts'
-import type { AckPair, MailboxState, ViewFacts } from '../domain/contracts/mailbox.ts'
+import type { AckPair, MailboxState, Selector, ViewFacts } from '../domain/contracts/mailbox.ts'
 import type { NotifierExecutor, NotifierView } from '../domain/contracts/notifier.ts'
 import type { SupervisedAgentFacts, SupervisorView } from '../domain/contracts/supervisor.ts'
 import type { Trigger } from '../domain/contracts/triggers.ts'
@@ -67,12 +67,14 @@ import { routing } from '../domain/routing/index.ts'
 import { tasks } from '../domain/tasks/index.ts'
 import { triggers } from '../domain/triggers/index.ts'
 import { createStore, jsonlBackend, memoryBackend, type StoredEvent } from '../es/index.ts'
+import { INFRA_IDENTITY } from '../probe.ts'
 import { type Attention, type AttentionConfig, createAttention } from './attention.ts'
 import type { Caller, SurfaceContext } from './context.ts'
 import type { SupervisionExecutor } from './executors.ts'
 import { scanPlaybooks } from './playbook-files.ts'
 import { createScheduler, type Scheduler } from './schedule.ts'
 import { knowledgeRoutes } from './surfaces/knowledge.ts'
+import { apiEvent, operationRoutes } from './surfaces/operations.ts'
 import { playbookRoutes } from './surfaces/playbooks.ts'
 import { taskRoutes } from './surfaces/tasks.ts'
 import { triggerRoutes } from './surfaces/triggers.ts'
@@ -660,15 +662,43 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
    * knowing which field it is.
    */
   function callerOf(req: Request, url: URL, claimed?: string): Caller {
+    // AN EXPLICIT QUESTION OUTRANKS AMBIENT IDENTITY. `?for=` and `?agent=`
+    // NAME a mailbox; the header merely says who is holding the phone — and
+    // the plugin attaches it to EVERY call, so a header that won would turn
+    // `?for=someone-else` into a read of the caller's own mailbox and answer
+    // the wrong question without ever saying so (codex pass, task 109).
     const named =
-      req.headers.get('x-jean-agent') ??
-      url.searchParams.get('agent') ??
       url.searchParams.get('for') ??
+      url.searchParams.get('agent') ??
+      decodeHeaderName(req.headers.get('x-jean-agent')) ??
       (claimed !== undefined && claimed.length > 0 ? claimed : undefined)
     if (named === null || named === undefined) return { connected: false }
     const session = sessions.get(named)
     const role = roleOf(named)
     return { name: named, ...(role !== undefined && { role }), connected: session !== undefined }
+  }
+
+  /**
+   * The agent name off the header, decoded.
+   *
+   * HTTP headers are Latin-1 only, so the plugin percent-encodes the name —
+   * "infra decodes", says the comment beside it — and a raw non-ASCII name
+   * would otherwise make `fetch` throw on every call. Reading it undecoded
+   * means an agent called `chat 42` asks after the mailbox of `chat%2042`,
+   * which nobody registered: an empty inbox, forever, with nothing failing
+   * (codex pass, task 109).
+   *
+   * A value that is not valid encoding is used AS-IS rather than refused —
+   * a literal `%` in a name is far likelier than a caller trying to smuggle
+   * one, and the old surface made the same call.
+   */
+  function decodeHeaderName(raw: string | null): string | undefined {
+    if (raw === null || raw.length === 0) return undefined
+    try {
+      return decodeURIComponent(raw)
+    } catch {
+      return raw
+    }
   }
 
   // ── Serializers — rename only ──────────────────────────────────
@@ -756,24 +786,92 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     return json({ ok: true, ...outcome })
   }
 
+  /** One event on the wire: the API shape plus its ack code and whatever
+   *  this process knows about how it was handed over. */
+  const wireEvent = (event: StoredEvent, code: string) => ({
+    ...apiEvent(event),
+    stream: event.stream,
+    ...(deliveryLedger.get(event.id) !== undefined && { deliveredVia: deliveryLedger.get(event.id) }),
+    code,
+  })
+
+  /**
+   * The fetch rung — the ONLY response carrying ack codes, and two readings
+   * of it.
+   *
+   * ADDRESSED (`?agent=`, `?for=`, or the `x-jean-agent` header): one agent
+   * reading ITS mailbox, through the same membership the counts and summary
+   * describe, so the three rungs are three renderings of one list rather
+   * than three answers. It is also a DELIVERY — under P5 this is how an
+   * agent obtains a code — so it stamps and reports carriage.
+   *
+   * OBSERVER (no identity at all — `jean status`, a dashboard): the whole
+   * pending set, and NO STAMP. Stamping here would record a delivery to
+   * nobody, and first-write-wins would let whichever observer looked first
+   * become the recorded carrier of everyone's mail. E1 answered this read
+   * with a 400 and `jean status` would have broken at the switch.
+   */
   function handleFetch(req: Request, url: URL): Response {
     const caller = callerOf(req, url)
-    if (caller.name === undefined) return json({ error: 'name the caller: ?agent= or x-jean-agent' }, 400)
-    const selector = url.searchParams.get('ids')
-    // PARSE STRICTLY. `?ids=a` used to filter out the unparseable value and
-    // ask for an empty selection, which the mailbox answers honestly with
-    // "nothing found" — a wrong answer to a question the caller never asked.
-    // A malformed id is grammar, so it is a 400 here rather than an empty
-    // list there (codex pass, task 101).
-    const ids = selector === null ? undefined : selector.split(',').map((n) => Number.parseInt(n, 10))
-    if (ids?.some((n) => !Number.isFinite(n)))
-      return json({ error: 'ids must be a comma-separated list of numbers' }, 400)
-    // CALL: one domain function. Which of the ids the caller may see is the
-    // mailbox's decision, never this handler's.
+    const idsParam = url.searchParams.get('ids')
+    const fromParam = url.searchParams.get('from')
+    const typeParam = url.searchParams.get('type')
+    const selectors = [idsParam, fromParam, typeParam].filter((p) => p !== null)
+    // AT MOST ONE. Two selectors is an ambiguous question, and answering the
+    // first would be the silently-ignored-parameter defect this endpoint
+    // refuses everywhere else.
+    if (selectors.length > 1) return json({ error: 'pass at most one selector — ids, from, or type' }, 400)
+
+    if (caller.name === undefined) {
+      if (selectors.length > 0) {
+        return json({ error: 'a selector reads ONE mailbox — pass ?agent=<name> or the x-jean-agent header' }, 400)
+      }
+      // THE OBSERVER READ. Every pending event once, in log order — the
+      // union of every mailbox, which is `pendingPairs` deduped by event.
+      const seen = new Set<number>()
+      const observed: StoredEvent[] = []
+      for (const pair of mailbox.pendingPairs(mailState)) {
+        if (seen.has(pair.eventId)) continue
+        seen.add(pair.eventId)
+        const held = mailbox.fetchFor(mailState, pair.recipient).find((f) => f.event.id === pair.eventId)
+        if (held !== undefined) observed.push(held.event)
+      }
+      observed.sort((a, b) => a.id - b.id)
+      return json({ events: observed.map((event) => wireEvent(event, mailbox.codeFor(event))) })
+    }
+
+    // PARSE STRICTLY, per selector. `?ids=a` used to filter out the
+    // unparseable value and ask for an empty selection, which the mailbox
+    // answers honestly with "nothing found" — a wrong answer to a question
+    // the caller never asked (codex pass, task 101). Every token must be a
+    // plain decimal, INCLUDING the empty ones a stray comma produces
+    // (`1,,2`, `1,`): filtering those would quietly normalize a malformed
+    // list, which is the silent-repair twin of the same defect.
+    let selector: Selector | undefined
+    if (idsParam !== null) {
+      const tokens = idsParam.split(',').map((t) => t.trim())
+      if (tokens.some((t) => !/^\d+$/.test(t))) {
+        return json({ error: 'ids must be a comma-separated list of event ids, e.g. ?ids=41,42' }, 400)
+      }
+      const ids = [...new Set(tokens.map(Number))]
+      // Past MAX_SAFE_INTEGER two distinct digit strings collapse to one
+      // float, so `missing` could name ids the caller never sent.
+      if (ids.some((id) => !Number.isSafeInteger(id))) return json({ error: 'ids out of range' }, 400)
+      selector = { ids }
+    } else if (fromParam !== null) {
+      if (fromParam.length === 0) return json({ error: 'from needs a sender name' }, 400)
+      selector = { from: fromParam }
+    } else if (typeParam !== null) {
+      if (typeParam.length === 0) return json({ error: 'type needs a summary type key' }, 400)
+      selector = { type: typeParam }
+    }
+
+    // CALL: one domain function. Which of the events the caller may see is
+    // the mailbox's decision, never this handler's.
     const selection =
-      ids === undefined
+      selector === undefined
         ? { events: mailbox.fetchFor(mailState, caller.name) }
-        : mailbox.select(mailState, caller.name, { ids }, viewFacts())
+        : mailbox.select(mailState, caller.name, selector, viewFacts())
     observeActivity(caller.name)
     // A FETCH IS CARRIAGE. The agent has now seen these events by its own
     // act, which discharges the current announcement obligation without
@@ -783,9 +881,87 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     stampDelivery('fetch', shown)
     attention?.carried(caller.name, shown, 'fetch')
     return json({
-      events: selection.events.map((f) => ({ ...f.event, code: f.code })),
+      events: selection.events.map((f) => wireEvent(f.event, f.code)),
       ...('missing' in selection && selection.missing !== undefined && { missing: selection.missing }),
     })
+  }
+
+  /**
+   * The two cheap rungs, and the grouped view under them.
+   *
+   * NO ACK CODES HERE, deliberately: a code on a cheap rung would make the
+   * cheap rung sufficient to CLEAR, and read-before-ack would hold only by
+   * convention (P5). The identity comes from `?for=` or the header, and
+   * without one there is no mailbox to describe — these rungs have no
+   * observer reading.
+   */
+  function handleMailboxView(req: Request, url: URL, view: 'counts' | 'summary'): Response {
+    const caller = callerOf(req, url)
+    if (caller.name === undefined) return json({ error: 'pass ?for=<agent> or the x-jean-agent header' }, 400)
+    const facts = viewFacts()
+    return json(
+      view === 'counts'
+        ? { counts: mailbox.countsFor(mailState, caller.name, facts) }
+        : { summary: mailbox.summaryFor(mailState, caller.name, facts, ports.now()) },
+    )
+  }
+
+  /**
+   * The grouped view — the triage payload.
+   *
+   * REGROUPING, NOT DECIDING. Every key here comes from the mailbox's own
+   * `groupOf` classification, so the `from` and `type` keys an agent reads
+   * off this view are exactly the keys `GET /events?from=`/`?type=` accepts:
+   * one classification, three renderings, no translation gap. The counting
+   * and the ages are aggregation for display — the same shaping
+   * `renderInboxLine` does, which is why they sit beside each other.
+   *
+   * NOT CARRIED OVER: the old view's per-message `kinds` (photo/file/text,
+   * sniffed from the text). That is a content classification no module owns,
+   * no consumer parses, and inventing it here would be the adapter deciding.
+   * Flagged rather than reimplemented.
+   */
+  function inboxOf(agent: AgentName): {
+    blocking: { from: string; ids: number[]; count: number; waitedMs: number; preview: string }[]
+    queued: { count: number; byType: Record<string, number>; oldestMs: number }
+  } | null {
+    const lines = mailbox.summaryFor(mailState, agent, viewFacts(), ports.now())
+    if (lines.length === 0) return null
+    const blocking = new Map<
+      string,
+      { from: string; ids: number[]; count: number; waitedMs: number; preview: string }
+    >()
+    const byType: Record<string, number> = {}
+    let queued = 0
+    let oldestMs = 0
+    for (const line of lines) {
+      if (line.group.kind === 'blocking') {
+        const from = line.group.from
+        const entry = blocking.get(from) ?? { from, ids: [], count: 0, waitedMs: 0, preview: '' }
+        entry.ids.push(line.id)
+        entry.count++
+        // The OLDEST age and the LATEST preview: a ten-message burst must not
+        // look fresh while the human has waited eight minutes, and the useful
+        // preview is the one they sent last.
+        entry.waitedMs = Math.max(entry.waitedMs, line.ageMs)
+        entry.preview = line.preview
+        blocking.set(from, entry)
+        continue
+      }
+      queued++
+      byType[line.group.type] = (byType[line.group.type] ?? 0) + 1
+      oldestMs = Math.max(oldestMs, line.ageMs)
+    }
+    return { blocking: [...blocking.values()], queued: { count: queued, byType, oldestMs } }
+  }
+
+  function handleInbox(req: Request, url: URL): Response {
+    const caller = callerOf(req, url)
+    // FOR THE CALLER, whoever it is. A worker's `reply` travels over the
+    // socket and has no response to attach a header to, which is why this
+    // surface exists at all.
+    const inbox = caller.name === undefined ? null : inboxOf(caller.name)
+    return json({ inbox, line: caller.name === undefined ? null : renderInboxLine(caller.name) || null })
   }
 
   async function handleAck(req: Request, url: URL): Promise<Response> {
@@ -793,7 +969,13 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     const caller = callerOf(req, url)
     if (caller.name === undefined) return json({ error: 'name the caller: ?agent= or x-jean-agent' }, 400)
     if (body === null || !Array.isArray(body.pairs)) return json({ error: 'body must be { pairs: [{id, code}] }' }, 400)
-    const pairs = body.pairs.filter((p): p is AckPair => typeof p?.id === 'number' && typeof p?.code === 'string')
+    const pairs = body.pairs.filter(
+      (p): p is AckPair => Number.isInteger((p as AckPair)?.id) && typeof (p as AckPair)?.code === 'string',
+    )
+    // EMPTY OR ALL-MALFORMED IS A CALLER BUG — loud, not a success-shaped
+    // no-op. A model that passed the wrong shape would otherwise believe it
+    // acked, and be announced at forever.
+    if (pairs.length === 0) return json({ error: 'pairs must contain {id, code} objects' }, 400)
     // The evidence port: what this shell handed over, and how. Absent is
     // "unknown", never "not delivered".
     const decision = mailbox.applyAck(mailState, caller.name, pairs, (eventId) => deliveryLedger.get(eventId))
@@ -864,6 +1046,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     triggerRoutes(surfaceContext),
     knowledgeRoutes(surfaceContext),
     playbookRoutes(surfaceContext),
+    operationRoutes(surfaceContext),
   ]
 
   // ── The piggyback ──────────────────────────────────────────────
@@ -1026,13 +1209,66 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     fire: fireTrigger,
   })
 
+  /**
+   * The identity probe — `GET /`.
+   *
+   * Not on the inventory's blocker list and found while grepping for the
+   * others: `probeInfra` fetches this to decide whether a jean infra is
+   * running at a port, and EVERY CLI command goes through that discovery.
+   * Without it the new server answers 404, the probe reads null, and the
+   * operator is told the infra is not running — while it serves every other
+   * route perfectly.
+   */
+  function handleIdentity(): Response {
+    return json({
+      name: INFRA_IDENTITY,
+      dataDir: options.dataDir ?? '',
+      pid: process.pid,
+      port: server.port ?? 0,
+    })
+  }
+
+  /** The operator's first command. Identity, who is connected, and the two
+   *  numbers that say whether anything is backed up. */
+  function handleStatus(): Response {
+    const orchestrator = orchestratorOf()
+    const seated = orchestrator === undefined ? undefined : sessions.get(orchestrator)
+    return json({
+      name: INFRA_IDENTITY,
+      dataDir: options.dataDir ?? '',
+      pid: process.pid,
+      port: server.port ?? 0,
+      agents: [...sessions.values()].map((session) => ({ name: session.name, role: roleOf(session.name) })),
+      sensei: seated === undefined ? { connected: false } : { connected: true, name: orchestrator },
+      // Every pending PAIR is one agent's copy; the count operators care
+      // about is how many events are unhandled somewhere.
+      pendingEvents: new Set(mailbox.pendingPairs(mailState).map((pair) => pair.eventId)).size,
+      activeTriggers: triggers.all(triggerState).filter((t) => t.status === 'active').length,
+      // The bridge is attached as a SURFACE, not owned by this server, so
+      // there is no health to report from here. E3's seam is the whole of
+      // what the adapter knows about it.
+      bridge: { configured: [...sessions.values()].some((session) => session.role === 'user') },
+    })
+  }
+
   /** The routing table — the only conditionals here dispatch on route or
    *  method. Split out of `fetch` so the piggyback wraps every answer,
    *  including the 404. */
   async function route(req: Request, url: URL): Promise<Response> {
+    if (url.pathname === '/' && req.method === 'GET') return handleIdentity()
+    if (url.pathname === '/status' && req.method === 'GET') return handleStatus()
     if (url.pathname === '/send' && req.method === 'POST') return handleSend(req, url)
     if (url.pathname === '/events' && req.method === 'GET') return handleFetch(req, url)
-    if (url.pathname === '/ack' && req.method === 'POST') return handleAck(req, url)
+    if (url.pathname === '/events/counts' && req.method === 'GET') return handleMailboxView(req, url, 'counts')
+    if (url.pathname === '/events/summary' && req.method === 'GET') return handleMailboxView(req, url, 'summary')
+    if (url.pathname === '/inbox' && req.method === 'GET') return handleInbox(req, url)
+    // TWO PATHS, ONE HANDLER. The channel plugin ships separately from the
+    // server and POSTs `/events/ack`; the adapter's own name for it is
+    // `/ack`. The compat route lives here because the server is the half
+    // that can be upgraded — an alias, never a second implementation.
+    if ((url.pathname === '/ack' || url.pathname === '/events/ack') && req.method === 'POST') {
+      return handleAck(req, url)
+    }
     if (url.pathname === '/agents' && req.method === 'GET') return handleAgents()
     for (const surface of surfaces) {
       const answer = await surface(req, url)
