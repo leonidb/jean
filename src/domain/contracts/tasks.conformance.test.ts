@@ -304,6 +304,86 @@ describe('revert — stack-pop, and the park-clearing ruling (D-1)', () => {
     }
   })
 
+  test('THE STACK LAW, case 1: a SECOND revert after a D-5 skip pops from where the first actually landed (090 pin)', () => {
+    // Stack: todo → in-progress → waiting → done. First revert lands
+    // in-progress (D-5 skips waiting) — the skipped waiting must LEAVE the
+    // stack too, or this second revert pops "back" to it. The bug D3b fixed;
+    // one assertion holds both halves of the law.
+    const { log } = world()
+    log.append('task-created', 'task-001', { title: 't', description: '', queue: WORKER_A, actor: ORCH })
+    log.append('task-status', 'task-001', { from: 'todo', to: 'in-progress', actor: ORCH })
+    log.append('task-status', 'task-001', { from: 'in-progress', to: 'waiting', actor: ORCH, blockedOn: 'human' })
+    log.append('task-status', 'task-001', { from: 'waiting', to: 'done', actor: ORCH })
+    let s = tasks.initial()
+    for (const e of log.events()) s = tasks.fold(s, e, ROSTER)
+    const first = tasks.decideRevert(s, '001', ORCH)
+    expect(first.ok).toBe(true)
+    if (!first.ok) return
+    s = tasks.fold(s, log.append('task-reverted', 'task-001', first.data), ROSTER)
+    expect(tasks.taskOf(s, '001')?.status).toBe('in-progress')
+    const second = tasks.decideRevert(s, '001', ORCH)
+    expect(second.ok).toBe(true)
+    if (second.ok) {
+      expect(second.from).toBe('in-progress') // top === status: the pop starts where the task IS
+      expect(second.to).toBe('todo') // never back to the skipped waiting
+    }
+  })
+
+  test('THE STACK LAW, case 2: a task-reverted whose `to` is not in the stack leaves top === status (090 pin)', () => {
+    // History deep enough that the follow-up revert MUST succeed, so the law
+    // is asserted definitely — a conditional expect would let this pass as a
+    // no-op (codex pass, 090).
+    const { log } = world()
+    log.append('task-created', 'task-001', { title: 't', description: '', queue: WORKER_A, actor: ORCH })
+    log.append('task-status', 'task-001', { from: 'todo', to: 'in-progress', actor: ORCH })
+    log.append('task-status', 'task-001', { from: 'in-progress', to: 'done', actor: ORCH })
+    let s = tasks.initial()
+    for (const e of log.events()) s = tasks.fold(s, e, ROSTER)
+    // A rogue/foreign revert event naming a status never entered.
+    s = tasks.fold(s, log.appendRaw('task-reverted', 'task-001', { from: 'done', to: 'waiting', actor: ORCH }), ROSTER)
+    const t = tasks.taskOf(s, '001')
+    if (!t) throw new Error('fixture: task missing')
+    const d = tasks.decideRevert(s, '001', ORCH)
+    expect(d.ok).toBe(true) // poppable history remains below — a refusal here would itself break the law
+    if (d.ok) expect(d.from).toBe(t.status) // top === status, whatever the fold made of the rogue event
+  })
+
+  test('THE STACK LAW, case 3: decideRevert never reports a `from` that disagrees with the task status (090 pin)', () => {
+    // Build several histories; in every one, decideRevert's `from` must equal
+    // the folded status — the law observed through the only surface that
+    // exposes the stack.
+    const histories: TaskStatus[][] = [
+      ['in-progress'],
+      ['in-progress', 'waiting'],
+      ['in-progress', 'waiting', 'in-progress'],
+      ['in-progress', 'done'],
+      ['assigned', 'in-progress', 'waiting', 'cancelled'],
+    ]
+    let checked = 0
+    for (const chain of histories) {
+      const { log } = world()
+      log.append('task-created', 'task-001', { title: 't', description: '', queue: WORKER_A, actor: ORCH })
+      let prev: TaskStatus = 'todo'
+      for (const to of chain) {
+        log.append('task-status', 'task-001', {
+          from: prev,
+          to,
+          actor: ORCH,
+          ...(to === 'waiting' && { blockedOn: 'sensei' as const }),
+        })
+        prev = to
+      }
+      let s = tasks.initial()
+      for (const e of log.events()) s = tasks.fold(s, e, ROSTER)
+      const d = tasks.decideRevert(s, '001', ORCH)
+      if (d.ok) {
+        expect(d.from).toBe(tasks.taskOf(s, '001')?.status as TaskStatus)
+        checked++
+      }
+    }
+    counted('stack-law revert decisions', checked, 4)
+  })
+
   test('RULED (D-1): reverting OUT of waiting clears the park fields — no reminder clock survives on a moving task', () => {
     const { state, log } = withTask('waiting') // parked on sensei
     expect(tasks.taskOf(state, '001')?.blockedOn).toBe('sensei')

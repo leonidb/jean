@@ -51,6 +51,19 @@ const HUMAN = 'human-h'
 const roleOf = (name: AgentName): AgentRole | undefined =>
   name === ORCH ? 'sensei' : name === HUMAN ? 'user' : name === WORKER_A || name === WORKER_B ? 'worker' : undefined
 
+/** The suite's own authorship declaration — the speech kinds only, per the
+ *  SenderOf composition rule. Machine senders (`infra`, `api`) have no
+ *  authorship, exactly as resolution.authorOf answers (codex pass, 090). */
+const senderOf = (e: { type: string; data: unknown }): AgentName | undefined => {
+  const d = (e.data ?? {}) as { agent?: unknown; from?: unknown }
+  if (e.type === 'send')
+    return typeof d.from === 'string' && d.from !== 'infra' && d.from !== 'api' ? d.from : undefined
+  if (e.type === 'reply' || e.type === 'task-comment' || e.type === 'memory')
+    return typeof d.agent === 'string' ? d.agent : undefined
+  return undefined
+}
+const FACTS = { roleOf, senderOf }
+
 const noEvidence = (): DeliveredVia | undefined => undefined
 
 /** A three-recipient scripted world with an EXPLICIT recipients table —
@@ -166,6 +179,37 @@ describe('§2 — independent acknowledgement, the invariant', () => {
     expect(first.cleared.length).toBe(1)
     expect(second.cleared.length).toBe(0)
     expect(mailbox.acknowledgedCount(second.next, WORKER_A, [send1.id])).toBe(1)
+  })
+
+  test('081 pins: the decision is deeply independent of its inputs and its record; old states stay readable', () => {
+    const { log, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
+    const beforePairs = mailbox
+      .pendingPairs(state)
+      .map((p) => `${p.recipient}:${p.eventId}`)
+      .sort()
+    const d = mailbox.applyAck(state, ORCH, [{ id: comment.id, code: mailbox.codeFor(comment) }], noEvidence)
+    // Mutating the RETURNED record must not reach the states (indirectly-
+    // visible state first — the mutation-survivor class).
+    d.record.eventIds.push(999_999)
+    d.record.cleared.length = 0
+    const oldStill = mailbox
+      .pendingPairs(state)
+      .map((p) => `${p.recipient}:${p.eventId}`)
+      .sort()
+    expect(oldStill).toEqual(beforePairs) // the OLD state is genuinely unchanged
+    expect(mailbox.mailboxOf(d.next, ORCH).map((e) => e.id)).not.toContain(comment.id) // and the new one holds
+    expect(mailbox.mailboxOf(state, ORCH).map((e) => e.id)).toContain(comment.id)
+  })
+
+  test('081 pin: acknowledgedCount on a PARTIALLY-cleared joint event answers per caller', () => {
+    const { log, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
+    const d = mailbox.applyAck(state, ORCH, [{ id: comment.id, code: mailbox.codeFor(comment) }], noEvidence)
+    // ORCH's pair is cleared; WORKER_A still holds — the entry survives, so
+    // both answers come from live state, not the bounded-memory fallback.
+    expect(mailbox.acknowledgedCount(d.next, ORCH, [comment.id])).toBe(1)
+    expect(mailbox.acknowledgedCount(d.next, WORKER_A, [comment.id])).toBe(0)
   })
 
   test('acknowledgedCount: the blessed bounded-memory limit — an unknown id also reads 1', () => {
@@ -314,10 +358,10 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
     const { log, recipientsOf } = scriptedWorld()
     const state = foldAll(log.events(), recipientsOf)
     const before = mailbox.pendingPairs(state).map((p) => `${p.recipient}:${p.eventId}`)
-    mailbox.countsFor(state, ORCH, roleOf)
-    mailbox.summaryFor(state, ORCH, roleOf, 1_755_500_100_000)
+    mailbox.countsFor(state, ORCH, FACTS)
+    mailbox.summaryFor(state, ORCH, FACTS, 1_755_500_100_000)
     mailbox.fetchFor(state, ORCH)
-    mailbox.select(state, ORCH, { ids: [1] }, roleOf)
+    mailbox.select(state, ORCH, { ids: [1] }, FACTS)
     const after = mailbox.pendingPairs(state).map((p) => `${p.recipient}:${p.eventId}`)
     expect(after).toEqual(before)
   })
@@ -325,24 +369,24 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
   test('freshness is the falling case (P10): views over an evolved state reflect the change immediately', () => {
     const { log, reply, comment, recipientsOf } = scriptedWorld()
     const state = foldAll(log.events(), recipientsOf)
-    const countBefore = mailbox.countsFor(state, ORCH, roleOf).total
+    const countBefore = mailbox.countsFor(state, ORCH, FACTS).total
     // Read every rung, then evolve the state — the same view calls over the
     // NEW state must answer from it, not from anything a prior call retained.
-    mailbox.summaryFor(state, ORCH, roleOf, 1_755_500_100_000)
+    mailbox.summaryFor(state, ORCH, FACTS, 1_755_500_100_000)
     mailbox.fetchFor(state, ORCH)
     const d = mailbox.applyAck(state, ORCH, [{ id: reply.id, code: mailbox.codeFor(reply) }], noEvidence)
-    const countAfter = mailbox.countsFor(d.next, ORCH, roleOf).total
+    const countAfter = mailbox.countsFor(d.next, ORCH, FACTS).total
     expect(countBefore).toBe(2)
     expect(countAfter).toBe(1)
-    expect(mailbox.summaryFor(d.next, ORCH, roleOf, 1_755_500_100_000).map((l) => l.id)).toEqual([comment.id])
+    expect(mailbox.summaryFor(d.next, ORCH, FACTS, 1_755_500_100_000).map((l) => l.id)).toEqual([comment.id])
     expect(mailbox.fetchFor(d.next, ORCH).map((f) => f.event.id)).toEqual([comment.id])
   })
 
   test('only fetch carries codes; counts and summary carry none, and summary previews cannot leak one', () => {
     const { log, reply, recipientsOf } = scriptedWorld()
     const state = foldAll(log.events(), recipientsOf)
-    const counts = mailbox.countsFor(state, ORCH, roleOf)
-    const summary = mailbox.summaryFor(state, ORCH, roleOf, 1_755_500_100_000)
+    const counts = mailbox.countsFor(state, ORCH, FACTS)
+    const summary = mailbox.summaryFor(state, ORCH, FACTS, 1_755_500_100_000)
     const fetched = mailbox.fetchFor(state, ORCH)
     expect(counts.total).toBe(2)
     expect(JSON.stringify(counts)).not.toContain(mailbox.codeFor(reply))
@@ -363,17 +407,17 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
     state = d.next
     // WORKER_A still holds the comment — on every rung, counts included…
     expect(mailbox.mailboxOf(state, WORKER_A).map((e) => e.id)).toContain(comment.id)
-    expect(mailbox.countsFor(state, WORKER_A, roleOf).total).toBe(2)
-    expect(mailbox.summaryFor(state, WORKER_A, roleOf, 1_755_500_100_000).map((l) => l.id)).toContain(comment.id)
+    expect(mailbox.countsFor(state, WORKER_A, FACTS).total).toBe(2)
+    expect(mailbox.summaryFor(state, WORKER_A, FACTS, 1_755_500_100_000).map((l) => l.id)).toContain(comment.id)
     expect(mailbox.fetchFor(state, WORKER_A).map((f) => f.event.id)).toContain(comment.id)
     // …and for ORCH every rung says it is gone — none may re-derive
     // membership from recipients.
-    expect(mailbox.countsFor(state, ORCH, roleOf).total).toBe(1)
-    expect(mailbox.summaryFor(state, ORCH, roleOf, 1_755_500_100_000).map((l) => l.id)).toEqual([reply.id])
+    expect(mailbox.countsFor(state, ORCH, FACTS).total).toBe(1)
+    expect(mailbox.summaryFor(state, ORCH, FACTS, 1_755_500_100_000).map((l) => l.id)).toEqual([reply.id])
     const fetched = mailbox.fetchFor(state, ORCH)
     expect(fetched.map((f) => f.event.id)).toEqual([reply.id])
     expect(fetched.some((f) => f.event.id === comment.id)).toBe(false) // no code for a cleared pair, ever
-    const selected = mailbox.select(state, ORCH, { ids: [comment.id] }, roleOf)
+    const selected = mailbox.select(state, ORCH, { ids: [comment.id] }, FACTS)
     expect(selected.events).toEqual([])
     expect(selected.missing).toEqual([comment.id])
   })
@@ -383,8 +427,8 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
     const state = foldAll(log.events(), recipientsOf)
     let checked = 0
     for (const agent of [WORKER_A, WORKER_B, ORCH]) {
-      const counts = mailbox.countsFor(state, agent, roleOf)
-      const summary = mailbox.summaryFor(state, agent, roleOf, 1_755_500_100_000)
+      const counts = mailbox.countsFor(state, agent, FACTS)
+      const summary = mailbox.summaryFor(state, agent, FACTS, 1_755_500_100_000)
       const fetched = mailbox.fetchFor(state, agent)
       expect(counts.total).toBe(summary.length)
       expect(counts.total).toBe(fetched.length)
@@ -392,6 +436,28 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
       checked++
     }
     counted('rung agreement per agent', checked, 3)
+  })
+
+  test('classification consumes the INJECTED authorship only: a lifecycle act by a human queues; the old drift kind queues (090)', () => {
+    // The speech restriction is part of the SenderOf composition: a
+    // task-status with a user actor is an act, not speech — it must not jump
+    // the queue. And trigger-created (the kind D2's local heuristic drifted
+    // on, wrong from birth) has no speaker under the composition at all.
+    const log = createLog(createClock())
+    const act = log.append('task-status', 'task-101', { from: 'in-progress', to: 'done', actor: HUMAN })
+    const drift = log.append('trigger-created', 'triggers', {
+      id: 'tr1',
+      cron: '0 9 * * *',
+      agent: WORKER_A,
+      prompt: 'p',
+      actor: HUMAN,
+    })
+    expect(mailbox.groupOf(act, FACTS).kind).toBe('queued')
+    expect(mailbox.groupOf(drift, FACTS).kind).toBe('queued')
+    // And machine senders have no authorship — infra's own sends queue even
+    // when they are speech-shaped (the exclusion lives in the composition).
+    const fromInfra = log.append('send', `agent-${ORCH}`, { agent: ORCH, from: 'infra', text: 'notice', queued: true })
+    expect(mailbox.groupOf(fromInfra, FACTS).kind).toBe('queued')
   })
 
   test('a human sender classifies blocking; machine mail queues — and the summary group IS the selector key', () => {
@@ -403,13 +469,13 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
       [machineMsg.id, [ORCH]],
     ])
     const state = foldAll(log.events(), (e) => table.get(e.id) ?? [])
-    expect(mailbox.groupOf(humanMsg, roleOf)).toEqual({ kind: 'blocking', from: HUMAN })
-    expect(mailbox.groupOf(machineMsg, roleOf).kind).toBe('queued')
-    const summary = mailbox.summaryFor(state, ORCH, roleOf, 1_755_500_100_000)
+    expect(mailbox.groupOf(humanMsg, FACTS)).toEqual({ kind: 'blocking', from: HUMAN })
+    expect(mailbox.groupOf(machineMsg, FACTS).kind).toBe('queued')
+    const summary = mailbox.summaryFor(state, ORCH, FACTS, 1_755_500_100_000)
     const humanLine = summary.find((l) => l.id === humanMsg.id)
     expect(humanLine?.group).toEqual({ kind: 'blocking', from: HUMAN })
     // The key read off the summary works verbatim as the selector.
-    const viaFrom = mailbox.select(state, ORCH, { from: HUMAN }, roleOf)
+    const viaFrom = mailbox.select(state, ORCH, { from: HUMAN }, FACTS)
     expect(viaFrom.events.map((f) => f.event.id)).toEqual([humanMsg.id])
   })
 })
@@ -418,11 +484,11 @@ describe('selectors — inside the reader’s mailbox, loud misses', () => {
   test('ids: found events come with codes; misses land in `missing`, present even when empty', () => {
     const { log, send1, send2, recipientsOf } = scriptedWorld()
     const state = foldAll(log.events(), recipientsOf)
-    const hit = mailbox.select(state, WORKER_A, { ids: [send1.id] }, roleOf)
+    const hit = mailbox.select(state, WORKER_A, { ids: [send1.id] }, FACTS)
     expect(hit.events.map((f) => f.event.id)).toEqual([send1.id])
     expect(hit.missing).toEqual([])
     // send2 is B's mail: for A it is a MISS, never a disclosure.
-    const cross = mailbox.select(state, WORKER_A, { ids: [send1.id, send2.id] }, roleOf)
+    const cross = mailbox.select(state, WORKER_A, { ids: [send1.id, send2.id] }, FACTS)
     expect(cross.events.map((f) => f.event.id)).toEqual([send1.id])
     expect(cross.missing).toEqual([send2.id])
   })
@@ -430,9 +496,9 @@ describe('selectors — inside the reader’s mailbox, loud misses', () => {
   test('type: selects by the summary’s queued key within the mailbox only', () => {
     const { log, comment, recipientsOf } = scriptedWorld()
     const state = foldAll(log.events(), recipientsOf)
-    const group = mailbox.groupOf(comment, roleOf)
+    const group = mailbox.groupOf(comment, FACTS)
     if (group.kind !== 'queued') throw new Error('fixture: comment must queue')
-    const picked = mailbox.select(state, WORKER_A, { type: group.type }, roleOf)
+    const picked = mailbox.select(state, WORKER_A, { type: group.type }, FACTS)
     expect(picked.events.map((f) => f.event.id)).toContain(comment.id)
     expect(picked.missing).toBeUndefined()
     for (const f of picked.events) {

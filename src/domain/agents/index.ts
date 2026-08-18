@@ -99,6 +99,8 @@ function seal(next: Registry): AgentsState {
 /** The roles that hold a mailbox and a queue — see the header on the
  *  queue-vs-warn line. */
 const DOJO_ROLES: ReadonlySet<AgentRole> = new Set<AgentRole>(['sensei', 'worker'])
+/** Every role the vocabulary knows — the fold's typed-tolerance gate. */
+const KNOWN_ROLES: ReadonlySet<string> = new Set(['sensei', 'worker', 'user', 'peer', 'librarian'])
 
 // ── The fold ─────────────────────────────────────────────────────
 
@@ -112,6 +114,10 @@ const fold = (state: AgentsState, event: StoredEvent): AgentsState => {
   const name = data.agent
   const role = data.role
   if (typeof name !== 'string' || name.length === 0 || typeof role !== 'string') return state
+  // History tolerance is TYPED tolerance (task 090's pin): a malformed role
+  // string in an old log folds to nothing — admitting it would let a
+  // lie-typed value leak through roleOf's AgentRole promise.
+  if (!KNOWN_ROLES.has(role)) return state
 
   const current = registry(state)
   const existing = current.names.get(name)

@@ -62,7 +62,10 @@
  * nothing derivable from a summary line (id, sender, first words) may
  * suffice. Stable across restarts and replays. Codes are issued by the fetch
  * view only; the cheap rungs never carry them (P7: an id is knowable from a
- * summary, a code is not).
+ * summary, a code is not). DOCUMENTED ASSUMPTION (090, declined as a pin):
+ * the derivation reads the event AS STORED — data key order is part of
+ * content, and stability holds because the store's round-trip preserves it;
+ * canonicalization would buy nothing while a single store writes the log.
  *
  * ── VIEWS (P7, P10) ──
  *
@@ -93,6 +96,23 @@ export type MailPair = { recipient: AgentName; eventId: number }
  *  composes `(e) => resolution.resolve(e, ctxAtEvent)`; a test may inject a
  *  scripted table. The fold's ONLY source of membership. */
 export type RecipientsOf = (event: StoredEvent) => readonly AgentName[]
+
+/** The injected authorship fact for classification (ruled, task 090 —
+ *  D2's local sender heuristic had already drifted from `resolution.authorOf`
+ *  on a kind it never expected to meet). The caller composes it from THE ONE
+ *  authorship source, restricted to the SPEECH kinds — `reply`, `send`,
+ *  `task-comment`, `memory`: `(e) => SPEECH.has(e.type) ? resolution.authorOf(e)
+ *  : undefined`. The restriction is part of the composition and lives with
+ *  it: a lifecycle change by a human (a task-status with a user actor) is an
+ *  act, not speech, and must not jump the queue as "a human is waiting". */
+export type SenderOf = (event: StoredEvent) => AgentName | undefined
+
+/** The classification facts every view consumes — two injected functions,
+ *  no local heuristics behind them. */
+export type ViewFacts = {
+  roleOf: (name: AgentName) => AgentRole | undefined
+  senderOf: SenderOf
+}
 
 /** Opaque — constructed by `initial()`, evolved by `fold`, read through the
  *  contract's functions only. Its internals are the implementation's. */
@@ -210,30 +230,16 @@ export type MailboxContract = {
   codeFor: (event: StoredEvent) => AckCode
 
   /** The shared classification (summary grouping AND selector keys). */
-  groupOf: (event: StoredEvent, roleOf: (name: AgentName) => AgentRole | undefined) => InboxGroup
+  groupOf: (event: StoredEvent, facts: ViewFacts) => InboxGroup
 
-  countsFor: (
-    state: MailboxState,
-    agent: AgentName,
-    roleOf: (name: AgentName) => AgentRole | undefined,
-  ) => MailboxCounts
+  countsFor: (state: MailboxState, agent: AgentName, facts: ViewFacts) => MailboxCounts
 
-  summaryFor: (
-    state: MailboxState,
-    agent: AgentName,
-    roleOf: (name: AgentName) => AgentRole | undefined,
-    now: number,
-  ) => readonly SummaryLine[]
+  summaryFor: (state: MailboxState, agent: AgentName, facts: ViewFacts, now: number) => readonly SummaryLine[]
 
   /** The whole mailbox with codes; `select` narrows by one selector. */
   fetchFor: (state: MailboxState, agent: AgentName) => readonly FetchedEvent[]
 
-  select: (
-    state: MailboxState,
-    agent: AgentName,
-    selector: Selector,
-    roleOf: (name: AgentName) => AgentRole | undefined,
-  ) => Selection
+  select: (state: MailboxState, agent: AgentName, selector: Selector, facts: ViewFacts) => Selection
 
   /**
    * The clearing decision (P5, P6, §2). A pair clears iff the caller's own

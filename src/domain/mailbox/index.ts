@@ -47,16 +47,12 @@
  * the conformance suite can inject a scripted table so its verdicts do not
  * ride on another module's correctness.
  *
- * `groupOf` did NOT get the same treatment, and it needs the same kind of
- * fact. "Is a human waiting" is a question about the event's SENDER, and with
- * the resolution import gone the only way to answer it is `senderOf` below —
- * a second, local reading of authorship that duplicates
- * `resolution.authorOf`. Nothing keeps the two in step: the day a kind moves
- * its author field, mail from a human starts queueing instead of blocking,
- * and no test in either module fails. The ruling closed the membership half
- * of this dependency and left the authorship half open. Reported on task 081;
- * the fix is the same shape as the one that worked — an injected `senderOf`,
- * or a `from` on the classification call.
+ * `groupOf` got the same treatment at task 090: "is a human waiting" is a
+ * question about the event's SENDER, and the sender arrives as
+ * `ViewFacts.senderOf` — composed by the caller from `resolution.authorOf`
+ * restricted to the speech kinds. The local duplicate that used to answer it
+ * (already drifted from authorOf on the day it was written) is deleted; ONE
+ * authorship source, injected, same as membership.
  *
  * ── ONE MEMBERSHIP FUNCTION (P2) ──
  *
@@ -87,15 +83,9 @@ import type {
   RecipientsOf,
   Selection,
   SummaryLine,
+  ViewFacts,
 } from '../contracts/mailbox.ts'
-import type {
-  AgentName,
-  AgentRole,
-  ReplyData,
-  SendData,
-  StoredEvent,
-  TaskCommentData,
-} from '../contracts/vocabulary.ts'
+import type { AgentName, StoredEvent } from '../contracts/vocabulary.ts'
 
 // ── State ────────────────────────────────────────────────────────
 
@@ -171,54 +161,11 @@ function previewOf(event: StoredEvent): string {
   return ''
 }
 
-/**
- * WHO SPOKE — the classification's input, and a duplicate by necessity.
- *
- * This answers the same question as `resolution.authorOf`, and it exists only
- * because `groupOf` has no injected source for it (see the header). It is
- * kept deliberately NARROW — the kinds where an agent composed something a
- * reader can be blocked on — rather than mirroring `authorOf` arm for arm: a
- * partial duplicate that admits what it does not cover is easier to reconcile
- * than a full one that silently drifts.
- *
- * `data.agent` cannot be read blindly. Across the census it is the addressee
- * on `send`, the speaker on `reply` and `task-comment`, and the subject on
- * the lifecycle kinds — so a `send` addressed TO a human would classify as
- * blocking if this read `agent`, and every dispatch to a human would jump the
- * queue.
- */
-function senderOf(event: StoredEvent): AgentName | undefined {
-  const data = (event.data ?? {}) as Partial<ReplyData & TaskCommentData & SendData> & { actor?: unknown }
-  switch (event.type) {
-    case 'reply':
-    case 'task-comment':
-    case 'memory':
-      return typeof data.agent === 'string' ? data.agent : undefined
-    // `from`, not `agent`: `agent` is who this is FOR.
-    case 'send': {
-      const from = data.from
-      return typeof from === 'string' && from !== 'infra' && from !== 'api' ? from : undefined
-    }
-    case 'task-created':
-    case 'task-status':
-    case 'task-blocked':
-    case 'task-reverted':
-    case 'task-updated':
-    // `trigger-created` resolves to nobody today, so this arm is unreachable
-    // through the real resolver — and it is here anyway, because it is the
-    // arm `resolution.authorOf` has. THE DRIFT THIS FILE'S HEADER WARNS ABOUT
-    // WAS ALREADY REAL AT BIRTH: codex found the two readings disagreeing on
-    // this exact kind on the day the duplicate was written. Kept in step by
-    // hand until the dependency is closed properly (task 081).
-    case 'trigger-created':
-      return typeof data.actor === 'string' ? data.actor : undefined
-    default:
-      // Infra's own emissions — probes, reminders, down reports. Nobody spoke,
-      // so nobody is waiting, so they queue. Undefined is the safe answer: it
-      // can only send an event to the queued group, never jump it ahead.
-      return undefined
-  }
-}
+// The local `senderOf` heuristic that lived HERE is gone (task 090): the
+// contract now injects authorship (`ViewFacts.senderOf`), composed by the
+// caller from resolution.authorOf restricted to the speech kinds — the drift
+// this file's earlier version documented (trigger-created, wrong from birth)
+// is closed by removing the duplicate rather than maintaining it by hand.
 
 // ── Membership and clearing helpers ──────────────────────────────
 
@@ -317,12 +264,12 @@ const mailboxOf = (state: MailboxState, agent: AgentName): readonly StoredEvent[
   return events.sort((a, b) => a.id - b.id)
 }
 
-const groupOf = (event: StoredEvent, roleOf: (name: AgentName) => AgentRole | undefined): InboxGroup => {
+const groupOf = (event: StoredEvent, facts: ViewFacts): InboxGroup => {
   // Blocking means a HUMAN is waiting — a fact about the SENDER's role, not
   // about the kind. `send` is the case that proves it: the same kind queues
   // or blocks depending only on who wrote it.
-  const from = senderOf(event)
-  if (from !== undefined && roleOf(from) === 'user') return { kind: 'blocking', from }
+  const from = facts.senderOf(event)
+  if (from !== undefined && facts.roleOf(from) === 'user') return { kind: 'blocking', from }
   return { kind: 'queued', type: event.type }
 }
 
@@ -367,23 +314,23 @@ export const mailbox: MailboxContract = {
 
   groupOf,
 
-  countsFor(state, agent, roleOf): MailboxCounts {
+  countsFor(state, agent, facts): MailboxCounts {
     let blocking = 0
     let queued = 0
     for (const event of mailboxOf(state, agent)) {
-      if (groupOf(event, roleOf).kind === 'blocking') blocking++
+      if (groupOf(event, facts).kind === 'blocking') blocking++
       else queued++
     }
     return { blocking, queued, total: blocking + queued }
   },
 
-  summaryFor(state, agent, roleOf, now): readonly SummaryLine[] {
+  summaryFor(state, agent, facts, now): readonly SummaryLine[] {
     return mailboxOf(state, agent).map((event) => ({
       id: event.id,
-      group: groupOf(event, roleOf),
+      group: groupOf(event, facts),
       // The same reading `groupOf` used, so a line's `from` and its group can
       // never disagree about who spoke.
-      from: senderOf(event),
+      from: facts.senderOf(event),
       preview: previewOf(event),
       // Clamped at zero: a log written by a clock ahead of this one would
       // otherwise report a negative age, and "arrived in the future" is not
@@ -394,7 +341,7 @@ export const mailbox: MailboxContract = {
 
   fetchFor,
 
-  select(state, agent, selector, roleOf): Selection {
+  select(state, agent, selector, facts): Selection {
     // Selection happens INSIDE the reader's mailbox: everything below narrows
     // `fetchFor`, so an id belonging to somebody else is a miss and never a
     // disclosure. The union's variants are read in the contract's stated
@@ -414,7 +361,7 @@ export const mailbox: MailboxContract = {
     if ('from' in selector) {
       return {
         events: mine.filter((f) => {
-          const group = groupOf(f.event, roleOf)
+          const group = groupOf(f.event, facts)
           return group.kind === 'blocking' && group.from === selector.from
         }),
       }
@@ -422,7 +369,7 @@ export const mailbox: MailboxContract = {
 
     return {
       events: mine.filter((f) => {
-        const group = groupOf(f.event, roleOf)
+        const group = groupOf(f.event, facts)
         return group.kind === 'queued' && group.type === selector.type
       }),
     }

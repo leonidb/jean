@@ -150,6 +150,31 @@ describe('role precedence — one identity, ordered sources of fact', () => {
     expect(agents.roleOf(state, 'worker-a')).toBe('worker')
     expect(agents.roleOf(state, 'stranger')).toBeUndefined()
   })
+
+  test('BREADTH (090): precedence is ORDER-INDEPENDENT — user beats sensei whichever registered first', () => {
+    const senseiThenUser = foldLog((log) => {
+      log.append('register', 'agent-human', { agent: 'human', role: 'sensei', idle: true })
+      log.append('register', 'agent-human', { agent: 'human', role: 'user', idle: true })
+    })
+    expect(agents.roleOf(senseiThenUser, 'human')).toBe('user')
+  })
+
+  test('BREADTH (090): among the working roles, the most recent register wins — a promoted librarian reads librarian', () => {
+    const state = foldLog((log) => {
+      log.append('register', 'agent-multi', { agent: 'multi', role: 'worker', idle: true })
+      log.append('register', 'agent-multi', { agent: 'multi', role: 'librarian', idle: true })
+    })
+    expect(agents.roleOf(state, 'multi')).toBe('librarian')
+  })
+
+  test('BREADTH (090): a malformed role string in history is tolerated — no dojo membership, no role, no crash', () => {
+    const state = foldLog((log) => {
+      log.appendRaw('register', 'agent-weird', { agent: 'weird', role: 'gibberish', idle: true })
+    })
+    expect(agents.isDojoAgent(state, 'weird')).toBe(false)
+    expect(agents.roleOf(state, 'weird')).toBeUndefined()
+    expect(agents.orchestratorOf(state)).toBeUndefined()
+  })
 })
 
 describe('session classification — a hint, honestly derived', () => {
@@ -216,6 +241,28 @@ describe('duplicate sessions — keep the incumbent, expressed over plain values
   test('no incumbent → admit', () => {
     const verdict = agents.decideRegistration({ ...base, sessionId: 's3' })
     expect(verdict).toEqual({ kind: 'admit' })
+  })
+
+  test('BREADTH (090): id-less sessions never count as the same session — spoofing by omission fails', () => {
+    // sameSession requires BOTH ids present and equal: an incumbent or a
+    // newcomer with no sessionId can never ride the replace path past a live
+    // incumbent.
+    const noNewcomerId = agents.decideRegistration({
+      ...base,
+      incumbent: { sessionId: 's1', live: true },
+    })
+    expect(noNewcomerId).toEqual({ kind: 'refuse-duplicate', notifyOrchestrator: true })
+    const noIncumbentId = agents.decideRegistration({
+      ...base,
+      sessionId: 's2',
+      incumbent: { live: true },
+    })
+    expect(noIncumbentId).toEqual({ kind: 'refuse-duplicate', notifyOrchestrator: true })
+    const bothIdless = agents.decideRegistration({
+      ...base,
+      incumbent: { live: true },
+    })
+    expect(bothIdless).toEqual({ kind: 'refuse-duplicate', notifyOrchestrator: true })
   })
 
   test('PRECEDENCE: reserved beats the incumbent path — a replayed pre-rule log cannot admit "infra" (085 report, gap 2)', () => {

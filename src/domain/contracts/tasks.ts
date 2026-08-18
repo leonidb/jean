@@ -61,6 +61,16 @@
  * left them sticky, which contradicts its own clear-or-replace law and kept
  * a reverted task nagging a blocker it no longer had. Accident left behind.
  *
+ * THE STACK LAW (named at task 090 — it was implicit in both hands' heads,
+ * and two real bugs bred in exactly that gap): **THE STACK'S TOP ALWAYS
+ * EQUALS THE TASK'S STATUS.** Every fold case maintains it — a status push
+ * sets both, a revert pops the stack AND all entries the pop skips, and a
+ * `task-reverted` whose `to` is not in the stack still leaves top === status
+ * (the fold resolves the disagreement in the status's favour, never leaves a
+ * departed status on top). `decideRevert` may assume it and must preserve
+ * it. This is indirectly-visible state — nothing returns the stack — which
+ * is precisely why the law is stated here and pinned in conformance.
+ *
  * RULED (D-5, task 083): **revert never lands on `waiting` — it pops past
  * it to the nearest earlier status that is neither `waiting` nor the
  * current status.** `waiting` requires a blocker only its parker can
