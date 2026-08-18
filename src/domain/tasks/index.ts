@@ -29,31 +29,52 @@
  * clear-or-replace law and leaving a reverted task nagging for a blocker it
  * no longer had.
  *
- * A revert whose destination IS `waiting` therefore clears the park too: this
- * park chose nothing, so nothing is what it gets. The alternative — restoring
- * the park the task had the last time it was there — would need history the
- * stack does not carry, and inventing it is how sticky fields come back.
+ * ── D-5: REVERT NEVER LANDS ON `waiting` ──
+ *
+ * My first reading of this file offered two options and took the wrong one:
+ * a revert into `waiting` cleared the park, on the grounds that this park
+ * chose nothing. The ruling (task 086) found a third way, and it is better
+ * than either. `waiting` REQUIRES a blocker that only its parker can supply,
+ * so landing there with a cleared park manufactures the parked-on-nobody
+ * state that requirement abolishes — while restoring the old park would
+ * resurrect a question already answered, and refusing outright would strand
+ * a mistakenly-closed parked task with no way back.
+ *
+ * So a revert pops PAST `waiting`, to the nearest earlier status that is
+ * neither `waiting` nor the one the task is in. `done → in-progress`, with
+ * the park never resurrected; a caller who wants it parked again parks it
+ * explicitly, with a fresh blocker. The stack truncates to the status it
+ * lands on, so its top and the task's status can never disagree.
  *
  * ── THE STATUS STACK ──
  *
  * Revert is stack-pop, not a DAG edge: `done → in-progress` is refused by
  * `canTransition` and reachable by `decideRevert`, deliberately. Creation
  * pushes `todo`; every folded status change pushes its destination; a folded
- * revert pops one. Fewer than two entries means there is nowhere to pop back
- * to, and that is refused loudly rather than treated as a no-op — a silent
- * no-op here reads to the caller as "reverted" when nothing moved.
+ * revert truncates back to the status it lands on. No eligible earlier status
+ * — fewer than two entries, or nothing but `waiting` and the current status
+ * behind it — is refused loudly rather than treated as a no-op: a silent
+ * no-op reads to the caller as "reverted" when nothing moved.
  *
- * ── WHAT IS EXTRACTED AS-IS, AND FLAGGED ──
+ * A task is created ONCE. A second `task-created` for an id already on the
+ * board is ignored — first wins. Logs are permanent and get replayed, and the
+ * old fold appended a second entry under the same id, which is how one task
+ * became two on a re-read.
  *
- * Starting a task with no agent assigns the QUEUE as the agent. Extracted
- * from the old fold unchanged, per the contract, and it is the contract's
- * OPEN Q-1: if a queue name is not a roster name, the owner it produces is an
- * agent nobody registered, and resolution will address task events to a
- * mailbox nobody reads. Implemented as written; not worked around.
+ * ── Q-1 RULED: NEVER INVENT AN OWNER ──
+ *
+ * Starting an unassigned task makes the queue its agent ONLY when the queue
+ * names a roster member, which the fold learns from the injected
+ * `isRosterMember` — the same shape as the mailbox's `recipientsOf`, and for
+ * the same reason: this module never imports agents. A non-roster queue
+ * ('someday', 'backlog') leaves the task UNOWNED, so its events resolve as
+ * history rather than piling (recipient, event) pairs into a mailbox that has
+ * no reader and no acker. My D3 note asked this question; the ruling answered
+ * it, and the answer is in the fold rather than in a comment.
  *
  * What this file cannot enforce, and what does: the DAG's exact edge set, the
- * gates' precedence, clear-or-replace, D-1, and the staleness boundary are
- * held by `tasks.conformance.test.ts`.
+ * gates' precedence, clear-or-replace, D-1, D-5, the roster gate and the
+ * staleness boundary are held by `tasks.conformance.test.ts`.
  */
 
 import type {
@@ -170,11 +191,20 @@ type Park = { blockedOn?: BlockedOn; blockedNote?: string; resumeAt?: string }
  * clears all four. Two branches, no conditionals inside them: that is
  * clear-or-replace as a shape rather than as a rule four call sites remember.
  */
-function settle(task: Task, to: TaskStatus, ts: string, park: Park): Task {
+function settle(
+  task: Task,
+  to: TaskStatus,
+  ts: string,
+  park: Park,
+  isRosterMember: (name: AgentName) => boolean,
+): Task {
   const next: Task = { ...task, status: to, updatedAt: ts }
-  // Starting an unassigned task makes the queue its agent. Extracted as-is —
-  // see the header on OPEN Q-1.
-  if (to === 'in-progress' && next.agent === undefined) next.agent = task.queue
+  // Q-1, RULED: starting an unassigned task makes the queue its agent ONLY if
+  // the queue is somebody. A non-roster queue is a shelf, not an agent, and
+  // naming it as owner would address every later task event to a mailbox with
+  // no reader — pairs that can never be acked, which is the orphan class P4
+  // abolishes.
+  if (to === 'in-progress' && next.agent === undefined && isRosterMember(task.queue)) next.agent = task.queue
   if (to === 'waiting') {
     next.blockedOn = park.blockedOn
     next.blockedNote = park.blockedNote
@@ -209,13 +239,19 @@ function replace(current: Board, id: string, entry: Entry): Board {
   return next
 }
 
-const fold = (state: TasksState, event: StoredEvent): TasksState => {
+const fold = (state: TasksState, event: StoredEvent, isRosterMember: (name: AgentName) => boolean): TasksState => {
   const current = board(state)
   const id = taskIdFromStream(event.stream)
   if (id === undefined) return state
   const data = (event.data ?? {}) as Record<string, unknown>
 
   if (event.type === 'task-created') {
+    // FIRST WINS. A task is created once; a second `task-created` for an id
+    // already on the board is a replay, not a new task. The old fold appended
+    // a second entry under the same id, which is how a re-read doubled a
+    // task — and the doubled copy would carry the impostor's title and queue
+    // while the original's history stayed on the first.
+    if (current.has(id)) return state
     const d = data as TaskCreatedData
     const task: Task = {
       id,
@@ -243,11 +279,13 @@ const fold = (state: TasksState, event: StoredEvent): TasksState => {
       const to = migrate(d.to)
       return seal(
         replace(current, id, {
-          task: settle(entry.task, to, event.ts, {
-            blockedOn: d.blockedOn,
-            blockedNote: d.blockedNote,
-            resumeAt: d.resumeAt,
-          }),
+          task: settle(
+            entry.task,
+            to,
+            event.ts,
+            { blockedOn: d.blockedOn, blockedNote: d.blockedNote, resumeAt: d.resumeAt },
+            isRosterMember,
+          ),
           stack: [...entry.stack, to],
         }),
       )
@@ -256,13 +294,33 @@ const fold = (state: TasksState, event: StoredEvent): TasksState => {
     case 'task-reverted': {
       const d = data as TaskRevertedData
       const to = migrate(d.to)
-      // Pop one. `slice(0, -1)` on a single-entry stack yields an empty one,
-      // which `decideRevert` then reports as nothing to revert — the refusal
-      // and the fold agree without either checking the other.
+      // TRUNCATE TO WHERE IT LANDS, rather than popping a fixed number. D-5
+      // lets a revert skip over `waiting`, so "one pop" and "back to `to`"
+      // are no longer the same thing — and if the stack kept the skipped
+      // entries, its top would say `waiting` while the task says
+      // `in-progress`. Cutting at the nearest earlier occurrence of `to`
+      // keeps top and status the same fact.
+      //
+      // A revert event naming a status the stack does not hold — hand-written,
+      // or folded from a prefix that never saw the earlier events — REPLACES
+      // the top instead of cutting: leave the status we left, record the one
+      // we landed on. Popping one there looked equivalent and was not, because
+      // it left the top naming a status the task is no longer in, and
+      // `decideRevert` reads `from` off the stack; the next revert would then
+      // report a `from` the board disagrees with (codex pass, task 088).
+      // Both branches land on the same invariant, which is the only reason
+      // this fold is allowed to have two: TOP ALWAYS EQUALS STATUS.
+      let cut = -1
+      for (let i = entry.stack.length - 2; i >= 0; i--) {
+        if (entry.stack[i] === to) {
+          cut = i
+          break
+        }
+      }
       return seal(
         replace(current, id, {
-          task: settle(entry.task, to, event.ts, {}),
-          stack: entry.stack.slice(0, -1),
+          task: settle(entry.task, to, event.ts, {}, isRosterMember),
+          stack: cut >= 0 ? entry.stack.slice(0, cut + 1) : [...entry.stack.slice(0, -1), to],
         }),
       )
     }
@@ -372,6 +430,15 @@ const decideHandoff = (state: TasksState, cmd: HandoffCommand): HandoffDecision 
   if (entry.task.status !== 'waiting') {
     return { ok: false, refusal: { kind: 'not-waiting', status: entry.task.status } }
   }
+  // THE SNOOZE LAW APPLIES HERE TOO (ruled, task 083 — my D3 report found
+  // this arm missing). A handoff replaces every park field including the
+  // date, so a malformed one riding into the record is the same defect as on
+  // a status change: the reminder's comparison against it goes silently
+  // always-true and the blocker's cadence never demotes. Same shape of
+  // refusal, same reason.
+  if (cmd.resumeAt !== undefined && Number.isNaN(Date.parse(cmd.resumeAt))) {
+    return { ok: false, refusal: { kind: 'unparseable-resume', resumeAt: cmd.resumeAt } }
+  }
   // NO CYCLE GUARD, deliberately. Handing a blocker back to where it came
   // from is a re-escalation carrying new information, and infra cannot see
   // whether information arrived — anti-ping-pong is orchestrator judgement,
@@ -391,11 +458,28 @@ const decideHandoff = (state: TasksState, cmd: HandoffCommand): HandoffDecision 
 const decideRevert = (state: TasksState, taskId: string, actor: string): RevertDecision => {
   const entry = board(state).get(taskId)
   if (entry === undefined) return { ok: false, refusal: { kind: 'unknown-task' } }
-  // Two entries minimum: the one the task is in, and the one to pop back to.
-  if (entry.stack.length < 2) return { ok: false, refusal: { kind: 'nothing-to-revert' } }
   const from = entry.stack[entry.stack.length - 1] as TaskStatus
-  const to = entry.stack[entry.stack.length - 2] as TaskStatus
-  return { ok: true, from, to, data: { from, to, actor } }
+  // D-5: walk BACK past anything a revert may not land on, rather than taking
+  // the entry immediately below. Two are excluded, for different reasons:
+  //
+  //   `waiting` — it requires a blocker only its parker can supply, and this
+  //   act cannot answer "who is this waiting on". Landing there would
+  //   manufacture parked-on-nobody; the stack carries statuses, not park
+  //   fields, so the old park cannot be restored either — and it should not
+  //   be, being an answer to a question already answered.
+  //
+  //   `from` itself — a task can enter one status twice in a row through a
+  //   legacy name that folds to the same place, and "reverting" to where you
+  //   already are is a no-op wearing a success.
+  //
+  // Nothing eligible behind it is a refusal, not a silent no-op: the caller
+  // asked to move and must learn that nothing did.
+  for (let i = entry.stack.length - 2; i >= 0; i--) {
+    const to = entry.stack[i] as TaskStatus
+    if (to === 'waiting' || to === from) continue
+    return { ok: true, from, to, data: { from, to, actor } }
+  }
+  return { ok: false, refusal: { kind: 'nothing-to-revert' } }
 }
 
 export const tasks: TasksContract = {
@@ -451,10 +535,13 @@ export const tasks: TasksContract = {
       // This is the dispatchability signal, and the queue is where a task
       // STARTED, not who holds it now: a task created in one agent's queue and
       // later reassigned would otherwise keep the original agent looking busy
-      // forever. An in-progress task always has an owner (starting one assigns
-      // the queue as agent), so nothing is missed by not falling back
-      // (codex pass, task 084 — extracted from the old availability helper,
-      // which reads `t.agent === name` and calls itself exactly this).
+      // forever (codex pass, task 084 — extracted from the old availability
+      // helper, which reads `t.agent === name` and calls itself exactly this).
+      //
+      // Since Q-1 an in-progress task may have NO owner at all — a non-roster
+      // queue never becomes one — and that is counted for nobody, correctly:
+      // an unowned task occupies no agent's capacity. Falling back to the
+      // queue there would make a shelf name look like a busy worker.
       if (task.status === 'in-progress' && task.agent === agent) count++
     }
     return count
