@@ -70,7 +70,20 @@
  * probe, down, recovery. The state carries the episodes and reminder
  * clocks — indirectly-visible by design (nothing returns them; they show
  * only in when effects fire), which is exactly why the conformance suite
- * drives them through behaviour sequences. The executor unit's laws are
+ * drives them through behaviour sequences.
+ *
+ * A RECORDED GAP, accepted loud until after the switch (ruled at task 107;
+ * found by E3): decide ADVANCES state as it decides — there is no outcome
+ * seam like the notifier's `applyOutcome`, so a shell whose append FAILS
+ * holds state that believes the emission was made. The cost is bounded and
+ * self-healing for reminders (that cadence period is skipped; the next
+ * fires), and visible-but-confusing for reports (a lost down leaves
+ * `reported` set, so the agent's return emits a `recovered` closing a
+ * report nobody received — the stray-return class, reachable only through
+ * an append failure the adapter logs as LOST EMISSION). The post-switch
+ * fix is the notifier's shape: outcomes as data, episode and reminder
+ *  records moving only on confirmed appends. Tracker R16 carries the
+ * decision; G1's shakedown watches for LOST EMISSION lines. The executor unit's laws are
  * the notifier's (a)–(c), shared — STATED here, HELD by the executor
  * conformance suite that ships with the executor implementations (the
  * E-side obligation, tracker R11).
@@ -112,7 +125,22 @@ export type SupervisedAgentFacts = {
   role: AgentRole
   /** Live session present right now. */
   connected: boolean
-  /** Epoch ms of the agent's last own act; absent = never observed. */
+  /** Epoch ms of the agent's last own act — WITH THE COMPOSER'S FLOORS
+   *  (RULED at task 107, confirming E3's composition): an agent with no
+   *  recorded act ever reaches this view with the honest floor substituted
+   *  — a live session measures from when it CONNECTED; a disconnected
+   *  agent enters the view only if the board says it holds work, measuring
+   *  from its newest held task's claim; an agent with neither is NOT in
+   *  the view at all (nothing to supervise, nothing honest to measure).
+   *  Without the floors the first post-boot tick reads the whole dojo as
+   *  dead. This is the `blockedSinceMs` pattern (R10: the composer's
+   *  obligation), and it is NOT R8's forbidden fallback: R8's display
+   *  claimed "the agent ACTED at T" (false); the floor answers a different
+   *  question — "when did the window in which we have heard nothing
+   *  BEGIN" (true). The NOTIFIER's view keeps the honest blank: absent
+   *  reads maximally quiet and the waiting mail announces — an
+   *  announcement costs a wake; a down report costs an alarm a human
+   *  reads. */
   lastActivityAt?: number
   /** Holds active work (in-progress or assigned, per the board). */
   holdsWork: boolean

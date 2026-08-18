@@ -399,14 +399,11 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
    * addressee, speaker, subject and target across the census). A clearing is
    * attributed by the ack record's own `caller`.
    *
-   * NOT `register`. The harness that states law 4 counts session arrival as
-   * an act; the agents contract says the opposite in as many words — "NOT
-   * activity: the register handshake (automatic at session start, not a
-   * choice)" — and draws the consequence itself, that a fresh session with
-   * waiting mail is announced at once. The two documents contradict each
-   * other; the contradiction is with the architect, and until it is ruled
-   * the contract wins here. If the ruling goes the other way, this function
-   * is where it lands.
+   * NOT `register`. RULED at task 103 (R15): the agents contract won its
+   * contradiction with the harness's original law 4 — the handshake is the
+   * transport arriving, not the agent acting, and counting it silenced the
+   * reconnect announcement while granting unearned quiet-clocks. The
+   * harness now says the same thing this function always did.
    */
   function actorOf(event: StoredEvent): AgentName | undefined {
     if (event.type === 'ack') {

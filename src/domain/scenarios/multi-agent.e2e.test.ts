@@ -255,6 +255,48 @@ describe('scenario 4 — absence and return: being away costs a report, never a 
   })
 })
 
+describe('the supervisor’s composed view — the activity floors (ruled, task 107)', () => {
+  test('a never-acting connected worker measures from CONNECTION; a disconnected non-holder is not supervised at all', () => {
+    const dojo = dojoOf([
+      { name: SENSEI, role: 'sensei', behaviour: { kind: 'reliable' } },
+      // Hears every wake, never acts — lastActivityAt stays absent forever,
+      // so only the floor stands between it and quiet = infinity. Idle and
+      // EMPTY deliberately: a task would mint mail, and row 8 gates probes
+      // for mail-holders — the idle ping is the floor's clean observer.
+      { name: 'worker-new', role: 'worker', behaviour: { kind: 'unresponsive' } },
+      { name: 'worker-ghost', role: 'worker', behaviour: { kind: 'silent' } },
+    ])
+    dojo.registerAll()
+    const bootAt = dojo.clock.now()
+    // The ghost: registered once (a roster member), gone at once, holding
+    // nothing. Without the ruling it reads quiet-forever and is reported
+    // DOWN on the first tick after boot — the whole-dojo-dead alarm.
+    dojo.disconnect('worker-ghost')
+
+    dojo.runFor(23 * HOUR) // idlePingAfterMs is a DAY; the floor is register
+    // Nothing yet — the pre-ruling composition pings worker-new at the
+    // FIRST tick (absent activity = infinite quiet) and reports the ghost
+    // down beside it.
+    expect(dojo.supervision()).toEqual([])
+
+    dojo.runFor(2 * HOUR) // past a day measured from CONNECTION
+    const probes = dojo.probes()
+    expect(probes.length).toBe(1) // pinged exactly once, at the floor's bound
+    expect((probes[0]?.at ?? 0) - bootAt).toBeGreaterThanOrEqual(SUPERVISE.idlePingAfterMs)
+    // …and the ghost was never mentioned by ANY supervision effect: not in
+    // the view means not supervised, not "supervised as dead".
+    const aboutGhost = dojo
+      .supervision()
+      .filter(
+        (s) =>
+          (s.effect.kind === 'probe' && s.effect.agent === 'worker-ghost') ||
+          (s.effect.kind === 'report' && s.effect.subject === 'worker-ghost'),
+      )
+    expect(aboutGhost).toEqual([])
+    assertGroundTruth(dojo)
+  })
+})
+
 describe('scenario 5 — the snooze cycle: demoted, never silenced, resumed automatically', () => {
   test('no reminder while the snooze lives (inside a day); the blocker cadence resumes the instant it passes; the reminder is real mail', () => {
     const dojo = dojoOf([

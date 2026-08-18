@@ -108,6 +108,7 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
   let supervisorState = supervisor.initial()
 
   const connected = new Map<AgentName, boolean>()
+  const connectedAt = new Map<AgentName, number>()
   const lastActivity = new Map<AgentName, number>()
 
   const announcements: Announcement[] = []
@@ -239,14 +240,39 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
         blockedSinceMs: Date.parse(t.blockedSince ?? t.updatedAt),
         resumeAtMs: t.resumeAt !== undefined ? Date.parse(t.resumeAt) : undefined,
       })),
-      agents: cast.map((a) => ({
-        name: a.name,
-        role: agents.roleOf(agentsState, a.name) ?? a.role,
-        connected: connected.get(a.name) ?? false,
-        lastActivityAt: lastActivity.get(a.name),
-        holdsWork: tasks.activeTaskOf(tasksState, a.name) !== undefined,
-        hasPendingMail: mailbox.mailboxOf(mailboxState, a.name).length > 0,
-      })),
+      // THE ACTIVITY FLOORS (ruled at task 107 — the supervisor contract's
+      // composition): an agent with no act ever gets the honest floor — a
+      // live session measures from CONNECTION, a disconnected agent enters
+      // the view only if it holds work (measuring from the task's claim),
+      // and neither-connected-nor-holding is not supervised at all. The
+      // NOTIFIER view above keeps the honest blank deliberately.
+      agents: cast.flatMap((a) => {
+        const live = connected.get(a.name) ?? false
+        // The NEWEST held task's claim (the contract's words — codex pass:
+        // `activeTaskOf` answers a different consumer and returns the FIRST
+        // match), with R13's guard: an unparseable claim yields no floor,
+        // and no honest floor means not in the view — never NaN.
+        const heldClaims = tasks
+          .all(tasksState)
+          .filter(
+            (t) => (t.status === 'in-progress' || t.status === 'waiting') && (t.agent === a.name || t.queue === a.name),
+          )
+          .map((t) => Date.parse(t.updatedAt))
+          .filter((ms) => Number.isFinite(ms))
+        const holdsWork = tasks.activeTaskOf(tasksState, a.name) !== undefined
+        const floor = live ? connectedAt.get(a.name) : heldClaims.length > 0 ? Math.max(...heldClaims) : undefined
+        if (!live && floor === undefined) return []
+        return [
+          {
+            name: a.name,
+            role: agents.roleOf(agentsState, a.name) ?? a.role,
+            connected: live,
+            lastActivityAt: lastActivity.get(a.name) ?? floor,
+            holdsWork,
+            hasPendingMail: mailbox.mailboxOf(mailboxState, a.name).length > 0,
+          },
+        ]
+      }),
     }
     const supervised = supervisor.decide(supervisorState, supervisorView, opts.supervisor)
     supervisorState = supervised.next
@@ -287,6 +313,7 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
     register(name: AgentName, role: AgentRole): void {
       append('register', agentStream(name), { agent: name, role, idle: false })
       connected.set(name, true)
+      connectedAt.set(name, clock.now())
     },
     disconnect(name: AgentName): void {
       append('disconnect', agentStream(name), { agent: name })
@@ -297,6 +324,7 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
       for (const a of cast) {
         append('register', agentStream(a.name), { agent: a.name, role: a.role, idle: false })
         connected.set(a.name, true)
+        connectedAt.set(a.name, clock.now())
       }
     },
 
