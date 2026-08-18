@@ -30,6 +30,14 @@
  * activity). Repeats follow `backoffMs` while the mailbox stays unhandled.
  * Per-agent, independent: one agent's ladder never advances another's.
  *
+ * THE MIRROR (pinned at D8's round, task 098): the interrupt is per NEW
+ * arrival — mail the episode has not yet told the agent about. Once told,
+ * blocking mail follows the same ladder as everything else. P8's four
+ * clauses all guard against going SILENT; this is the same obligation from
+ * the other side — never going LOUD: a blocking mailbox held across the
+ * tick grid announces at its rungs, not at every tick (D8 measured the
+ * defect at 241 announcements per hour against 8 correct).
+ *
  * ── DECIDE → EFFECTS, WITH OUTCOMES AS DATA ──
  *
  * `decide(state, view)` is pure: it returns the next state and announce
@@ -42,6 +50,26 @@
  * announcement obligation without terminating the ladder: still-unhandled
  * mail re-announces on the backoff schedule. Seeing is not acking (P7);
  * being told is not being done.
+ *
+ * A DISCHARGE REQUIRES THE IN-FLIGHT IT REPORTS ON (codex, task 098): an
+ * outcome arriving with no announcement in flight — a duplicated report, a
+ * stray carriage — records its ids as seen (the agent did see them; the
+ * interrupt must not re-fire for read mail) but advances neither the rung
+ * nor the clock. There is no honest instant to move them to, and the
+ * defect this rule was extracted from advanced the ladder on a duplicate:
+ * the agent waited 300s where the rung said 120s.
+ *
+ * RULED (task 098, confirming D8's default): `decide` does NOT suppress
+ * while an announcement is in flight. Through a lawful shell the case is
+ * unreachable — executor law (a) reports every outcome before the next
+ * decide reads state — so this law chooses the FAILURE MODE of an unlawful
+ * one, and the two ways to be wrong are not symmetric: suppression means a
+ * shell that ever drops an outcome silences that agent's ladder forever
+ * (clause 4's exact failure); emission means a misbehaving shell is noisy,
+ * visible, recoverable. Silence is the failure this module exists to
+ * prevent, so the uncertainty goes on the noisy side. The second decide
+ * re-times the in-flight — the later announcement is the one the agent may
+ * have heard, and the ladder measures from it.
  *
  * ── THE EXECUTOR IS A UNIT (design §6 bag-or-unit; §11's residue) ──
  *

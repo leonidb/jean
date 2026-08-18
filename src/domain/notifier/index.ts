@@ -54,9 +54,10 @@
  * ── DECIDE DOES NOT SUPPRESS ON AN IN-FLIGHT, AND THAT IS THE CHOICE ──
  *
  * Calling `decide` twice before reporting an outcome emits a second
- * announcement. Codex raised it as a defect and it is out of contract — the
- * executor's law (a) says the shell reports before the next decide reads state
- * — but the two ways to be wrong here are not symmetric, so it is kept.
+ * announcement. Codex raised it as a defect; through a lawful shell the case
+ * is unreachable — executor law (a) says the shell reports before the next
+ * decide reads state — but the two ways to be wrong here are not symmetric,
+ * so it is kept, and RULED into the contract at task 098's round.
  * Suppressing while in-flight means a shell that ever drops an outcome
  * silences that agent's ladder FOREVER, which is P8 clause 4 violated in the
  * exact manner the clause exists to forbid. Not suppressing means a
@@ -135,7 +136,8 @@ const validateConfig = (config: NotifierConfig): { ok: true } | { ok: false; ref
   // the ladder silently — the P8 violation this validator exists to catch,
   // arriving through the one check a positivity test cannot make (codex pass,
   // task 098). NaN fails `isFinite` too, and would otherwise make every
-  // comparison false, which is the same silence by another route.
+  // comparison false — including the one guard that withholds an
+  // announcement, so it breaks the cadence in the LOUD direction (R13).
   if (!Number.isFinite(config.nudgeIntervalMs) || config.nudgeIntervalMs <= 0) {
     return { ok: false, refusal: { kind: 'non-positive-interval' } }
   }

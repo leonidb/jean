@@ -207,6 +207,85 @@ describe('the refused wake and carriage — outcomes are data, and they matter',
   })
 })
 
+describe('P8 MIRRORED (task 098) — never going LOUD: told-once blocking mail follows the ladder, not the tick grid', () => {
+  test('a blocking mailbox ticked across two intervals announces once, then at the rung — never every tick', () => {
+    const mail = [facts({ name: WORKER, pendingIds: [91], hasBlocking: true })]
+    const first = announceAll(notifier.initial(), T0, mail)
+    expect(first.effects.length).toBe(1) // the immediate interrupt (clause 1)
+    // Walk the 15s grid across the whole first rung with the SAME blocking
+    // mailbox. The announced-ids memory is the only thing standing between
+    // one announcement and one per tick — D8 measured 8/hour correct against
+    // 241 with the defect, and this suite stayed green because nothing
+    // ticked a blocking mailbox twice. The four clauses guard silence; this
+    // pins the mirror.
+    let state = first.state
+    let announcements = 0
+    const rung = CONFIG.backoffMs[0] as number
+    for (let t = T0 + 15_000; t < T0 + rung; t += 15_000) {
+      const d = tick(state, t, mail)
+      announcements += d.effects.length
+      state = d.next
+    }
+    expect(announcements).toBe(0) // told once — not told again inside the rung
+    // At the rung it repeats — quiet is not silent (clause 4 still holds)…
+    expect(tick(state, T0 + rung, mail).effects.map((e) => e.to)).toEqual([WORKER])
+    // …and NEW blocking mail still interrupts mid-rung: the interrupt is per
+    // NEW arrival, which is exactly what the announced memory may suppress
+    // and no more.
+    const withNew = [facts({ name: WORKER, pendingIds: [91, 92], hasBlocking: true })]
+    expect(tick(state, T0 + 30_000, withNew).effects.map((e) => e.to)).toEqual([WORKER])
+  })
+})
+
+describe('RULED (task 098) — decide does not suppress on an in-flight: a lawless shell fails NOISY, never silent', () => {
+  test('a second decide before the outcome emits again and re-times the in-flight; the ladder measures from the later instant', () => {
+    const mail = [facts({ name: WORKER, pendingIds: [95] })]
+    const d1 = tick(notifier.initial(), T0, mail)
+    expect(d1.effects.length).toBe(1)
+    // The shell violates executor law (a): decides again without reporting.
+    // Suppression here would mean one dropped outcome silences this agent's
+    // ladder forever — clause 4's exact failure — so the ruling puts the
+    // uncertainty on the noisy side: double-telling, visible, recoverable.
+    const d2 = tick(d1.next, T0 + 5_000, mail)
+    expect(d2.effects.length).toBe(1)
+    // The outcome discharges the LATER in-flight — the announcement the
+    // agent may actually have heard — so the next rung measures from T0+5s.
+    const s = notifier.applyOutcome(d2.next, { kind: 'announced', agent: WORKER, ids: [95], accepted: true })
+    const rung = CONFIG.backoffMs[0] as number
+    expect(tick(s, T0 + rung, mail).effects).toEqual([]) // measured from T0, this would fire
+    expect(tick(s, T0 + 5_000 + rung, mail).effects.length).toBe(1)
+  })
+})
+
+describe('outcome-to-in-flight matching (codex, task 098) — a discharge requires the in-flight it reports on', () => {
+  test('a DUPLICATED accepted outcome advances nothing: the repeat comes at the first rung, not the second', () => {
+    const mail = [facts({ name: WORKER, pendingIds: [61] })]
+    const once = announceAll(notifier.initial(), T0, mail)
+    expect(once.effects.length).toBe(1)
+    // The shell reports the same outcome twice. The defect codex caught
+    // advanced the ladder on both: the agent waited 300s where the rung said
+    // 120s — silence in exactly the increment P8 forbids.
+    const dup = notifier.applyOutcome(once.state, { kind: 'announced', agent: WORKER, ids: [61], accepted: true })
+    const rung = CONFIG.backoffMs[0] as number
+    expect(tick(dup, T0 + rung, mail).effects.map((e) => e.to)).toEqual([WORKER])
+  })
+
+  test('a STRAY carriage (no in-flight) records its ids — no blocking re-fire — but moves neither clock nor rung', () => {
+    const mail = (ids: number[]) => [facts({ name: WORKER, pendingIds: ids, hasBlocking: true })]
+    const first = announceAll(notifier.initial(), T0, mail([71]))
+    expect(first.effects.length).toBe(1)
+    // Mid-rung, id 72 arrives and the agent fetches it ITSELF — carriage
+    // with nothing in flight. The agent did see the mail…
+    const s = notifier.applyOutcome(first.state, { kind: 'carried', agent: WORKER, ids: [72], via: 'fetch' })
+    // …so the priority interrupt must not re-fire for it…
+    expect(tick(s, T0 + 30_000, mail([71, 72])).effects).toEqual([])
+    // …and nothing advanced: the repeat still comes at the first rung
+    // measured from the T0 discharge — not a rung later, not never.
+    const rung = CONFIG.backoffMs[0] as number
+    expect(tick(s, T0 + rung, mail([71, 72])).effects.map((e) => e.to)).toEqual([WORKER])
+  })
+})
+
 describe('per-agent independence — one ladder never advances another (§5 non-coincidence in time)', () => {
   test('two agents with different mail and clocks announce independently; an outcome for one never touches the other', () => {
     const both = [
