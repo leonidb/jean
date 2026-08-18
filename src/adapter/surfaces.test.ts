@@ -323,11 +323,10 @@ describe('the triggers surface', () => {
     expect((bad.body as unknown as { error: string }).error).toContain('cadence')
   })
 
-  test('metadata that is not an object is refused at the door, not cast into the log', async () => {
-    // `kind` and `retries` reach the decision raw because it refuses them
-    // typed. `metadata` has NO create-time check in the domain, so casting an
-    // array into `Record<string, unknown>` would be the adapter asserting a
-    // type it has not checked, into a permanent log (codex pass).
+  test('metadata that is not an object is refused TYPED — the adapter renames, it does not judge', async () => {
+    // E2 checked this at the door because the domain had no create-time
+    // check; the architect added one (the task-103 ruling batch) and the door-check went. The
+    // status is the same, the `refusal` is what proves which half decided.
     const bad = await call('POST', '/triggers', {
       id: 'bad-meta',
       cron: '0 6 * * *',
@@ -336,6 +335,7 @@ describe('the triggers surface', () => {
       metadata: ['not', 'an', 'object'],
     })
     expect(bad.status).toBe(400)
+    expect((bad.body as unknown as { refusal: string }).refusal).toBe('invalid-metadata')
     expect((await get('/triggers/bad-meta')).status).toBe(404) // and nothing was written
   })
 

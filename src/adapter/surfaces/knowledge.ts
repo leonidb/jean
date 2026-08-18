@@ -183,8 +183,40 @@ export function knowledgeRoutes(ctx: SurfaceContext): (req: Request, url: URL) =
     return ctx.json({ ok: true, id: event.id })
   }
 
+  /**
+   * The unconsolidated slice, read plainly (task E3 — the CLI calls this).
+   *
+   * Cursor bookkeeping is the adapter's by the knowledge contract's own
+   * division of labour, and this endpoint is that bookkeeping made visible:
+   * where the librarian got to, and what has happened since. `?since=`
+   * overrides the cursor for a caller that wants its own window; `?limit=`
+   * takes the most recent N, because the interesting end of an
+   * unconsolidated slice is the new end.
+   */
+  async function recent(url: URL): Promise<Response> {
+    const cursor = ctx.dataDir === undefined ? 0 : await consolidatedThrough(ctx.dataDir)
+    const sinceParam = url.searchParams.get('since')
+    const parsedSince = sinceParam === null ? Number.NaN : Number(sinceParam)
+    if (sinceParam !== null && !Number.isFinite(parsedSince)) {
+      return ctx.json({ error: 'since must be a number' }, 400)
+    }
+    const limitParam = url.searchParams.get('limit')
+    const parsedLimit = limitParam === null ? Number.NaN : Number(limitParam)
+    if (limitParam !== null && !Number.isFinite(parsedLimit)) {
+      return ctx.json({ error: 'limit must be a number' }, 400)
+    }
+    const since = Number.isFinite(parsedSince) ? parsedSince : cursor
+    let events = (await ctx.read({ stream: MEMORY_STREAM, afterId: since })).filter((e) => e.type === 'memory')
+    if (Number.isFinite(parsedLimit) && parsedLimit > 0) events = events.slice(-parsedLimit)
+    return ctx.json({
+      cursor: { lastEventId: cursor },
+      events: events.map((e) => ({ id: e.id, ts: e.ts, ...(e.data as MemoryData) })),
+    })
+  }
+
   return async (req, url) => {
     if (url.pathname === '/context/search' && req.method === 'GET') return search(url)
+    if (url.pathname === '/context/recent' && req.method === 'GET') return recent(url)
     if (url.pathname === '/context/memorize' && req.method === 'POST') return memorize(req, url)
     return undefined
   }

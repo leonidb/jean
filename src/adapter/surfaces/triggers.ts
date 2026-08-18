@@ -57,21 +57,13 @@ export function triggerRoutes(ctx: SurfaceContext): (req: Request, url: URL) => 
   async function create(req: Request, url: URL): Promise<Response> {
     const body = await ctx.body(req)
     if (body === null) return ctx.json({ error: 'body must be a JSON object' }, 400)
-    // GRAMMAR, and the one field that needs it here. `kind` and `retries`
-    // reach the decision RAW because `decideCreate` has typed refusals for
-    // both (`invalid-kind`, `invalid-retries` — its `got: unknown` says so).
-    // `metadata` has NO create-time check in the domain, so an array or a
-    // null cast into `Record<string, unknown>` would be the adapter asserting
-    // a type it never checked, into a permanent log. Refused as malformed
-    // input, which is the only kind of refusal this file authors (codex pass,
-    // task 103 — and the asymmetry with `decideUpdate`'s `invalid-metadata`
-    // is flagged to the architect, not papered over).
-    if (
-      body.metadata !== undefined &&
-      (typeof body.metadata !== 'object' || body.metadata === null || Array.isArray(body.metadata))
-    ) {
-      return ctx.json({ error: 'metadata must be a JSON object (not an array)' }, 400)
-    }
+    // EVERY FIELD REACHES THE DECISION RAW. E2 checked `metadata` here
+    // because `decideCreate` had no create-time check for it and casting an
+    // unchecked value into `Record<string, unknown>` would be the adapter
+    // asserting a type it never verified. The asymmetry was flagged and the
+    // architect closed it (the task-103 ruling batch): `invalid-metadata` is now a create
+    // refusal too, so the door-check is gone and the typed refusal does the
+    // work — which is what this surface is supposed to look like.
     // `agent` in a trigger body is its TARGET, never its author — the caller
     // is named by `actor`, the header, or not at all.
     const caller = ctx.callerOf(req, url, typeof body.actor === 'string' ? body.actor : undefined)

@@ -94,10 +94,21 @@ export function runAnnouncements(
     //
     // A refused deliver stamps NOTHING: there is no delivery to be evidence
     // of, and recording one would tell a later reader the agent was reached.
-    if (accepted) exec.stamp(via, effect.ids)
-    // The history record — `nudge` carries the queue as of emission, which is
-    // what makes a replayed log show what the agent was told at the time.
-    exec.emit('nudge', { pendingCount: effect.pendingCount })
+    //
+    // AND NOTHING THAT DID NOT HAPPEN IS RECORDED. A refused deliver leaves
+    // no stamp AND no `nudge`: the record exists so a replayed log shows what
+    // the agent was told at the time, and an agent that was never reached was
+    // never told. This matters more than it reads — a refused announcement
+    // does not advance the episode (the ladder must not go quiet over a wake
+    // nobody received), so the agent is due again at the very next tick. Emit
+    // unconditionally and a disconnected agent holding one message writes a
+    // `nudge` per tick, forever, each one claiming a telling that did not
+    // occur. E1 shipped that; E3 fixed it, and the loud direction is the same
+    // one D8's non-suppression ruling guards from the other side.
+    if (accepted) {
+      exec.stamp(via, effect.ids)
+      exec.emit('nudge', { pendingCount: effect.pendingCount })
+    }
     outcomes.push({ kind: 'announced', agent: effect.to, ids: effect.ids, accepted })
   }
   return outcomes
