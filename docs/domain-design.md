@@ -135,10 +135,10 @@ compiler checks both. The guard is the existing mechanism generalized:
 - `liveness.ts` → `domain/agents`. `retrieval.ts` ranking → `domain/knowledge`;
   `retrieval-corpus.ts` splits (ranking input types are domain; the filesystem
   walk that builds the corpus is adapter).
-- `src/infra/target/` goes with the old system. It was itself an earlier
-  fresh-location attempt that stopped at signatures (§9 says what is
-  different this time), and it was cut against a different transition's
-  shape. Nothing builds on it.
+- `src/infra/target/` goes with the old system — it is re-export shims over
+  live `core/` code, imported by the old suite (§9 records what actually
+  became of that attempt, and what is different this time). Nothing builds
+  on it; it dies with the suite that imports it.
 - `src/infra/core/` as a name retires. **The layer is `src/domain/`; the shell
   keeps `src/infra/`.** "Core" was earned structurally; "domain" is the honest
   claim this design makes checkable.
@@ -424,14 +424,21 @@ on both. With the old tests gone, this separation is what keeps an
 implementer's misreading of a requirement from grading itself.
 
 **Why this fresh-location attempt ends differently than `target/`.**
-`src/infra/target/` (tasks 043/044) was already a fresh-location attempt, and
-it stopped exactly at signatures: types with no bodies, no conformance
-suites, no consumers, no dispatch plan — a destination with no road, cut
-against a different transition's shape besides. It goes with the old system.
-The difference here is the unit of progress: **a module exists only as
-contract + conformance suite + dispatched implementation together** — never
-as a signature awaiting a body — and the adapter, the end-to-end suite, and
-the switch are tasks in the same plan as the modules they depend on.
+`src/infra/target/` (tasks 043/044) was already a fresh-location attempt.
+What actually became of it (corrected 2026-08-18, H1's measurement — an
+earlier draft said it "stalled at signatures", which was false): its API got
+implemented **in `core/`**, and target/ became re-export shims over that
+live code — the fresh location itself was quietly abandoned as a location
+while its names survived as a facade, with the old system's own suite
+importing them. Only `stub.ts` was a true signature-phase leftover. The
+failure mode to avoid is therefore not "signatures with no bodies" but
+**the new location dissolving back into the old structure**. The defence is
+the same either way, and it stands on its own merits: **a module exists only
+as contract + conformance suite + dispatched implementation together**, the
+implementations live in `src/domain/` and nowhere else, and the adapter, the
+end-to-end suite, and the switch are tasks in the same plan as the modules
+they depend on — so there is no old structure for the work to drain back
+into. `target/` itself dies with the old suite that imports it (H2).
 
 **The switch.** One switch, not nine. The `jean infra` entrypoint moves to
 the new server when: every module's conformance suite is green; the
