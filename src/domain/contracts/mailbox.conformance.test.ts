@@ -277,6 +277,36 @@ describe('P6 — accountable clearing: the record names the clearer, carries the
     const refolded = mailbox.fold(state, oldAck, recipientsOf)
     expect(mailbox.pendingPairs(refolded).some((p) => p.eventId === comment.id)).toBe(false)
   })
+
+  test('a MALFORMED attributed record clears NOTHING — attribution decides the path, and decides first (D2 report, priority pin)', () => {
+    // The 059 shared-flag class reachable through DATA: a record naming a
+    // caller but with a damaged `cleared` list also carries eventIds (for the
+    // old fold), and an implementation testing `caller && Array.isArray(cleared)`
+    // falls through to the historical branch and bulk-clears every holder's
+    // pair. D2 reproduced exactly that before fixing it; this pins the fix.
+    const { log, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
+    const before = mailbox
+      .pendingPairs(state)
+      .map((p) => `${p.recipient}:${p.eventId}`)
+      .sort()
+    const malformed = [
+      log.appendRaw('ack', 'system', { eventIds: [comment.id], caller: ORCH }),
+      log.appendRaw('ack', 'system', { eventIds: [comment.id], caller: ORCH, cleared: 'not-a-list' }),
+      log.appendRaw('ack', 'system', { eventIds: [comment.id], caller: ORCH, cleared: [{ wrong: 'shape' }] }),
+    ]
+    let checked = 0
+    for (const bad of malformed) {
+      const refolded = mailbox.fold(state, bad, recipientsOf)
+      const after = mailbox
+        .pendingPairs(refolded)
+        .map((p) => `${p.recipient}:${p.eventId}`)
+        .sort()
+      expect(after).toEqual(before) // nothing cleared — for ANY holder
+      checked++
+    }
+    counted('malformed attributed records', checked, 3)
+  })
 })
 
 describe('P7/P10 — views: three rungs, pure, fresh', () => {
