@@ -146,7 +146,10 @@ export type AgentsContract = {
     quietThresholdMs: (role: AgentRole) => number,
   ) => SessionClass
 
-  decideRegistration: (state: AgentsState, cmd: RegistrationCommand) => RegistrationVerdict
+  /** Stateless, deliberately (ruled, task 086 — the third shape-earns-its-
+   *  keep instance): every fact the verdict needs travels in the command;
+   *  the persisted record plays no part in admitting a session. */
+  decideRegistration: (cmd: RegistrationCommand) => RegistrationVerdict
 
   /** The stop-hook verdict: current session's report, a stale session's, or
    *  a disconnected agent's — a diagnostic classification, never activity. */

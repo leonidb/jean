@@ -208,7 +208,6 @@ be emitted.
 | Trigger firing targeting X | X |
 | Idle-liveness ping | the pinged worker |
 | Agent down, worker status (including recovery), worker disconnect | orchestrator |
-| Connect greeting | the connecting agent |
 | Acknowledgement, announcement, idle transition, memorize | nobody — history |
 
 The task row is a resolution, not an address: a task created unassigned by the

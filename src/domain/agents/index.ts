@@ -177,7 +177,10 @@ const classifySession = (
  * reconnecting orchestrator, so no name comparison is needed here. Reported
  * on task 085 rather than resolved by editing the contract.
  */
-const decideRegistration = (_state: AgentsState, cmd: RegistrationCommand): RegistrationVerdict => {
+// The state parameter was removed from the contract (ruled, task 086 —
+// stateless by shape-earns-its-keep); mechanical deletion of the unused
+// parameter so the impl stays assignable, noted on 086.
+const decideRegistration = (cmd: RegistrationCommand): RegistrationVerdict => {
   // 1. RESERVED, before anything else: the name is wrong whatever the
   //    session facts are, and admitting it would corrupt authorship rather
   //    than merely crowd a seat.

@@ -23,6 +23,8 @@ const tasks: TasksContract = await import(IMPL_PATH)
 
 const ORCH = 'orchestrator-o'
 const WORKER_A = 'worker-a'
+/** The injected roster fact (Q-1, ruled): who counts as a dojo agent. */
+const ROSTER = (name: string) => name === WORKER_A || name === ORCH
 const NOW = 1_755_600_000_000
 
 function world() {
@@ -55,7 +57,7 @@ function withTask(status: TaskStatus = 'todo') {
     prev = to
   }
   let state = tasks.initial()
-  for (const e of log.events()) state = tasks.fold(state, e)
+  for (const e of log.events()) state = tasks.fold(state, e, ROSTER)
   return { state, log, clock }
 }
 
@@ -180,8 +182,13 @@ describe('parking — blocker required, snooze validated, clear-or-replace', () 
         blockedNote: 'vendor asked',
         resumeAt: new Date(NOW + 86_400_000).toISOString(),
       }),
+      ROSTER,
     )
-    s = tasks.fold(s, log.append('task-status', 'task-001', { from: 'waiting', to: 'in-progress', actor: ORCH }))
+    s = tasks.fold(
+      s,
+      log.append('task-status', 'task-001', { from: 'waiting', to: 'in-progress', actor: ORCH }),
+      ROSTER,
+    )
     const unParked = tasks.taskOf(s, '001')
     expect(unParked?.blockedOn).toBeUndefined()
     expect(unParked?.blockedNote).toBeUndefined() // all FOUR park fields clear
@@ -191,6 +198,7 @@ describe('parking — blocker required, snooze validated, clear-or-replace', () 
     s = tasks.fold(
       s,
       log.append('task-status', 'task-001', { from: 'in-progress', to: 'waiting', actor: ORCH, blockedOn: 'sensei' }),
+      ROSTER,
     )
     const reParked = tasks.taskOf(s, '001')
     expect(reParked?.blockedOn).toBe('sensei')
@@ -205,7 +213,7 @@ describe('parking — blocker required, snooze validated, clear-or-replace', () 
       actor: ORCH,
       blockedOn: 'human',
     })
-    const s = tasks.fold(state, parkEvent)
+    const s = tasks.fold(state, parkEvent, ROSTER)
     expect(tasks.taskOf(s, '001')?.blockedSince).toBe(parkEvent.ts)
   })
 })
@@ -223,12 +231,13 @@ describe('the handoff — canon 8, a first-class act', () => {
         actor: ORCH,
         resumeAt: new Date(NOW + 86_400_000).toISOString(),
       }),
+      ROSTER,
     )
     expect(tasks.taskOf(snoozed, '001')?.resumeAt).toBeDefined()
     const moved = tasks.decideHandoff(snoozed, { taskId: '001', blockedOn: 'human', note: 'escalated', actor: ORCH })
     expect(moved.ok).toBe(true)
     if (moved.ok) {
-      const s = tasks.fold(snoozed, log.append('task-blocked', 'task-001', moved.data))
+      const s = tasks.fold(snoozed, log.append('task-blocked', 'task-001', moved.data), ROSTER)
       const t = tasks.taskOf(s, '001')
       expect(t?.blockedOn).toBe('human')
       expect(t?.blockedNote).toBe('escalated')
@@ -262,7 +271,7 @@ describe('revert — stack-pop, and the park-clearing ruling (D-1)', () => {
     if (d.ok) {
       expect(d.from).toBe('in-progress')
       expect(d.to).toBe('todo')
-      const s = tasks.fold(state, log.append('task-reverted', 'task-001', d.data))
+      const s = tasks.fold(state, log.append('task-reverted', 'task-001', d.data), ROSTER)
       expect(tasks.taskOf(s, '001')?.status).toBe('todo')
       // The stack popped: a second revert now has nothing left.
       const again = tasks.decideRevert(s, '001', ORCH)
@@ -282,13 +291,13 @@ describe('revert — stack-pop, and the park-clearing ruling (D-1)', () => {
     log.append('task-status', 'task-001', { from: 'in-progress', to: 'waiting', actor: ORCH, blockedOn: 'human' })
     log.append('task-status', 'task-001', { from: 'waiting', to: 'done', actor: ORCH })
     let s = tasks.initial()
-    for (const e of log.events()) s = tasks.fold(s, e)
+    for (const e of log.events()) s = tasks.fold(s, e, ROSTER)
     const d = tasks.decideRevert(s, '001', ORCH)
     expect(d.ok).toBe(true)
     if (d.ok) {
       expect(d.from).toBe('done')
       expect(d.to).toBe('in-progress') // waiting skipped
-      const after = tasks.fold(s, log.append('task-reverted', 'task-001', d.data))
+      const after = tasks.fold(s, log.append('task-reverted', 'task-001', d.data), ROSTER)
       const t = tasks.taskOf(after, '001')
       expect(t?.status).toBe('in-progress')
       expect(t?.blockedOn).toBeUndefined() // and no park resurrects
@@ -302,7 +311,7 @@ describe('revert — stack-pop, and the park-clearing ruling (D-1)', () => {
     expect(d.ok).toBe(true)
     if (d.ok) {
       expect(d.to).toBe('in-progress')
-      const s = tasks.fold(state, log.append('task-reverted', 'task-001', d.data))
+      const s = tasks.fold(state, log.append('task-reverted', 'task-001', d.data), ROSTER)
       const t = tasks.taskOf(s, '001')
       expect(t?.status).toBe('in-progress')
       expect(t?.blockedOn).toBeUndefined() // the old fold left this sticky — accident, left behind
@@ -319,13 +328,24 @@ describe('the fold — data compatibility and start semantics', () => {
     log.append('task-created', 'task-001', { title: 't', description: '', queue: WORKER_A, actor: ORCH })
     log.appendRaw('task-status', 'task-001', { from: 'todo', to: 'active', actor: ORCH })
     let state = tasks.initial()
-    for (const e of log.events()) state = tasks.fold(state, e)
+    for (const e of log.events()) state = tasks.fold(state, e, ROSTER)
     expect(tasks.taskOf(state, '001')?.status).toBe('in-progress')
   })
 
-  test('starting an unassigned task assigns the queue as the agent (extracted as-is; see OPEN Q-1)', () => {
-    const { state } = withTask('in-progress')
+  test('Q-1 RULED: starting an unassigned task assigns the queue as agent ONLY when the queue is a roster member', () => {
+    const { state } = withTask('in-progress') // queue = WORKER_A, in ROSTER
     expect(tasks.taskOf(state, '001')?.agent).toBe(WORKER_A)
+  })
+
+  test('Q-1 RULED: a non-roster queue never becomes an owner — the task stays unowned (never invent an acker)', () => {
+    const { log } = world()
+    log.append('task-created', 'task-002', { title: 'someday item', description: '', queue: 'someday', actor: ORCH })
+    log.append('task-status', 'task-002', { from: 'todo', to: 'in-progress', actor: ORCH })
+    let s = tasks.initial()
+    for (const e of log.events()) s = tasks.fold(s, e, ROSTER)
+    const t = tasks.taskOf(s, '002')
+    expect(t?.status).toBe('in-progress')
+    expect(t?.agent).toBeUndefined() // unowned: its events resolve per the table (unassigned → history)
   })
 
   test('a duplicate task-created for an existing id is ignored — first wins, replay never doubles a task (084 report, gap 4)', () => {
@@ -333,6 +353,7 @@ describe('the fold — data compatibility and start semantics', () => {
     const s = tasks.fold(
       state,
       log.append('task-created', 'task-001', { title: 'impostor', description: '', queue: 'other-q', actor: ORCH }),
+      ROSTER,
     )
     expect(tasks.all(s).filter((t) => t.id === '001').length).toBe(1)
     const t = tasks.taskOf(s, '001')
@@ -345,6 +366,7 @@ describe('the fold — data compatibility and start semantics', () => {
     const s = tasks.fold(
       state,
       log.appendRaw('task-blocked', 'task-001', { blockedOn: 'external', note: 'vendor', actor: ORCH }),
+      ROSTER,
     )
     const t = tasks.taskOf(s, '001')
     expect(t?.blockedOn).toBe('external')
@@ -379,7 +401,7 @@ describe('queries — staleness, ids, activity attribution, availability', () =>
     expect(tasks.openTaskCount(state, ORCH)).toBe(0)
   })
 
-  test('activeTaskOf finds a WAITING task too, and matches by queue when no agent was ever set', () => {
+  test('activeTaskOf finds a WAITING task too, and finds a started roster-queue task by its assigned owner', () => {
     const { state: parked } = withTask('waiting')
     expect(tasks.activeTaskOf(parked, WORKER_A)?.id).toBe('001')
     // A dispatched-but-unstarted task has no agent; the queue names its holder.
@@ -387,7 +409,7 @@ describe('queries — staleness, ids, activity attribution, availability', () =>
     log.append('task-created', 'task-001', { title: 't', description: '', queue: WORKER_A, actor: ORCH })
     log.append('task-status', 'task-001', { from: 'todo', to: 'in-progress', actor: ORCH })
     let s = tasks.initial()
-    for (const e of log.events()) s = tasks.fold(s, e)
+    for (const e of log.events()) s = tasks.fold(s, e, ROSTER)
     expect(tasks.activeTaskOf(s, WORKER_A)?.id).toBe('001')
   })
 })

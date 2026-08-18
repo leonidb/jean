@@ -37,7 +37,7 @@ describe('reserved names (R6)', () => {
     for (const name of ['infra', 'api']) {
       expect(agents.isReservedName(name)).toBe(true)
       for (const role of ['worker', 'sensei', 'user', 'peer', 'librarian'] as const) {
-        const verdict = agents.decideRegistration(agents.initial(), {
+        const verdict = agents.decideRegistration({
           name,
           role,
           orchestratorConnected: false,
@@ -75,6 +75,17 @@ describe('membership — durable from the log', () => {
     expect(agents.isDojoAgent(state, 'human-h')).toBe(false)
     expect(agents.isDojoAgent(state, 'peer-p')).toBe(false)
   })
+
+  test('EVER means ever: a worker later re-registered as user is STILL a dojo agent (085 report, gap 1)', () => {
+    // Role reuse is real (the precedence test itself relies on it). An
+    // implementation reading only the LAST role silently flips a re-registered
+    // worker from queue to warn — its queued mail would start bouncing.
+    const state = foldLog((log) => {
+      log.append('register', 'agent-worker-a', { agent: 'worker-a', role: 'worker', idle: true })
+      log.append('register', 'agent-worker-a', { agent: 'worker-a', role: 'user', idle: true })
+    })
+    expect(agents.isDojoAgent(state, 'worker-a')).toBe(true)
+  })
 })
 
 describe('the orchestrator seat', () => {
@@ -95,10 +106,7 @@ describe('the orchestrator seat', () => {
   })
 
   test('a second orchestrator session is refused while one is connected', () => {
-    const state = foldLog((log) => {
-      log.append('register', 'agent-sensei-one', { agent: 'sensei-one', role: 'sensei', idle: true })
-    })
-    const verdict = agents.decideRegistration(state, {
+    const verdict = agents.decideRegistration({
       name: 'sensei-two',
       role: 'sensei',
       sessionId: 's2',
@@ -108,10 +116,7 @@ describe('the orchestrator seat', () => {
   })
 
   test('PRECEDENCE: the orchestrator reconnecting on its own session replaces — its own liveness must not lock the seat', () => {
-    const state = foldLog((log) => {
-      log.append('register', 'agent-sensei-one', { agent: 'sensei-one', role: 'sensei', idle: true, sessionId: 's1' })
-    })
-    const verdict = agents.decideRegistration(state, {
+    const verdict = agents.decideRegistration({
       name: 'sensei-one',
       role: 'sensei',
       sessionId: 's1',
@@ -180,12 +185,9 @@ describe('session classification — a hint, honestly derived', () => {
 
 describe('duplicate sessions — keep the incumbent, expressed over plain values', () => {
   const base = { name: 'worker-a', role: 'worker' as const, orchestratorConnected: false }
-  const registered = foldLog((log) => {
-    log.append('register', 'agent-worker-a', { agent: 'worker-a', role: 'worker', idle: true, sessionId: 's1' })
-  })
 
   test('live incumbent + different session → refuse the newcomer and notify the orchestrator once', () => {
-    const verdict = agents.decideRegistration(registered, {
+    const verdict = agents.decideRegistration({
       ...base,
       sessionId: 's2',
       incumbent: { sessionId: 's1', live: true },
@@ -194,7 +196,7 @@ describe('duplicate sessions — keep the incumbent, expressed over plain values
   })
 
   test('same session reconnecting → replace cleanly', () => {
-    const verdict = agents.decideRegistration(registered, {
+    const verdict = agents.decideRegistration({
       ...base,
       sessionId: 's1',
       incumbent: { sessionId: 's1', live: true },
@@ -203,7 +205,7 @@ describe('duplicate sessions — keep the incumbent, expressed over plain values
   })
 
   test('dead incumbent → replace cleanly, whatever the session ids', () => {
-    const verdict = agents.decideRegistration(registered, {
+    const verdict = agents.decideRegistration({
       ...base,
       sessionId: 's2',
       incumbent: { sessionId: 's1', live: false },
@@ -212,8 +214,19 @@ describe('duplicate sessions — keep the incumbent, expressed over plain values
   })
 
   test('no incumbent → admit', () => {
-    const verdict = agents.decideRegistration(registered, { ...base, sessionId: 's3' })
+    const verdict = agents.decideRegistration({ ...base, sessionId: 's3' })
     expect(verdict).toEqual({ kind: 'admit' })
+  })
+
+  test('PRECEDENCE: reserved beats the incumbent path — a replayed pre-rule log cannot admit "infra" (085 report, gap 2)', () => {
+    const verdict = agents.decideRegistration({
+      name: 'infra',
+      role: 'worker',
+      sessionId: 's2',
+      incumbent: { sessionId: 's2', live: true }, // same-session replace would otherwise win
+      orchestratorConnected: false,
+    })
+    expect(verdict).toEqual({ kind: 'refuse-reserved' })
   })
 })
 

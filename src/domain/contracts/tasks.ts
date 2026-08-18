@@ -87,10 +87,17 @@
  * (ruled, task 083): the old fold appended a second board entry under the
  * same id, an accident left behind; logs are permanent and a replay must
  * not double a task.
- * Starting a task with no agent assigns the QUEUE as the agent — extracted
- * as-is; the queue-name-as-agent-name convention and its interaction with
- * resolution is OPEN QUESTION Q-1 in the report (a non-roster owner would
- * accumulate pairs nobody reads).
+ *
+ * ── Q-1 RULED (2026-08-18): NEVER INVENT AN OWNER ──
+ *
+ * Starting a task with no agent assigns the QUEUE as the agent ONLY WHEN
+ * the queue names a roster member — the fold consults an injected
+ * `isRosterMember` fact (the same pattern as the mailbox's `recipientsOf`;
+ * the tasks module never imports agents). A non-roster queue ('someday',
+ * 'backlog') leaves the task UNOWNED: its events resolve per the table
+ * (unassigned → history), and no pairs accumulate for a mailbox nobody can
+ * read. The roster fact is supplied current-as-of-the-event, like every
+ * injected fold fact.
  *
  * What the types cannot enforce, and what does: the DAG's exact edge set,
  * the gates' precedence, clear-or-replace, the revert ruling, and staleness
@@ -187,8 +194,11 @@ export type RevertDecision =
 export type TasksContract = {
   initial: () => TasksState
   /** Fold one event: task kinds evolve the board and the status stacks;
-   *  legacy status names map; everything else is ignored. */
-  fold: (state: TasksState, event: StoredEvent) => TasksState
+   *  legacy status names map; everything else is ignored. `isRosterMember`
+   *  is the injected roster fact (Q-1, ruled): consulted only by the
+   *  start-assigns-queue clause — a non-roster queue never becomes an
+   *  owner. */
+  fold: (state: TasksState, event: StoredEvent, isRosterMember: (name: AgentName) => boolean) => TasksState
 
   all: (state: TasksState) => readonly Task[]
   taskOf: (state: TasksState, id: string) => Task | undefined
