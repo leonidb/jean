@@ -9,10 +9,11 @@
  * dojo-wide total — and composed cases run the generic replay checker
  * alongside their specific assertions (design §7's two-kinds rule).
  *
- * The resolution implementation (D1) is a dependency of the RANDOMIZED cases
- * only; the scripted cases use a local table-resolution so this suite's
- * verdicts do not depend on another module's correctness (design §6:
- * testable without other modules' behaviour).
+ * The fold takes an INJECTED resolver (`recipientsOf`, ruled task 083), so
+ * the scripted cases inject an EXPLICIT per-event recipients table — their
+ * verdicts genuinely do not depend on the resolution module's correctness.
+ * Only the randomized run composes the real resolution (D1), deliberately:
+ * that run is the cross-module detector.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -50,25 +51,12 @@ const HUMAN = 'human-h'
 const roleOf = (name: AgentName): AgentRole | undefined =>
   name === ORCH ? 'sensei' : name === HUMAN ? 'user' : name === WORKER_A || name === WORKER_B ? 'worker' : undefined
 
-const ctx: ResolutionContext = {
-  orchestrator: ORCH,
-  taskOwner: (taskId) => (taskId === '101' ? WORKER_A : undefined),
-}
-
 const noEvidence = (): DeliveredVia | undefined => undefined
 
-/** Fold a scripted log into state. */
-function foldAll(
-  events: readonly Parameters<MailboxContract['fold']>[1][],
-  into?: ReturnType<MailboxContract['initial']>,
-) {
-  let state = into ?? mailbox.initial()
-  for (const e of events) state = mailbox.fold(state, e, ctx)
-  return state
-}
-
-/** A three-recipient scripted world, non-coincident by construction:
- *  A holds {send1}, B holds {send2, task-comment}, ORCH holds {reply, task-comment}. */
+/** A three-recipient scripted world with an EXPLICIT recipients table —
+ *  membership by declaration, not by any module's logic. Non-coincident by
+ *  construction: A holds {send1, comment}, B holds {send2}, ORCH holds
+ *  {reply, comment}. */
 function scriptedWorld() {
   const log = createLog(createClock())
   const send1 = log.append('send', `agent-${WORKER_A}`, { agent: WORKER_A, from: ORCH, text: 'to A', queued: true })
@@ -77,13 +65,30 @@ function scriptedWorld() {
   // WORKER_B comments on A's task → held by BOTH ORCH and WORKER_A (the
   // multi-recipient case §5 requires as a positive).
   const comment = log.append('task-comment', 'task-101', { agent: WORKER_B, role: 'worker', text: 'drive-by' })
-  return { log, send1, send2, reply, comment }
+  const table = new Map<number, readonly string[]>([
+    [send1.id, [WORKER_A]],
+    [send2.id, [WORKER_B]],
+    [reply.id, [ORCH]],
+    [comment.id, [ORCH, WORKER_A]],
+  ])
+  const recipientsOf = (e: { id: number }) => table.get(e.id) ?? []
+  return { log, send1, send2, reply, comment, recipientsOf }
+}
+
+/** Fold a scripted log into state with its declared table. */
+function foldAll(
+  events: readonly Parameters<MailboxContract['fold']>[1][],
+  recipientsOf: Parameters<MailboxContract['fold']>[2],
+) {
+  let state = mailbox.initial()
+  for (const e of events) state = mailbox.fold(state, e, recipientsOf)
+  return state
 }
 
 describe('P1/P4 — the fold: pairs from resolution, history never enters', () => {
   test('per-agent mailboxes match ground truth exactly, non-coincident, and pending is their union', () => {
-    const { log, send1, send2, reply, comment } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, send1, send2, reply, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
 
     const boxA = mailbox.mailboxOf(state, WORKER_A).map((e) => e.id)
     const boxB = mailbox.mailboxOf(state, WORKER_B).map((e) => e.id)
@@ -112,14 +117,18 @@ describe('P1/P4 — the fold: pairs from resolution, history never enters', () =
     )
   })
 
-  test('history kinds put nothing anywhere: ack, nudge, agent-idle, register, memory', () => {
+  test('an empty resolution enters nothing — even for a normally-addressed send — and a stray ack clears nothing', () => {
+    // Which kinds ARE history is resolution's contract (pinned there); the
+    // mailbox's own obligation is that a zero-recipient event never touches
+    // pending — INCLUDING a mail-shaped send, which is the discriminating
+    // case: a fold deriving recipients for mail-like kinds itself, instead
+    // of consulting the injected resolver, fails here (codex pass, 083).
     const log = createLog(createClock())
+    log.append('send', `agent-${WORKER_A}`, { agent: WORKER_A, from: ORCH, text: 'looks like mail', queued: true })
     log.append('ack', 'system', { eventIds: [999] })
     log.append('nudge', `agent-${WORKER_A}`, { pendingCount: 1 })
-    log.append('agent-idle', `agent-${WORKER_A}`, { agent: WORKER_A, role: 'worker' })
-    log.append('register', `agent-${WORKER_A}`, { agent: WORKER_A, role: 'worker', idle: true })
     log.append('memory', 'memory', { agent: WORKER_A, role: 'worker', text: 'learned', scope: 'dojo' })
-    const state = foldAll(log.events())
+    const state = foldAll(log.events(), () => [])
     expect(mailbox.pendingPairs(state)).toEqual([])
     expect(mailbox.mailboxOf(state, WORKER_A)).toEqual([])
     expect(mailbox.mailboxOf(state, ORCH)).toEqual([])
@@ -128,8 +137,8 @@ describe('P1/P4 — the fold: pairs from resolution, history never enters', () =
 
 describe('§2 — independent acknowledgement, the invariant', () => {
   test("one recipient's ack clears its pair only; the event stays in the other mailbox; last clear removes it from pending", () => {
-    const { log, comment } = scriptedWorld()
-    let state = foldAll(log.events())
+    const { log, comment, recipientsOf } = scriptedWorld()
+    let state = foldAll(log.events(), recipientsOf)
     const code = mailbox.codeFor(comment)
 
     // ORCH clears its pair on the jointly-held comment.
@@ -148,8 +157,8 @@ describe('§2 — independent acknowledgement, the invariant', () => {
   })
 
   test('double-ack of one pair: the second clears nothing, and acknowledgedCount reads success for both (idempotence)', () => {
-    const { log, send1 } = scriptedWorld()
-    let state = foldAll(log.events())
+    const { log, send1, recipientsOf } = scriptedWorld()
+    let state = foldAll(log.events(), recipientsOf)
     const code = mailbox.codeFor(send1)
     const first = mailbox.applyAck(state, WORKER_A, [{ id: send1.id, code }], noEvidence)
     state = first.next
@@ -158,12 +167,22 @@ describe('§2 — independent acknowledgement, the invariant', () => {
     expect(second.cleared.length).toBe(0)
     expect(mailbox.acknowledgedCount(second.next, WORKER_A, [send1.id])).toBe(1)
   })
+
+  test('acknowledgedCount: the blessed bounded-memory limit — an unknown id also reads 1', () => {
+    // Documented limit (contract, ruled task 083): the state is bounded by
+    // PENDING, so cleared-long-ago and never-existed are indistinguishable
+    // and both read "not held by you" = acknowledged. Attribution questions
+    // are the log's, not this counter's.
+    const { log, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
+    expect(mailbox.acknowledgedCount(state, WORKER_A, [999_999])).toBe(1)
+  })
 })
 
 describe('P5 — read before clear, authorized to clear', () => {
   test('a wrong code clears nothing and is not an error; the right half of a batch still clears', () => {
-    const { log, send1, comment } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, send1, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const d = mailbox.applyAck(
       state,
       WORKER_A,
@@ -177,8 +196,8 @@ describe('P5 — read before clear, authorized to clear', () => {
   })
 
   test('a NON-RECIPIENT presenting a correct code clears nothing — for anyone (register row 3, closed by construction)', () => {
-    const { log, send1 } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, send1, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const code = mailbox.codeFor(send1) // send1 is WORKER_A's mail
     const d = mailbox.applyAck(state, WORKER_B, [{ id: send1.id, code }], noEvidence)
     expect(d.cleared).toEqual([])
@@ -204,8 +223,8 @@ describe('P5 — read before clear, authorized to clear', () => {
 
 describe('P6 — accountable clearing: the record names the clearer, carries the evidence', () => {
   test('the decision record: caller, presented pairs verbatim, cleared pairs with per-pair deliveredVia, and old-fold-readable eventIds', () => {
-    const { log, send1, comment } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, send1, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const presented = [
       { id: send1.id, code: mailbox.codeFor(send1) },
       { id: comment.id, code: 'wrong0' },
@@ -220,15 +239,15 @@ describe('P6 — accountable clearing: the record names the clearer, carries the
   })
 
   test('absent evidence is recorded as unknown, never invented', () => {
-    const { log, send2 } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, send2, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const d = mailbox.applyAck(state, WORKER_B, [{ id: send2.id, code: mailbox.codeFor(send2) }], noEvidence)
     expect(d.record.cleared).toEqual([{ eventId: send2.id }])
   })
 
   test('folding the decision record back reproduces the decision state — from `cleared`, never from `pairs`', () => {
-    const { log, send1, comment } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, send1, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     // The record deliberately contains a MISS (wrong code on send1): an
     // implementation that replays `pairs` instead of `cleared` clears the
     // missed pair on refold and fails here (codex pass, task 080).
@@ -243,7 +262,7 @@ describe('P6 — accountable clearing: the record names the clearer, carries the
     )
     expect(d.cleared.map((c) => c.eventId)).toEqual([comment.id])
     const ackEvent = log.appendRaw('ack', 'system', d.record)
-    const refolded = mailbox.fold(state, ackEvent, ctx)
+    const refolded = mailbox.fold(state, ackEvent, recipientsOf)
     const key = (pairs: readonly { recipient: string; eventId: number }[]) =>
       pairs.map((p) => `${p.recipient}:${p.eventId}`).sort()
     expect(key(mailbox.pendingPairs(refolded))).toEqual(key(mailbox.pendingPairs(d.next)))
@@ -252,18 +271,18 @@ describe('P6 — accountable clearing: the record names the clearer, carries the
   })
 
   test('a HISTORICAL ack (eventIds, no caller) clears every pair of the named events — replay tolerance, permanently', () => {
-    const { log, comment } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const oldAck = log.appendRaw('ack', 'system', { eventIds: [comment.id] })
-    const refolded = mailbox.fold(state, oldAck, ctx)
+    const refolded = mailbox.fold(state, oldAck, recipientsOf)
     expect(mailbox.pendingPairs(refolded).some((p) => p.eventId === comment.id)).toBe(false)
   })
 })
 
 describe('P7/P10 — views: three rungs, pure, fresh', () => {
   test('reads change nothing: state answers identically before and after every view', () => {
-    const { log } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const before = mailbox.pendingPairs(state).map((p) => `${p.recipient}:${p.eventId}`)
     mailbox.countsFor(state, ORCH, roleOf)
     mailbox.summaryFor(state, ORCH, roleOf, 1_755_500_100_000)
@@ -274,8 +293,8 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
   })
 
   test('freshness is the falling case (P10): views over an evolved state reflect the change immediately', () => {
-    const { log, reply, comment } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, reply, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const countBefore = mailbox.countsFor(state, ORCH, roleOf).total
     // Read every rung, then evolve the state — the same view calls over the
     // NEW state must answer from it, not from anything a prior call retained.
@@ -290,8 +309,8 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
   })
 
   test('only fetch carries codes; counts and summary carry none, and summary previews cannot leak one', () => {
-    const { log, reply } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, reply, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const counts = mailbox.countsFor(state, ORCH, roleOf)
     const summary = mailbox.summaryFor(state, ORCH, roleOf, 1_755_500_100_000)
     const fetched = mailbox.fetchFor(state, ORCH)
@@ -301,9 +320,37 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
     expect(fetched.find((f) => f.event.id === reply.id)?.code).toBe(mailbox.codeFor(reply))
   })
 
+  test('P2, the divergence state: after ORCH clears its pair on a still-jointly-held event, EVERY rung agrees it is gone for ORCH and present for WORKER_A', () => {
+    // D2's mutation pass proved a second membership path in the view rungs
+    // ships green: filtering on recipients instead of holders only diverges
+    // for an agent that cleared its pair while another agent still holds the
+    // event — a state no view was read in (task 083). fetchFor is the
+    // serious half: it hands out codes, so the defect returns an agent an
+    // event it already cleared WITH a valid code.
+    const { log, reply, comment, recipientsOf } = scriptedWorld()
+    let state = foldAll(log.events(), recipientsOf)
+    const d = mailbox.applyAck(state, ORCH, [{ id: comment.id, code: mailbox.codeFor(comment) }], noEvidence)
+    state = d.next
+    // WORKER_A still holds the comment — on every rung, counts included…
+    expect(mailbox.mailboxOf(state, WORKER_A).map((e) => e.id)).toContain(comment.id)
+    expect(mailbox.countsFor(state, WORKER_A, roleOf).total).toBe(2)
+    expect(mailbox.summaryFor(state, WORKER_A, roleOf, 1_755_500_100_000).map((l) => l.id)).toContain(comment.id)
+    expect(mailbox.fetchFor(state, WORKER_A).map((f) => f.event.id)).toContain(comment.id)
+    // …and for ORCH every rung says it is gone — none may re-derive
+    // membership from recipients.
+    expect(mailbox.countsFor(state, ORCH, roleOf).total).toBe(1)
+    expect(mailbox.summaryFor(state, ORCH, roleOf, 1_755_500_100_000).map((l) => l.id)).toEqual([reply.id])
+    const fetched = mailbox.fetchFor(state, ORCH)
+    expect(fetched.map((f) => f.event.id)).toEqual([reply.id])
+    expect(fetched.some((f) => f.event.id === comment.id)).toBe(false) // no code for a cleared pair, ever
+    const selected = mailbox.select(state, ORCH, { ids: [comment.id] }, roleOf)
+    expect(selected.events).toEqual([])
+    expect(selected.missing).toEqual([comment.id])
+  })
+
   test('the three rungs describe ONE list: counts total = summary lines = fetch length, per agent (P2 behaviourally)', () => {
-    const { log } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     let checked = 0
     for (const agent of [WORKER_A, WORKER_B, ORCH]) {
       const counts = mailbox.countsFor(state, agent, roleOf)
@@ -321,7 +368,11 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
     const log = createLog(createClock())
     const humanMsg = log.append('reply', 'system', { agent: HUMAN, text: 'urgent question' })
     const machineMsg = log.append('send', `agent-${ORCH}`, { agent: ORCH, from: WORKER_A, text: 'fyi', queued: true })
-    const state = foldAll(log.events())
+    const table = new Map<number, readonly string[]>([
+      [humanMsg.id, [ORCH]],
+      [machineMsg.id, [ORCH]],
+    ])
+    const state = foldAll(log.events(), (e) => table.get(e.id) ?? [])
     expect(mailbox.groupOf(humanMsg, roleOf)).toEqual({ kind: 'blocking', from: HUMAN })
     expect(mailbox.groupOf(machineMsg, roleOf).kind).toBe('queued')
     const summary = mailbox.summaryFor(state, ORCH, roleOf, 1_755_500_100_000)
@@ -335,8 +386,8 @@ describe('P7/P10 — views: three rungs, pure, fresh', () => {
 
 describe('selectors — inside the reader’s mailbox, loud misses', () => {
   test('ids: found events come with codes; misses land in `missing`, present even when empty', () => {
-    const { log, send1, send2 } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, send1, send2, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const hit = mailbox.select(state, WORKER_A, { ids: [send1.id] }, roleOf)
     expect(hit.events.map((f) => f.event.id)).toEqual([send1.id])
     expect(hit.missing).toEqual([])
@@ -347,8 +398,8 @@ describe('selectors — inside the reader’s mailbox, loud misses', () => {
   })
 
   test('type: selects by the summary’s queued key within the mailbox only', () => {
-    const { log, comment } = scriptedWorld()
-    const state = foldAll(log.events())
+    const { log, comment, recipientsOf } = scriptedWorld()
+    const state = foldAll(log.events(), recipientsOf)
     const group = mailbox.groupOf(comment, roleOf)
     if (group.kind !== 'queued') throw new Error('fixture: comment must queue')
     const picked = mailbox.select(state, WORKER_A, { type: group.type }, roleOf)
@@ -372,35 +423,58 @@ describe('randomized scaled run — generic validity alongside the specifics (sp
     const clock = createClock()
     const log = createLog(clock)
     const workers = ['w-red', 'w-blue', 'w-green', 'w-gold', 'w-slate']
+    // A graded spread of unreliability, deliberately (task 083): reliable
+    // agents drain to empty, and two empty mailboxes coincide by definition —
+    // the earlier all-reliable cast ended with four empties failing §5
+    // against the fixture's own ground truth. Unreliability is baseline
+    // (spec §0), and here it also keeps final mailboxes populated and
+    // distinct.
+    const failRates = [0.6, 0.5, 0.3, 0, 0] as const
     const cast = createCast([
       { name: 'orch-1', role: 'sensei', behaviour: { kind: 'reliable' } },
-      { name: 'human-1', role: 'user', behaviour: { kind: 'reliable' } },
-      ...workers.map((name, i) => ({
-        name,
-        role: 'worker' as const,
-        behaviour: i === 0 ? ({ kind: 'failing', rate: 0.6 } as const) : ({ kind: 'reliable' } as const),
-      })),
+      { name: 'human-1', role: 'user', behaviour: { kind: 'failing', rate: 0.7 } },
+      ...workers.map((name, i) => {
+        const rate = failRates[i] ?? 0
+        return {
+          name,
+          role: 'worker' as const,
+          behaviour: rate > 0 ? ({ kind: 'failing', rate } as const) : ({ kind: 'reliable' } as const),
+        }
+      }),
     ])
     const runCtx: ResolutionContext = {
       orchestrator: 'orch-1',
       taskOwner: (id) => workers[Number(id) % workers.length],
     }
+    // The composed resolver — the REAL resolution bound to the run's context.
+    // This is the one place the suite crosses modules, deliberately.
+    const recipientsOf = (e: Parameters<ResolutionContract['resolve']>[0]) => resolutionImpl.resolve(e, runCtx)
 
     let state = mailbox.initial()
     for (let i = 0; i < 150; i++) {
       clock.advance(1_000 + rng.int(60_000))
       const roll = rng.next()
-      if (roll < 0.45) {
+      if (roll < 0.4) {
         const to = rng.pick([...workers, 'orch-1'])
         const from = rng.pick(['orch-1', 'human-1', ...workers].filter((n) => n !== to))
         const e = log.append('send', `agent-${to}`, { agent: to, from, text: `m${i}`, queued: true })
-        state = mailbox.fold(state, e, runCtx)
+        state = mailbox.fold(state, e, recipientsOf)
+      } else if (roll < 0.5) {
+        // Mail TO the human — the orchestrator answering a bridge user. This
+        // is what makes a user-role agent a RECIPIENT (task 083: without it
+        // the run was unsatisfiable — human-1 could only ever send, its
+        // mailbox was empty at every instant, and non-coincidence rightly
+        // rejected the fixture's own world). Also the run's only source of
+        // the blocking group.
+        const from = rng.pick(['orch-1', ...workers])
+        const e = log.append('send', 'agent-human-1', { agent: 'human-1', from, text: `a${i}`, queued: true })
+        state = mailbox.fold(state, e, recipientsOf)
       } else if (roll < 0.65) {
         const taskId = String(rng.int(8))
         const author = rng.pick(['orch-1', ...workers])
         const role = author === 'orch-1' ? ('sensei' as const) : ('worker' as const)
         const e = log.append('task-comment', `task-${taskId}`, { agent: author, role, text: `c${i}` })
-        state = mailbox.fold(state, e, runCtx)
+        state = mailbox.fold(state, e, recipientsOf)
       } else {
         // An agent acts on (some of) its mailbox through the REAL decision.
         const actor = rng.pick(cast)
@@ -441,8 +515,27 @@ describe('randomized scaled run — generic validity alongside the specifics (sp
       .sort()
     expect(implPending).toEqual(groundTruth)
 
-    // And per-agent answers are non-coincident (§5) — the P2-class detector.
-    const perAgent = new Map(cast.map((a) => [a.name, mailbox.mailboxOf(state, a.name).map((e) => e.id) as unknown[]]))
+    // The human was a RECIPIENT in this run — asserted against the
+    // RESOLUTION, not a data field (codex pass: a broken recipient path
+    // could otherwise still satisfy a shape check on the send events).
+    const eventsResolvingToHuman = log.events().filter((e) => recipientsOf(e).includes('human-1')).length
+    counted('events resolving to human-1', eventsResolvingToHuman)
+
+    // Per-agent answers are non-coincident (§5) — the P2-class detector.
+    // The comparison set is derived from GROUND TRUTH, never by filtering
+    // the implementation's own output (codex pass: filtering impl output
+    // could mask a wrongly-empty mailbox behind the floor). Every agent
+    // ground truth says holds mail must be non-empty in the implementation.
+    const truthHolders = [...new Set(result.pending.map((p) => p.recipient))]
+    counted('ground-truth non-empty final mailboxes', truthHolders.length, 3)
+    const perAgent = new Map(
+      truthHolders.map((name) => [name, mailbox.mailboxOf(state, name).map((e) => e.id) as unknown[]]),
+    )
+    for (const [name, ids] of perAgent) {
+      if (ids.length === 0) {
+        throw new Error(`ground truth holds mail for ${name}; the implementation's mailbox is empty`)
+      }
+    }
     assertNonCoincident(
       perAgent,
       mailbox.pendingPairs(state).map((p) => p.eventId),

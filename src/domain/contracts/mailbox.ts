@@ -24,9 +24,15 @@
  * ── THE FOLD, and history (P3, data compatibility) ──
  *
  * `fold` consumes the log one event at a time. Resolution is decided at
- * creation (spec §1), so the caller supplies the ResolutionContext CURRENT AS
- * OF THAT EVENT — folding a historical log means threading the context that
- * log prefix implies, not today's.
+ * creation (spec §1), and the fold receives it as an INJECTED RESOLVER
+ * (`recipientsOf`), composed by the caller from the declared resolution and
+ * the context current as of that event (ruled, task 083 — D2's finding).
+ * This module never imports the resolution implementation (§3) and never
+ * derives recipients itself (P2: that would be a second membership path —
+ * the louder prohibition). The composed resolver IS the declared
+ * resolution; a conformance suite may inject a scripted table instead,
+ * which is what makes its scripted cases independent of the resolution
+ * module's correctness.
  *
  * Ack events fold by their own record — tolerant of history, permanently:
  *   - a HISTORICAL ack (`{eventIds}`, no `caller`) clears EVERY pair of the
@@ -75,13 +81,18 @@
  * rest.
  */
 
-import type { ResolutionContext } from './resolution.ts'
 import type { AgentName, AgentRole, DeliveredVia, StoredEvent } from './vocabulary.ts'
 
 // ── Pairs and state ──────────────────────────────────────────────
 
 /** §2's unit: one recipient's claim on one event. */
 export type MailPair = { recipient: AgentName; eventId: number }
+
+/** The injected resolver: an event's recipients per the declared resolution,
+ *  with the context current as of that event already bound in. The shell
+ *  composes `(e) => resolution.resolve(e, ctxAtEvent)`; a test may inject a
+ *  scripted table. The fold's ONLY source of membership. */
+export type RecipientsOf = (event: StoredEvent) => readonly AgentName[]
 
 /** Opaque — constructed by `initial()`, evolved by `fold`, read through the
  *  contract's functions only. Its internals are the implementation's. */
@@ -183,10 +194,10 @@ export type Selection = {
 export type MailboxContract = {
   initial: () => MailboxState
 
-  /** Fold one event. `ctx` is the resolution context current AS OF this
-   *  event. Unknown kinds are history; ack events fold by their own record
+  /** Fold one event. `recipientsOf` is the injected resolver (see its type).
+   *  Unknown kinds are history; ack events fold by their own record
    *  (historical: all pairs of the ids; attributed: the caller's pairs). */
-  fold: (state: MailboxState, event: StoredEvent, ctx: ResolutionContext) => MailboxState
+  fold: (state: MailboxState, event: StoredEvent, recipientsOf: RecipientsOf) => MailboxState
 
   /** THE membership function (P2). One agent's pending events, log order. */
   mailboxOf: (state: MailboxState, agent: AgentName) => readonly StoredEvent[]
@@ -238,8 +249,15 @@ export type MailboxContract = {
     deliveredVia: (eventId: number) => DeliveredVia | undefined,
   ) => AckDecision
 
-  /** Idempotent answer: of the requested ids, how many have the CALLER's
-   *  pair cleared in `stateAfter`. Two racing ackers of one pair both read
-   *  success — which one did the clearing is a distinction nobody needs. */
+  /** Idempotent answer: of the requested ids, how many are NOT currently
+   *  held by the caller. Two racing ackers of one pair both read success —
+   *  which one did the clearing is a distinction nobody needs. DOCUMENTED
+   *  LIMIT (blessed, task 083): an id whose event has fully cleared — or
+   *  never existed — also counts, because the state is bounded by PENDING,
+   *  not by the log; distinguishing cleared-long-ago from never-held needs
+   *  the log, and attribution questions are answered there, not here. The
+   *  live path is unaffected: a non-recipient acking a PENDING event of
+   *  someone else's still reads 0 (its pair never existed while the entry
+   *  does), which is what the authorization test pins. */
   acknowledgedCount: (stateAfter: MailboxState, caller: AgentName, requestedIds: readonly number[]) => number
 }
