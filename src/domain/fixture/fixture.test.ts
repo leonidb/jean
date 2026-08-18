@@ -205,3 +205,18 @@ describe('§5 assertions', () => {
     counted('real loop', 5)
   })
 })
+
+describe('executor law (a) — the capture is the second implementation held to effect order', () => {
+  test('effects performed through the capture land in exactly the listed order', () => {
+    // The attention executor unit's law (a): one decision's effects are
+    // performed in the order listed. The capture demonstrates it here —
+    // always-running — since the attention suites are red-by-absence until
+    // D8/D9. Laws (b) and (c) are the shell's sequencing, held by the
+    // executor conformance suite that ships with the executors (R11).
+    const cap = createCapture()
+    cap.deliver('worker-a', 'you have mail')
+    cap.stamp('wake', [11, 12])
+    cap.emit('nudge', { pendingCount: 2 })
+    expect(cap.all().map((e) => e.kind)).toEqual(['deliver', 'stamp', 'emit'])
+  })
+})
