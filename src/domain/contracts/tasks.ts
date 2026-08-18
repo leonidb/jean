@@ -83,6 +83,47 @@
  * in-progress, not done → refusal → stuck); a caller that wants the task
  * parked again parks it explicitly, with a fresh blocker.
  *
+ * ── SUBSCRIPTIONS (A-SUB, ruled 2026-08-18 — the complete set) ──
+ *
+ * A task carries a SUBSCRIBER SET: the participant set spec §4's task row
+ * always meant ("everyone involved"). The three constraints, all structural:
+ * (1) TASKS NEVER HOLD MAIL — pairs are (agent, event) only; a subscription
+ * is a routing rule mapping the task's events into agent mailboxes; (2)
+ * subscribers receive task events in their ONE usual mailbox — subscription
+ * changes what lands, never where; (3) SUBSCRIBER ⊆ MAILBOX-HOLDERS,
+ * enforced at BOTH gates (codex pass, 092): `decideSubscribe` refuses a
+ * non-roster name, AND the fold drops a well-shaped subscription event
+ * naming one — the law survives a rogue or buggy writer, not just a polite
+ * caller. That double gate is what makes never-invent-an-acker hold by
+ * construction.
+ *
+ * THE AUTOMATIC SURFACE, complete and closed (ruled): creation → the owner
+ * (if roster) and the orchestrator; reassignment → the new owner. Written
+ * BY INFRA as explicit recorded events (`actor: 'infra'`) — subscriptions
+ * are always data, never implicit rules, and resolution consults only
+ * subscription state. NO automatic unsubscription anywhere: reassignment
+ * does not unsubscribe the previous owner; commenting does NOT
+ * auto-subscribe (too much noise by default — the explicit operation
+ * exists; playbooks make conventions). The governing tiebreaker for
+ * anything unruled: no automatic behaviour; an explicit option exists.
+ * Unsubscribe semantics are deliberately MINIMAL — the operation exists,
+ * the door stays open, nothing elaborate is designed through it.
+ *
+ * ONE RULE, TWO USES: `autoSubscriptionsFor` states the automatic surface
+ * once. Going FORWARD the shell appends its output after the triggering
+ * event; on REPLAY the fold applies the same derivation to old logs — which
+ * IS the migration: a log with no subscription events resolves exactly as
+ * today (owner + orchestrator), because the derivation reconstructs those
+ * subscriptions. Set semantics make the two paths idempotent on new logs
+ * (the derived and the explicitly-written subscription coincide).
+ *
+ * DOCUMENTED MIGRATION EDGE: subscriptions are per-NAME, so on an old log
+ * the CREATION-TIME orchestrator is the derived subscriber; a later seat
+ * handover does not move old subscriptions (today's predicate model follows
+ * the current seat). Rare in practice — one sensei per dojo — and the
+ * explicit subscribe operation is the remedy; recorded rather than
+ * designed around.
+ *
  * ── STALENESS (surfacing only) ──
  *
  * An `in-progress` task with no stream activity for the configured bound is
@@ -123,6 +164,8 @@ import type {
   TaskRevertedData,
   TaskStatus,
   TaskStatusData,
+  TaskSubscribedData,
+  TaskUnsubscribedData,
 } from './vocabulary.ts'
 
 export type { BlockedOn, TaskStatus }
@@ -198,17 +241,72 @@ export type RevertDecision =
   | { ok: true; from: TaskStatus; to: TaskStatus; data: TaskRevertedData }
   | { ok: false; refusal: { kind: 'unknown-task' } | { kind: 'nothing-to-revert' } }
 
+// ── Subscriptions (A-SUB) ────────────────────────────────────────
+
+export type SubscribeRefusal =
+  | { kind: 'unknown-task' }
+  /** Constraint 3, type-level: only mailbox-holders subscribe. */
+  | { kind: 'not-a-mailbox-holder'; name: string }
+  /** Refused so the shell never appends a no-op event. */
+  | { kind: 'already-subscribed' }
+
+export type UnsubscribeRefusal = { kind: 'unknown-task' } | { kind: 'not-subscribed' }
+
+export type SubscribeDecision = { ok: true; data: TaskSubscribedData } | { ok: false; refusal: SubscribeRefusal }
+
+export type UnsubscribeDecision = { ok: true; data: TaskUnsubscribedData } | { ok: false; refusal: UnsubscribeRefusal }
+
 // ── The contract ─────────────────────────────────────────────────
 
 /** `export const tasks: TasksContract` — src/domain/tasks/ (task D3). */
 export type TasksContract = {
   initial: () => TasksState
-  /** Fold one event: task kinds evolve the board and the status stacks;
-   *  legacy status names map; everything else is ignored. `isRosterMember`
-   *  is the injected roster fact (Q-1, ruled): consulted only by the
-   *  start-assigns-queue clause — a non-roster queue never becomes an
-   *  owner. */
-  fold: (state: TasksState, event: StoredEvent, isRosterMember: (name: AgentName) => boolean) => TasksState
+  /** Fold one event: task kinds evolve the board, the status stacks, and
+   *  (A-SUB) the subscription sets. `isRosterMember` is the injected roster
+   *  fact (Q-1): the start-assigns-queue clause and the automatic
+   *  owner-subscription both consult it. `orchestratorAt` is the seat
+   *  current AS OF the event (injected like every fold fact) — the
+   *  migration derivation subscribes it at creation; optional this one
+   *  round so the merged implementation stays assignable, REQUIRED once
+   *  the subscriber D-task lands (it may consolidate the two facts into
+   *  one object then). */
+  fold: (
+    state: TasksState,
+    event: StoredEvent,
+    isRosterMember: (name: AgentName) => boolean,
+    orchestratorAt?: AgentName,
+  ) => TasksState
+
+  // The four subscription members are OPTIONAL exactly one round — the
+  // member-level red-by-absence: the conformance suite asserts their
+  // presence (red against the pre-subscriber implementation, naming the
+  // D-side), and the subscriber D-task makes them required.
+  /** The task's subscriber set — THE definition of "involved" the shell
+   *  injects into resolution's context. Explicit subscriptions ∪ the
+   *  derivation, deduped; empty for unknown tasks. Indirectly-visible
+   *  state: nothing else returns it. */
+  subscribersOf?: (state: TasksState, taskId: string) => readonly AgentName[]
+
+  /** The automatic surface, stated ONCE (see the prose): the subscription
+   *  events infra must append after `event` (a task-created or a
+   *  task-updated that reassigns). Empty for everything else. The fold
+   *  applies the same rule on replay — that is the migration. */
+  autoSubscriptionsFor?: (
+    event: StoredEvent,
+    isRosterMember: (name: AgentName) => boolean,
+    orchestratorAt: AgentName | undefined,
+  ) => readonly { taskId: string; data: TaskSubscribedData }[]
+
+  decideSubscribe?: (
+    state: TasksState,
+    cmd: { taskId: string; agent: AgentName; actor: string },
+    isRosterMember: (name: AgentName) => boolean,
+  ) => SubscribeDecision
+
+  decideUnsubscribe?: (
+    state: TasksState,
+    cmd: { taskId: string; agent: AgentName; actor: string },
+  ) => UnsubscribeDecision
 
   all: (state: TasksState) => readonly Task[]
   taskOf: (state: TasksState, id: string) => Task | undefined

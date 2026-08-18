@@ -31,7 +31,7 @@ describe('streams', () => {
 
 describe('the queue-vs-adapter line: mailbox-holding, one question asked once', () => {
   test('a connected dojo agent queues — the mailbox is truth — for BOTH mailbox-holding roles', () => {
-    const d = routing.decideSend(cmd, { resolvedRole: 'worker', isDojoAgentEver: true })
+    const d = routing.decideSend(cmd, { liveRole: 'worker', isDojoAgentEver: true })
     expect(d.route).toBe('queue')
     if (d.route === 'queue') {
       expect(d.data.queued).toBe(true) // the admission flag, set here and only here
@@ -40,26 +40,42 @@ describe('the queue-vs-adapter line: mailbox-holding, one question asked once', 
     }
     const toSensei = routing.decideSend(
       { ...cmd, from: 'worker-a', to: 'orchestrator-o' },
-      { resolvedRole: 'sensei', isDojoAgentEver: true },
+      { liveRole: 'sensei', isDojoAgentEver: true },
     )
     expect(toSensei.route).toBe('queue')
+    // A LIVE mailbox-holder queues regardless of the record — the live
+    // session decides when present (codex pass, 092).
+    const liveButUnrecorded = routing.decideSend(cmd, { liveRole: 'worker', isDojoAgentEver: false })
+    expect(liveButUnrecorded.route).toBe('queue')
   })
 
   test('a DISCONNECTED dojo agent still queues — being away costs nothing, and the sender is never warned', () => {
-    const d = routing.decideSend(cmd, { resolvedRole: undefined, isDojoAgentEver: true })
+    const d = routing.decideSend(cmd, { liveRole: undefined, isDojoAgentEver: true })
     expect(d.route).toBe('queue')
     // The queue branch has no notice mechanism at all — structurally: the
     // variant carries none. This assertion exists to keep it that way.
     expect('undeliveredNotice' in d).toBe(false)
   })
 
+  test('THE PROVENANCE PIN (D6 hold): one record, two live states, two routes — the pair the conflated facts could not tell apart', () => {
+    // The defect: a dojo agent whose record also holds a user registration.
+    // CONNECTED as user → the live session is where the name is reachable →
+    // adapter. DISCONNECTED → the record decides → QUEUE (the old contract
+    // collapsed both into one tuple, and a merely-away mailbox-holder had
+    // its mail handed to a dead adapter).
+    const connectedAsUser = routing.decideSend(cmd, { liveRole: 'user', isDojoAgentEver: true })
+    expect(connectedAsUser.route).toBe('adapter')
+    const merelyAway = routing.decideSend(cmd, { liveRole: undefined, isDojoAgentEver: true })
+    expect(merelyAway.route).toBe('queue')
+  })
+
   test('a name connected as a NON-dojo role routes to the adapter even if its record says dojo (live precedence)', () => {
-    const d = routing.decideSend(cmd, { resolvedRole: 'user', isDojoAgentEver: true })
+    const d = routing.decideSend(cmd, { liveRole: 'user', isDojoAgentEver: true })
     expect(d.route).toBe('adapter')
   })
 
   test('an unknown name routes to the adapter, and a failed handover tells the sender — never a silent success', () => {
-    const d = routing.decideSend({ ...cmd, to: 'nobody-ever' }, { resolvedRole: undefined, isDojoAgentEver: false })
+    const d = routing.decideSend({ ...cmd, to: 'nobody-ever' }, { liveRole: undefined, isDojoAgentEver: false })
     expect(d.route).toBe('adapter')
     if (d.route === 'adapter') {
       const failed = d.data(false)
@@ -77,7 +93,7 @@ describe('enrichment and payload fidelity', () => {
   test('a peer sender is enriched from the receiver’s OWN record — frozen, not sender-supplied — on BOTH routes', () => {
     const d = routing.decideSend(
       { ...cmd, from: 'peer-dojo' },
-      { resolvedRole: 'worker', isDojoAgentEver: true, senderPeerDescription: 'the goals dojo' },
+      { liveRole: 'worker', isDojoAgentEver: true, senderPeerDescription: 'the demo dojo' },
     )
     expect(d.route).toBe('queue')
     if (d.route === 'queue') {
@@ -86,7 +102,7 @@ describe('enrichment and payload fidelity', () => {
     }
     const viaAdapter = routing.decideSend(
       { ...cmd, from: 'peer-dojo', to: 'bridge-user' },
-      { resolvedRole: undefined, isDojoAgentEver: false, senderPeerDescription: 'the goals dojo' },
+      { liveRole: undefined, isDojoAgentEver: false, senderPeerDescription: 'the demo dojo' },
     )
     expect(viaAdapter.route).toBe('adapter')
     if (viaAdapter.route === 'adapter') {
@@ -96,11 +112,11 @@ describe('enrichment and payload fidelity', () => {
   })
 
   test('attachments ride only when present; text and sender always do', () => {
-    const bare = routing.decideSend(cmd, { resolvedRole: 'worker', isDojoAgentEver: true })
+    const bare = routing.decideSend(cmd, { liveRole: 'worker', isDojoAgentEver: true })
     if (bare.route === 'queue') expect('attachments' in bare.data).toBe(false)
     const withFiles = routing.decideSend(
       { ...cmd, attachments: ['/tmp/a.png'] },
-      { resolvedRole: 'worker', isDojoAgentEver: true },
+      { liveRole: 'worker', isDojoAgentEver: true },
     )
     if (withFiles.route === 'queue') {
       expect(withFiles.data.attachments).toEqual(['/tmp/a.png'])

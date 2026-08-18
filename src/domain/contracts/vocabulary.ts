@@ -131,6 +131,23 @@ export type TaskCommentData = {
   text: string
 }
 
+/** ── The subscriber pair (A-SUB, ruled 2026-08-18) ── a subscription is a
+ *  ROUTING RULE recorded as data: it maps the task's events into the
+ *  subscriber's one usual mailbox. Both kinds are HISTORY (resolve to
+ *  nobody). `actor` records who caused it — `infra` at the two automatic
+ *  moments (creation, reassignment), an agent name for explicit acts. The
+ *  taskId is the stream's. */
+export type TaskSubscribedData = {
+  /** The subscriber — always a mailbox-holder (roster agent). */
+  agent: AgentName
+  actor: string
+}
+
+export type TaskUnsubscribedData = {
+  agent: AgentName
+  actor: string
+}
+
 export type ReplyData = {
   agent: AgentName
   text: string
@@ -355,6 +372,8 @@ export type KindDataMap = {
   'task-reverted': TaskRevertedData
   'task-updated': TaskUpdatedData
   'task-comment': TaskCommentData
+  'task-subscribed': TaskSubscribedData
+  'task-unsubscribed': TaskUnsubscribedData
   'task-reminder': TaskReminderData
   reply: ReplyData
   send: SendData

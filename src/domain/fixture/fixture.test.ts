@@ -119,7 +119,7 @@ describe('replay checker — ground truth per pair', () => {
     },
     authorOf: (event) => (event.type === 'send' ? (event.data as { from?: string }).from : undefined),
   }
-  const ctx = { orchestrator: 'sensei', roleOf: () => undefined, taskOwner: () => undefined }
+  const ctx = { orchestrator: 'sensei', subscribersOf: () => [], taskOwner: () => undefined }
 
   test('pairs accumulate per recipient and clear only their own', () => {
     const clock = createClock()

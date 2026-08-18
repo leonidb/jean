@@ -45,7 +45,11 @@ const HUMAN = 'human-h'
 
 const ctx: ResolutionContext = {
   orchestrator: ORCH,
-  taskOwner: (taskId) => (taskId === '101' ? WORKER_A : undefined),
+  // The subscriber sets — "involved", defined (A-SUB). Task 101 carries the
+  // automatic pair; task 202 carries a third, explicit subscriber, which is
+  // the case the pre-subscriber implementation cannot answer.
+  subscribersOf: (taskId) => (taskId === '101' ? [WORKER_A, ORCH] : taskId === '202' ? [WORKER_A, ORCH, WORKER_B] : []),
+  taskOwner: (taskId) => (taskId === '101' || taskId === '202' ? WORKER_A : undefined),
 }
 
 /** ctx for a dojo with no orchestrator on record — the between-boot state
@@ -137,10 +141,31 @@ describe('spec §4 — the task row: everyone involved, minus the author', () =>
     expect(recipients).toEqual([ORCH, WORKER_A].sort())
   })
 
+  test('A-SUB, the discriminating case: a THIRD SUBSCRIBER (neither owner nor orchestrator) receives the task event — "involved" is the subscriber set', () => {
+    // RED against the pre-subscriber implementation (which reads taskOwner);
+    // the subscriber D-side turns it green by consulting subscribersOf.
+    const log = build()
+    const e = log.append('task-comment', 'task-202', { agent: ORCH, role: 'sensei', text: 'update for the room' })
+    const recipients = [...resolution.resolve(e, ctx)].sort()
+    expect(recipients).toEqual([WORKER_A, WORKER_B].sort()) // both non-author subscribers; the author excluded
+  })
+
+  test('A-SUB: the subscriber kinds are history — a subscription event is a routing-rule change, not mail', () => {
+    const log = build()
+    const sub = log.append('task-subscribed', 'task-101', { agent: WORKER_B, actor: WORKER_B })
+    const unsub = log.append('task-unsubscribed', 'task-101', { agent: WORKER_B, actor: WORKER_B })
+    expect(resolution.resolve(sub, ctx)).toEqual([])
+    expect(resolution.resolve(unsub, ctx)).toEqual([])
+  })
+
   test('the orchestrator owning the task appears ONCE — one recipient is one pair, never two (079 report, case 1)', () => {
     const log = build()
     const e = log.append('task-comment', 'task-500', { agent: WORKER_B, role: 'worker', text: 'finding' })
-    const recipients = resolution.resolve(e, { orchestrator: ORCH, taskOwner: () => ORCH })
+    const recipients = resolution.resolve(e, {
+      orchestrator: ORCH,
+      subscribersOf: () => [ORCH],
+      taskOwner: () => ORCH,
+    })
     expect(recipients).toEqual([ORCH])
   })
 

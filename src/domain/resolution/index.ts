@@ -131,6 +131,10 @@ const RESOLUTIONS: Record<KnownKind, Resolver> = {
   'task-reverted': taskParties,
   'task-updated': taskParties,
   'task-comment': taskParties,
+  // The subscriber pair (A-SUB): routing-rule changes, not mail — the effect
+  // shows in future routing. Declared with the kinds, per §4's law.
+  'task-subscribed': nobody,
+  'task-unsubscribed': nobody,
 
   // Supervision and liveness
   'task-reminder': orchestratorOnly,

@@ -540,6 +540,12 @@ describe('randomized scaled run — generic validity alongside the specifics (sp
     ])
     const runCtx: ResolutionContext = {
       orchestrator: 'orch-1',
+      // Owner + orchestrator — identical ground truth before and after the
+      // subscriber D-side switches which field the implementation reads.
+      subscribersOf: (id) => {
+        const owner = workers[Number(id) % workers.length]
+        return owner ? [owner, 'orch-1'] : ['orch-1']
+      },
       taskOwner: (id) => workers[Number(id) % workers.length],
     }
     // The composed resolver — the REAL resolution bound to the run's context.

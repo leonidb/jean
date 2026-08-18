@@ -493,3 +493,121 @@ describe('queries — staleness, ids, activity attribution, availability', () =>
     expect(tasks.activeTaskOf(s, WORKER_A)?.id).toBe('001')
   })
 })
+
+describe('SUBSCRIPTIONS (A-SUB) — red against the pre-subscriber implementation, naming the D-side', () => {
+  const withSubs = () => {
+    const { log } = world()
+    log.append('task-created', 'task-001', { title: 't', description: '', queue: WORKER_A, actor: ORCH })
+    let s = tasks.initial()
+    for (const e of log.events()) s = tasks.fold(s, e, ROSTER, ORCH)
+    return { s, log }
+  }
+
+  test('the four members exist — the member-level red-by-absence naming the subscriber D-task', () => {
+    expect(typeof tasks.subscribersOf).toBe('function')
+    expect(typeof tasks.autoSubscriptionsFor).toBe('function')
+    expect(typeof tasks.decideSubscribe).toBe('function')
+    expect(typeof tasks.decideUnsubscribe).toBe('function')
+  })
+
+  test('MIGRATION: an old log with ZERO subscription events derives owner + orchestrator — resolves exactly as today', () => {
+    const { s } = withSubs()
+    const subs = [...(tasks.subscribersOf?.(s, '001') ?? [])].sort()
+    expect(subs).toEqual([ORCH, WORKER_A].sort())
+  })
+
+  test('the automatic surface, stated once: creation yields owner-if-roster + orchestrator; a non-roster queue yields orchestrator only', () => {
+    const { log } = world()
+    const created = log.append('task-created', 'task-002', {
+      title: 'x',
+      description: '',
+      queue: 'someday',
+      actor: ORCH,
+    })
+    const auto = tasks.autoSubscriptionsFor?.(created, ROSTER, ORCH) ?? []
+    expect(auto.map((a) => a.data.agent)).toEqual([ORCH]) // never invent an acker
+    expect(auto.every((a) => a.data.actor === 'infra')).toBe(true) // written BY infra, as data
+    const owned = log.append('task-created', 'task-003', { title: 'y', description: '', queue: WORKER_A, actor: ORCH })
+    const auto2 = (tasks.autoSubscriptionsFor?.(owned, ROSTER, ORCH) ?? []).map((a) => a.data.agent).sort()
+    expect(auto2).toEqual([ORCH, WORKER_A].sort())
+  })
+
+  test('reassignment subscribes the NEW owner and never unsubscribes the previous one', () => {
+    const { s, log } = withSubs()
+    const reassign = log.append('task-updated', 'task-001', { agent: 'worker-b', actor: ORCH })
+    const roster = (n: string) => n === WORKER_A || n === ORCH || n === 'worker-b'
+    const auto = (tasks.autoSubscriptionsFor?.(reassign, roster, ORCH) ?? []).map((a) => a.data.agent)
+    expect(auto).toEqual(['worker-b'])
+    const after = tasks.fold(s, reassign, roster, ORCH)
+    const subs = [...(tasks.subscribersOf?.(after, '001') ?? [])].sort()
+    expect(subs).toEqual([ORCH, WORKER_A, 'worker-b'].sort()) // the previous owner KEEPS its subscription
+  })
+
+  test('explicit subscribe: roster-only (constraint 3), unknown tasks refuse, duplicates refuse so no no-op event is appended', () => {
+    const { s, log } = withSubs()
+    const outsider = tasks.decideSubscribe?.(
+      s,
+      { taskId: '001', agent: 'not-on-roster', actor: 'not-on-roster' },
+      ROSTER,
+    )
+    expect(outsider?.ok).toBe(false)
+    if (outsider && !outsider.ok)
+      expect(outsider.refusal).toEqual({ kind: 'not-a-mailbox-holder', name: 'not-on-roster' })
+    const missing = tasks.decideSubscribe?.(s, { taskId: '404', agent: WORKER_A, actor: WORKER_A }, ROSTER)
+    expect(missing?.ok).toBe(false)
+    const dup = tasks.decideSubscribe?.(s, { taskId: '001', agent: WORKER_A, actor: WORKER_A }, ROSTER)
+    expect(dup?.ok).toBe(false)
+    if (dup && !dup.ok) expect(dup.refusal).toEqual({ kind: 'already-subscribed' })
+    // A legitimate third subscriber decides ok and folds in.
+    const roster3 = (n: string) => ROSTER(n) || n === 'worker-b'
+    const third = tasks.decideSubscribe?.(s, { taskId: '001', agent: 'worker-b', actor: 'worker-b' }, roster3)
+    expect(third?.ok).toBe(true)
+    if (third?.ok) {
+      const after = tasks.fold(s, log.append('task-subscribed', 'task-001', third.data), roster3, ORCH)
+      expect([...(tasks.subscribersOf?.(after, '001') ?? [])].sort()).toEqual([ORCH, WORKER_A, 'worker-b'].sort())
+    }
+  })
+
+  test('explicit unsubscribe: a subscriber may drop out; a non-subscriber refuses; the set reflects it', () => {
+    const { s, log } = withSubs()
+    const drop = tasks.decideUnsubscribe?.(s, { taskId: '001', agent: WORKER_A, actor: WORKER_A })
+    expect(drop?.ok).toBe(true)
+    if (drop?.ok) {
+      const after = tasks.fold(s, log.append('task-unsubscribed', 'task-001', drop.data), ROSTER, ORCH)
+      expect(tasks.subscribersOf?.(after, '001')).toEqual([ORCH])
+    }
+    const stranger = tasks.decideUnsubscribe?.(s, { taskId: '001', agent: 'worker-b', actor: 'worker-b' })
+    expect(stranger?.ok).toBe(false)
+    if (stranger && !stranger.ok) expect(stranger.refusal).toEqual({ kind: 'not-subscribed' })
+  })
+
+  test('replay tolerance: duplicate subscription events dedupe (a set, not a list); malformed ones fold to nothing', () => {
+    const { s, log } = withSubs()
+    let after = tasks.fold(
+      s,
+      log.appendRaw('task-subscribed', 'task-001', { agent: WORKER_A, actor: 'infra' }),
+      ROSTER,
+      ORCH,
+    )
+    after = tasks.fold(
+      after,
+      log.appendRaw('task-subscribed', 'task-001', { agent: WORKER_A, actor: 'infra' }),
+      ROSTER,
+      ORCH,
+    )
+    expect([...(tasks.subscribersOf?.(after, '001') ?? [])].sort()).toEqual([ORCH, WORKER_A].sort())
+    const mangled = tasks.fold(after, log.appendRaw('task-subscribed', 'task-001', { agent: 42 }), ROSTER, ORCH)
+    expect([...(tasks.subscribersOf?.(mangled, '001') ?? [])].sort()).toEqual([ORCH, WORKER_A].sort())
+  })
+
+  test('CONSTRAINT 3 AT THE FOLD: a WELL-SHAPED subscription event naming a non-roster agent folds to nothing (codex pass, 092)', () => {
+    // The decision gate refuses polite callers; this gate stops a rogue or
+    // buggy WRITER — without it, a valid-looking event would mint a
+    // subscriber with no mailbox, and never-invent-an-acker would hold only
+    // by convention.
+    const { s, log } = withSubs()
+    const rogue = log.appendRaw('task-subscribed', 'task-001', { agent: 'not-on-roster', actor: 'infra' })
+    const after = tasks.fold(s, rogue, ROSTER, ORCH)
+    expect([...(tasks.subscribersOf?.(after, '001') ?? [])].sort()).toEqual([ORCH, WORKER_A].sort())
+  })
+})

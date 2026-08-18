@@ -16,8 +16,18 @@
  *   reply from a human (user role)            → orchestrator
  *   task created / status / comment / etc.    → everyone involved with the
  *                                               task, minus the author —
- *                                               today: the task's agent and
- *                                               the orchestrator
+ *                                               and "involved" is DEFINED as
+ *                                               the task's SUBSCRIBERS
+ *                                               (A-SUB, ruled 2026-08-18;
+ *                                               authorial intent: §4's row
+ *                                               was written meaning a
+ *                                               participant set — this is
+ *                                               the row's meaning getting
+ *                                               its mechanism, not a new
+ *                                               idea layered on)
+ *   task-subscribed / task-unsubscribed       → nobody — history (routing-
+ *                                               rule changes; the effect
+ *                                               shows in future routing)
  *   task-reminder                             → orchestrator
  *   trigger-fired targeting X                 → X (agent triggers; headless
  *                                               runs spawn, nothing to mail)
@@ -56,9 +66,21 @@ import type { AgentName, StoredEvent } from './vocabulary.ts'
  * then, in its own contract.
  */
 export type ResolutionContext = {
-  /** The orchestrator's name, if the dojo has one registered in its record. */
+  /** The orchestrator's name, if the dojo has one registered in its record.
+   *  Consumed by the orchestrator-addressed kinds (reply, reminders,
+   *  supervision) — NOT by the task row, which reads subscriptions only
+   *  (ruled: no hardcoded orchestrator rule survives in the table). */
   orchestrator: AgentName | undefined
-  /** The task's current agent, from the board fold. */
+  /** The task's subscribers, from the tasks fold — the DEFINITION of
+   *  "involved" for the task row (A-SUB). Includes the automatic
+   *  subscriptions (creation → roster owner + orchestrator; reassignment →
+   *  new owner) whether written explicitly or derived from an old log by
+   *  the migration reading. */
+  subscribersOf: (taskId: string) => readonly AgentName[]
+  /** @deprecated The pre-subscriber owner lookup. The task row no longer
+   *  consults it; REMOVED by the subscriber D-task together with the
+   *  implementation's switch to `subscribersOf`. Kept this one round only
+   *  so the merged implementation stays type-assignable between merges. */
   taskOwner: (taskId: string) => AgentName | undefined
 }
 
