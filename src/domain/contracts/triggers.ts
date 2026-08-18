@@ -30,6 +30,20 @@
  * come from the caller: the old code minted `crypto.randomUUID()` inline,
  * and nondeterminism belongs to the shell (design §5).
  *
+ * ── RULED AT 090 (from D5's report) ──
+ *
+ * DUPLICATE `trigger-created` for an existing id: FIRST WINS — the same
+ * ruling as tasks (086), confirmed for triggers: the old fold appended a
+ * second row, a map overwrite silently replaces the original; both are
+ * halves of one mistake, and replay never doubles or rewrites. LEGACY
+ * created events carrying BOTH schedules: `cron` wins — measured, not
+ * argued: at-wins turns a repeating job into one silent fire (status
+ * `fired` after its first run, forever), and cron-first is also what the
+ * old reducer did. EMPTY-STRING schedule and model fields normalize to
+ * ABSENT once, at entry — the old handler tested truthiness throughout,
+ * and split readings (exclusivity seeing one schedule, validity seeing
+ * two) were the actual hazard.
+ *
  * ── FIRING AND THE FOLD ──
  *
  * Firing appends a `trigger-fired` event (resolution already pinned at D1:

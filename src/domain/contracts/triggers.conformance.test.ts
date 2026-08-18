@@ -178,6 +178,109 @@ describe('the fold — firing, one-shot terminality, history tolerance', () => {
   })
 })
 
+describe('the malformed-input cluster (090 pins, from D5’s report — severity order)', () => {
+  test('#1 THE CATCH-UP BOUNDARY: fired exactly AT the last scheduled instant → no catch-up (a <= here double-fires every close restart)', () => {
+    const { state } = stateWith(base)
+    const t = triggers.triggerOf(state, 'tr-one')
+    if (!t) throw new Error('fixture')
+    const scheduledInstant = NOW - 3_600_000
+    const prevRun = (_c: string, _n: number) => scheduledInstant
+    const firedExactlyThen = { ...t, lastFiredAt: new Date(scheduledInstant).toISOString() }
+    expect(triggers.shouldCatchUp(firedExactlyThen, NOW, prevRun)).toBe(false)
+    const firedJustBefore = { ...t, lastFiredAt: new Date(scheduledInstant - 1).toISOString() }
+    expect(triggers.shouldCatchUp(firedJustBefore, NOW, prevRun)).toBe(true)
+  })
+
+  test('#2 update field TYPES refuse — a non-string prompt/agent must never reach the log, and the type check precedes status/metadata', () => {
+    const { state } = stateWith(base)
+    const badPrompt = triggers.decideUpdate(state, { id: 'tr-one', fields: { prompt: { note: 'object' } } })
+    expect(badPrompt.ok).toBe(false)
+    const badAgent = triggers.decideUpdate(state, { id: 'tr-one', fields: { agent: 42 } })
+    expect(badAgent.ok).toBe(false)
+    // Order: with a bad prompt AND a bad status, the field-type refusal wins.
+    const both = triggers.decideUpdate(state, { id: 'tr-one', fields: { prompt: 42, status: 'fired' } })
+    expect(both.ok).toBe(false)
+    if (!both.ok) expect(both.refusal.kind).not.toBe('invalid-status')
+  })
+
+  test('#3 RULED: a legacy created event carrying BOTH schedules keeps cron — a repeating job must not become one silent fire', () => {
+    const log = createLog(createClock())
+    let state = triggers.initial()
+    state = triggers.fold(
+      state,
+      log.appendRaw('trigger-created', 'triggers', {
+        id: 'tr-legacy',
+        cron: '0 9 * * *',
+        at: new Date(NOW - 1_000).toISOString(),
+        agent: 'worker-a',
+        prompt: 'p',
+        actor: 'o',
+      }),
+    )
+    const t = triggers.triggerOf(state, 'tr-legacy')
+    expect(t?.cron).toBe('0 9 * * *')
+    expect(t?.at).toBeUndefined()
+    // …and after a fire it stays active (the at-wins defect is one silent fire).
+    state = triggers.fold(
+      state,
+      log.appendRaw('trigger-fired', 'triggers', { triggerId: 'tr-legacy', agent: 'worker-a', prompt: 'p' }),
+    )
+    expect(triggers.triggerOf(state, 'tr-legacy')?.status).toBe('active')
+  })
+
+  test('#4 empty-string schedule fields are ABSENT, normalized once: cron:"" with a valid at creates an at-trigger', () => {
+    const { state } = stateWith()
+    const d = triggers.decideCreate(
+      state,
+      {
+        id: 'tr-empty',
+        cron: '',
+        at: new Date(NOW + 60_000).toISOString(),
+        agent: 'worker-a',
+        prompt: 'p',
+        actor: 'o',
+      },
+      FACTS,
+    )
+    expect(d.ok).toBe(true)
+    if (d.ok) {
+      expect(d.data.at).toBeDefined()
+      expect(d.data.cron || undefined).toBeUndefined()
+    }
+  })
+
+  test('#5 RULED: a duplicate created event for an existing id — FIRST WINS, same law as tasks (086)', () => {
+    const { state, log } = stateWith(base)
+    const s = triggers.fold(
+      state,
+      log.appendRaw('trigger-created', 'triggers', {
+        id: 'tr-one',
+        cron: '0 9 * * *',
+        agent: 'impostor',
+        prompt: 'replaced?',
+        actor: 'x',
+      }),
+    )
+    const t = triggers.triggerOf(s, 'tr-one')
+    expect(t?.prompt).toBe('daily sweep') // the original, untouched
+    expect(t?.agent).toBe('worker-a')
+  })
+
+  test('#6 deep immutability: mutating a returned trigger (nested metadata included) never reaches the registry', () => {
+    const { state } = stateWith({ ...base, id: 'tr-meta', metadata: { note: 'original' } })
+    const t = triggers.triggerOf(state, 'tr-meta')
+    if (!t) throw new Error('fixture')
+    // Frozen (throws) or copied (write lands on a copy) are both compliant;
+    // what may never happen is the registry changing.
+    try {
+      ;(t.metadata as Record<string, unknown>).note = 'mutated'
+    } catch {
+      // frozen — fine
+    }
+    expect((triggers.triggerOf(state, 'tr-meta')?.metadata as Record<string, unknown>)?.note).toBe('original')
+  })
+})
+
 describe('catch-up — the startup policy, cron arithmetic injected', () => {
   const prevRun = (_cron: string, now: number) => now - 3_600_000 // an hour ago
 
