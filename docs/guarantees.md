@@ -49,6 +49,11 @@ bound.
   Acknowledgements, announcements, idle transitions, and an agent's own writes
   are all history. History is not a second category of thing; it is the empty
   case of the one rule.
+- **Name and role** (ruled 2026-08-18) — an agent's **name** is its identity:
+  unique in the dojo's roster, carried on its events, what every lookup keys
+  on. A **role** (orchestrator, worker, human, peer) is a shared category,
+  never an identity: several agents may hold one role, and no rule may assume
+  one agent per role.
 - **Observer** — any agent reading an event it is not a recipient of, through a
   read surface. Reading confers nothing (P5), so observation is harmless by
   construction.

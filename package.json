@@ -13,6 +13,7 @@
     "status": "bun run src/cli/jean.ts status",
     "test": "bun test src/es src/infra src/channel src/cli scripts",
     "test:scenarios": "bun test src/scenarios",
+    "test:domain": "bun test src/domain",
     "test:all": "bun test",
     "lint": "biome check src/",
     "format": "biome check --write src/",
