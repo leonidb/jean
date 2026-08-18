@@ -327,7 +327,7 @@ const ENGAGED: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['in-progress', 'wa
 
 // ── Decisions ────────────────────────────────────────────────────
 
-const decideStatus = (state: TasksState, cmd: StatusCommand, _now: number): StatusDecision => {
+const decideStatus = (state: TasksState, cmd: StatusCommand): StatusDecision => {
   const entry = board(state).get(cmd.taskId)
   if (entry === undefined) return { ok: false, refusal: { kind: 'unknown-task' } }
   const from = entry.task.status
