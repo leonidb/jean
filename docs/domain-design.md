@@ -3,11 +3,10 @@
 **Task 075. Written as a design, and approved before any of it was built.**
 Inputs: the guarantees spec (`docs/guarantees.md`, the behavioural
 contract this layer must serve), task 073's audit (the inventory of judgement
-stranded in the adapter), the 31 spec reds on `jean/builder-064-spec` (the
-semantic instrument), and the 11 pins on `jean/builder-074` (the structural
-instrument). The 073 rulings are folded in as constraints: core never returns
-JSON; connection events are domain facts; decoupling is prioritized ahead of
-repairing the reds.
+stranded in the adapter), and the 073 rulings folded in as constraints: core
+never returns JSON; connection events are domain facts. Ruled 2026-08-18:
+the build this design feeds is a REWRITE (§9) — the old system, its tests,
+and the instrument suites built against it go with it.
 
 ---
 
@@ -83,7 +82,8 @@ src/domain/
 
 Contract files carry prose as well as types: where the type system cannot
 state an invariant (a round-trip law, an ordering), the contract says so **and
-names what does enforce it** — the conformance suite, a weld, a fixture rule.
+names what does enforce it** — the conformance suite, an executor law, a
+fixture rule.
 A contract that admits its own limits is load-bearing; one that implies
 enforcement it doesn't have is comment-versus-code drift waiting to be found
 (adopted from a field review).
@@ -135,7 +135,10 @@ compiler checks both. The guard is the existing mechanism generalized:
 - `liveness.ts` → `domain/agents`. `retrieval.ts` ranking → `domain/knowledge`;
   `retrieval-corpus.ts` splits (ranking input types are domain; the filesystem
   walk that builds the corpus is adapter).
-- The `target/` shim directory retires with the migration it served.
+- `src/infra/target/` goes with the old system. It was itself an earlier
+  fresh-location attempt that stopped at signatures (§9 says what is
+  different this time), and it was cut against a different transition's
+  shape. Nothing builds on it.
 - `src/infra/core/` as a name retires. **The layer is `src/domain/`; the shell
   keeps `src/infra/`.** "Core" was earned structurally; "domain" is the honest
   claim this design makes checkable.
@@ -214,9 +217,8 @@ context → call domain → execute effects → serialize.**
 - **Call**: one domain function. The handler makes no decision.
 - **Execute**: the shell performs the returned effects — append, deliver,
   stamp, discharge — **in the order the decision lists them**, as an explicit
-  law of the executor's unit contract (§6), not an adjacency convention. The
-  074 welds pin today's adjacency form and retire, each with a note, as
-  §11's dissolutions land.
+  law of the executor's unit contract (§6), stated and conformance-tested
+  from birth. The new shell never has the old one's adjacency welds (§11).
 - **Serialize**: rename-only `(DomainResult) → body`. A serializer that reads
   anything but its argument is the 059 shape, and in a file where nothing else
   reads state it is visible on sight. JSON exists only in this step. Wire and
@@ -294,14 +296,13 @@ capabilities with no invariants *between* them — clock, id factory, log. **The
 moment members must agree with each other, the contract is a unit**: it states
 the agreement, so a suite can test it as one thing. By that test,
 `NotifyExecutor` is already a unit wearing a bag's clothes — `deliver` and
-`stamp` are not independent (you stamp what a deliver carried), and the 074
-welds are exactly "if you do A, B must match" pair-properties spread across
-bag members, which is why behaviour alone could never pin them. The executor
-contracts in `contracts/` are therefore units: the order and agreement laws
-are stated in the contract and held by its conformance suite where behaviour
-*can* see them. The source welds hold today's adjacency form for the residue
-behaviour cannot see (the microtask-sized breaks 074 measured) — and retire
-as §11's dissolutions remove the adjacency itself.
+`stamp` are not independent (you stamp what a deliver carried), and the old
+shell's order welds were exactly "if you do A, B must match" pair-properties
+spread across bag members — which is why behaviour alone could never pin
+them there. The executor contracts in `contracts/` are therefore units: the
+order and agreement laws are stated in the contract and held by its
+conformance suite from birth, where behaviour *can* see them (§11 explains
+why the new shell has no welds to inherit).
 
 Two more review rules adopted as standing: **a shape earns its keep only if a
 caller uses it as designed — establish that by reading the callers**, and
@@ -339,7 +340,8 @@ someone adds later) that no single-purpose test was written to catch (§11).
   including the failing-at-a-rate role — an event log, a deterministic clock,
   capturing executors. Non-coincidence asserted, anti-vacuity asserted.
   Mailbox and attention are tested *through the fixture* against the spec's
-  requirements; the 064 suite is the seed and the test bed.
+  requirements. Written fresh from the spec — not seeded from any prior
+  suite (§8).
 - **One conformance suite per contract, N implementations.** The test double
   is not a mock — it is a **second real implementation** held to the same
   contract by the same suite (a pattern `es/` already half-has:
@@ -352,116 +354,96 @@ someone adds later) that no single-purpose test was written to catch (§11).
   functions — including the 059 guard, which becomes a value test. Listener
   adapters are the easy case (§5): effects in, emissions asserted.
 - **What genuinely needs a live service, complete list**: the WS upgrade path,
-  Bun's routing, the reconnect announce, and the behavioural halves of the 074
-  pins (deliberately through the real server — that is their design). All of
-  it is testing Bun and the welds, not Jean's decisions — and the weld halves
-  retire as §11's dissolutions land. Everything else runs
+  Bun's routing, the reconnect announce — plus the sanctioned end-to-end
+  suite (§9), which runs against the live new server by design rather than by
+  necessity. The necessity list is testing Bun, not Jean's decisions.
+  Everything else runs
   without a service — which is the requirement, met rather than approximated.
 
 ## 8. The 870 existing tests
 
-**They are explicitly not a constraint** (ruled, 2026-08-18): the new modules
-are not obliged to keep the old suite satisfied, and each module gets its
-contract and its tests written fresh. That dissolves the ballast problem —
-a test pinning the current structure never gets a vote on the new one.
+**They go with the old system** (ruled, 2026-08-18). They are the previous
+implementation's tests — not a constraint on the new modules, not ballast to
+retire carefully, and **not a source to mine**. An earlier version of this
+section proposed mining them for the rulings they pin; that was considered
+and ruled against: being anchored on old and accidental decisions is a
+larger risk than forgetting something useful in there.
+The asymmetry is the reason: a behaviour that genuinely matters announces
+itself the moment something breaks, and is then decided deliberately; an
+anchored accidental decision never announces itself and quietly shapes
+everything downstream. Losing something useful is a risk accepted
+knowingly.
 
-It leaves one real danger, and naming it is this section's job: **a large
-share of those tests are where Leonid's rulings live.** H7's "the Stop hook is
-not activity," the loud-400 grammar, idempotent ack, the role-precedence
-order, S1's no-double-telling — dozens of decided behaviours are pinned
-nowhere else. A fresh build that ignores the old suite can silently lose a
-ruling and every test would be green.
+Where behaviour comes from, refined (ruled 2026-08-18): the spec
+(`docs/guarantees.md` — the attention protocol) and this design (structure)
+are the authorities, **and where they speak, no old-system behaviour drags
+in.** But they do not define everything: task lifecycle, triggers, routing,
+knowledge, board views, playbooks are barely touched by the spec, and there
+**the old code is the requirements source** — read as extraction, not
+adoption: deliberate behaviour is extracted and written down as a
+requirement in the module's contract; accidents are left behind; and where
+the two cannot be told apart, that is a question for the project owner — flagged, never
+silently carried or silently dropped. The amended Events API canon
+(requirement-shaped, since retired) was a further *input* on task behaviour — not a
+third authority; where it collided with the spec, the spec won and the
+collision was reported. The old *tests* remain out of scope as a source in
+all cases.
 
-So the old suite's role changes from constraint to **rulings ledger**: stage 0
-mines each behavioural test for the ruling it pins, and the ruling — not the
-test — goes into the owning module's SPEC.md. A module's fresh tests then
-assert its spec, and the old test retires when its module's surface cuts over.
-Classification for the mining pass: behavioural-against-the-contract (ruling
-extracted, test retired at cutover), behavioural-against-the-old-model
-(superseded by the spec — retired with its semantics, the 064 suite is the
-replacement), structural pins of the old layout (nothing to mine; deleted).
-Exact counts are stage 0's deliverable, not this document's guess.
+## 9. The build — a rewrite, in parallel, with one switch
 
-## 9. Combined or separate — the answer
+**Ruled 2026-08-18: this is a REWRITE, not a migration.** (An earlier version
+of this section was written in migration vocabulary — cutover, freeze, named
+red sets flipping per stage — while the rewrite decision was still soft. It
+caused real drift downstream and is replaced whole.) The old system is being
+replaced, not carried forward. What that excludes, explicitly:
 
-**Recommendation: one plan, staged, with the heart born on the spec's model.
-Neither "all separate" nor "one enormous change."**
+- **No tripwire** proving the old behaviour "did not move." The old behaviour
+  is not the reference — the spec and this design are.
+- **No freeze** on the old path: nobody is adding to it, so there is no rule
+  to police.
+- **No staged cutover** with per-stage red flips, and no teardown choreography
+  of the old tests. **The old system's tests go with the old system** (§8).
+- **No mining** of old code or old tests for unrecorded behaviour (ruled —
+  §8 records the reasoning).
 
-Reasoning. The attention rewrite changes the domain model itself — pairs,
-declared resolutions, pending-as-definition. The modules those changes live in
-(mailbox, attention) are the heart of the layer. Building them **separately**
-means building the predicate model into new modules and then rebuilding them
-on pairs — the layer's hardest parts done twice, with the second pass churning
-the first pass's tests. Building **everything combined at once** is one
-enormous change with two failure sources. But the failure sources are exactly
-what the two instruments discriminate: the 31 reds detect semantic movement,
-the 11 pins (weld + behavioural halves) detect structural breakage. So stages
-can be single-purpose and independently verifiable:
+**What survives from the earlier recommendation: the parallel build.**
+`src/domain/` is built fresh — contracts first, each module with a
+conformance suite and an implementation — while the old system keeps serving,
+untouched. A new thin adapter (§5's two legs) is then built on the domain, an
+end-to-end suite is written from the spec, and the system switches **once**.
 
-- **Stages that move no behaviour** (builds, and cutovers of families the
-  spec doesn't touch — the majority, honouring the ruled priority):
-  acceptance = the live suite unchanged, **all 31 reds red failing
-  identically**, all pins green. A red flipping is a stop signal.
-- **Semantic cutovers** (the deliberate spec repairs): acceptance = **the
-  named red set flips green, no other red moves**, pins green, plus the
-  declared test retirements from §8's ledger.
+**The one thing carried is the log.** Old code goes; old events remain. Every
+dojo's state *is* its event log, so the vocabulary module must fold the
+existing event shapes — **data compatibility is a requirement precisely where
+code compatibility is none.**
 
-**In place, or in parallel?** (raised 2026-08-18, evaluated here.) Two ways
-to execute the staging:
+**Reading and satisfying are separated.** For each module, the contract and
+its conformance suite are authored from the spec and this design by one hand
+(architect), and the implementation by another (builder), with codex review
+on both. With the old tests gone, this separation is what keeps an
+implementer's misreading of a requirement from grading itself.
 
-- **In place** — transform `server.ts` and `core/` stepwise, each step keeping
-  the old suite green. Its cost is now visible as three things: every step
-  renegotiates old tests (the ballast tax, paid per step); the mechanical work
-  is transforming a thousand-line closure, the riskiest kind of edit in the
-  tree; and the contracts/implementations separation (ruled) would be
-  retrofitted rather than the starting shape.
-- **In parallel** — build `src/domain/` as a clean package: contracts first,
-  then each module fresh with its SPEC.md and its own tests, the old code
-  untouched while modules grow; then cut the shell over surface family by
-  surface family, and delete. The old suite stays green on the old path until
-  each family's cutover retires its tests per the §8 ledger. The risk is two
-  systems in the tree — bounded by three rules: build stages are short and
-  module-sized; **once a module's contract lands, no new behaviour enters the
-  old path for that module** (the freeze that prevents drift); and a teardown
-  stage deletes the old path rather than leaving it to rot.
+**Why this fresh-location attempt ends differently than `target/`.**
+`src/infra/target/` (tasks 043/044) was already a fresh-location attempt, and
+it stopped exactly at signatures: types with no bodies, no conformance
+suites, no consumers, no dispatch plan — a destination with no road, cut
+against a different transition's shape besides. It goes with the old system.
+The difference here is the unit of progress: **a module exists only as
+contract + conformance suite + dispatched implementation together** — never
+as a signature awaiting a body — and the adapter, the end-to-end suite, and
+the switch are tasks in the same plan as the modules they depend on.
 
-**Recommendation: in parallel.** It is the ruled contracts-first structure as
-the starting shape rather than the end state; fresh module tests beat
-transformed ones; the highest-risk mechanical work (closure surgery)
-disappears almost entirely; and §8's ruling makes it licit. The instruments
-keep their roles: during build stages the 31 reds sit unchanged on the live
-wiring (nothing moved); each cutover stage is where a named red set flips —
-or none, for families the spec doesn't touch — and the 11 pins must hold
-through every cutover.
+**The switch.** One switch, not nine. The `jean infra` entrypoint moves to
+the new server when: every module's conformance suite is green; the
+end-to-end suite — written from the spec, multi-agent, against the live new
+server — is green; and a shakedown on a real dojo has run. **Fallback**: the
+entrypoint reverts to the old server, which still reads the same log. **The
+one-way door to watch**: events the new system writes during shakedown that
+the old fold cannot read — enumerated per kind before the switch, so the
+fallback window's cost is known rather than discovered.
 
-**The stages:**
-
-| # | Stage | Kind | Instrument acceptance |
-|---|---|---|---|
-| 0 | Rulings ledger mined from the old suite (§8); per-module SPEC.md seeded; pins already landed (074) | prep | ledger reviewed; baseline recorded |
-| 1 | `contracts/` — vocabulary, resolution, all nine module contracts; the spec-§5 fixture built | build | compiles; fixture green on resolution; reds untouched |
-| 2 | Mailbox built fresh on pairs (per-pair pending, one membership function, `caller` in the ack seam) | build | module suite green incl. the ported core-half 064 assertions; live reds untouched |
-| 3 | Tasks, agents, triggers, routing, knowledge built fresh against their ledgers | build | module suites green; live reds untouched |
-| 4 | Attention rebuilt on the spec's liveness block over new mailbox/agents | build | module suite green; live reds untouched |
-| 5 | Cutover: mailbox surfaces (`/events*`, ack, inbox header) onto the new modules | **semantic cutover** | flips the named P1/P2/P4/P5/P6 + row-1/2/3/5 reds; no other red moves; pins green; family tests retired per ledger |
-| 6 | Cutover: tasks, triggers, routing, knowledge surfaces | cutover | reds unchanged; pins green; family tests retired |
-| 7 | Cutover: attention timers + outbound listener adapters on effects | **semantic cutover** | flips rows 7/8 + liveness reds; pins green |
-| 8 | Teardown: old `core/`, `target/`, `reducers.ts` remnants deleted; boundary tests generalized to §3's table; 059 guard socketless | teardown | no dual path remains; boundary suite green |
-
-Order rationale: contracts before any module because they are the ruled
-starting shape; mailbox before attention because resolution and pairs are
-attention's ground truth; the mailbox cutover carries authorization and
-attribution with it because the seam exists from birth — splitting them would
-be re-staging the old model on purpose.
-
-**What would change my mind.** If a freeze on the old path is intolerable —
-active feature work needing to land in exactly the surfaces mid-build — the
-parallel plan forks the work and in-place staging wins for those families.
-If a cutover family proves too coarse to flip at once (stage 5 is the
-candidate), it splits by surface, at the price of temporary shims between old
-and new membership. And if Leonid wants attention semantics live urgently,
-stages 2/5 compress to mailbox-only and attention runs first inside today's
-structure — knowingly paying the re-cut. Plan adjustments, not design changes.
+Task sequencing lived in a build tracker that turned this section into
+dispatchable tasks; it is retired now that the build is done.
 
 ## 10. Scope
 
@@ -503,36 +485,29 @@ this sprawls; this is the stated one.
   works because both paths see the *same* traffic — a divergence only one
   implementation can reach is the adapter-specific-limit class and needs its
   targeted test.
-- **The order welds are not permanent — they are symptoms, and each
-  dissolves** (ruled, 2026-08-18; the earlier draft claimed they could never
-  move into the domain, and that fatalism was rejected — rightly). **A weld is
-  an implicit ordering convention standing in for a missing store guarantee**:
-  both of ours exist because the shell reads a separate mutable structure *at
-  write time*, so two calls must stay adjacent. Worked through:
-  - **Ledger-take-then-append** dissolves entirely. The take exists because
-    the ledger is consulted during the write. When the domain's decision
-    carries the delivery mark *as data* — the ledger becoming state folded
-    from the log like everything else, not a side-structure mutated mid-write
-    — the shell performs **one** append and there is no order to preserve.
-    The first-in-log reading rule already arbitrates racing ackers, so a
+- **The new shell inherits no order welds** (ruled, 2026-08-18; an earlier
+  draft claimed the old shell's welds could never move into the domain, and
+  that fatalism was rejected — rightly). **A weld is an implicit ordering
+  convention standing in for a missing store guarantee**: the old shell had
+  two because it read a separate mutable structure *at write time*, so two
+  calls had to stay adjacent, enforced by a comment. The new design removes
+  the cause rather than honouring the symptom:
+  - **Delivery evidence travels as decision data.** The delivery mark is part
+    of what the domain decides, folded from the log like all other state —
+    never a side-structure consulted mid-write. One append; no order to
+    preserve. The first-in-log reading rule arbitrates racing ackers, so a
     second append carrying a duplicate mark changes no answer.
-  - **Announcement-synchronous-in-`record()`** dissolves into an explicit
-    law. Today announcement is a subscriber reacting to an append — inherently
-    a second step, adjacent by convention. When one decision returns the
-    append *and* the announcement as its effect list, the atomicity moves
-    into the decision. **The honest residue**: the executor must not
-    interleave one decision's effects with another decision's reads — but
-    that is a stated, conformance-testable law of the executor's unit
-    contract (§6), not a comment-and-adjacency convention, and that is the
-    difference that matters.
-  - **The store contract gains check-and-set**, designed in rather than
-    reacted to: append conditional on the log's head, failing loudly when the
-    head moved. It converts the implicit convention into an explicit store
-    guarantee — trivial for today's single-writer file backend, native to a
-    real database, so it lands exactly on the `es/` contract and serves the
-    future-database goal at the same time.
+  - **Announcement is an effect of the same decision as its append**, not a
+    subscriber reacting to it — the atomicity lives in the decision. **The
+    honest residue**: the executor must not interleave one decision's effects
+    with another decision's reads. That is a stated, conformance-testable law
+    of the executor's unit contract (§6), not a comment-and-adjacency
+    convention, and that is the difference that matters.
 
-  The 074 pins hold each weld while it exists and retire with a note saying
-  what replaced it, when its dissolution lands.
+  **Check-and-set at the store (append conditional on the log's head) is an
+  idea, not a decision** — it was floated, and it may never be needed.
+  Nothing in this design depends on it. If an
+  executor law someday turns out to need a store guarantee, that surfaces as
+  a contract question and gets decided then.
 - Nothing else failed contact. The 073 finding stands, now unqualified: no
   decision in this system needs to know a transport exists.
