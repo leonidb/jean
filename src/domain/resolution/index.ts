@@ -100,8 +100,18 @@ const orchestratorOnly: Resolver = (_event, ctx) => named(ctx.orchestrator)
  */
 const taskParties: Resolver = (event, ctx) => {
   const taskId = taskIdFromStream(event.stream)
-  const owner = taskId === undefined ? undefined : ctx.taskOwner(taskId)
-  return [owner, ctx.orchestrator]
+  // THE SUBSCRIBER SET IS "EVERYONE INVOLVED", now that there is a set to ask.
+  // This used to read `[taskOwner, orchestrator]` — the participant list
+  // hard-coded, which could not answer the case that matters: a third agent
+  // pulled into a task receives nothing, because the resolver did not know it
+  // was involved. §4's task row always said "everyone involved with the task";
+  // A-SUB gave that phrase a referent, and the row now consults it instead of
+  // re-deriving a guess at it.
+  //
+  // An unknown task, or one nobody subscribes to, resolves EMPTY — which is
+  // what makes an orchestrator-created unassigned task history, exactly as
+  // before: nobody is involved, so the event is a fact rather than mail.
+  return taskId === undefined ? [] : ctx.subscribersOf(taskId)
 }
 
 /** §4: "Trigger firing targeting X → X". The contract narrows it — agent
@@ -131,8 +141,11 @@ const RESOLUTIONS: Record<KnownKind, Resolver> = {
   'task-reverted': taskParties,
   'task-updated': taskParties,
   'task-comment': taskParties,
+
   // The subscriber pair (A-SUB): routing-rule changes, not mail — the effect
-  // shows in future routing. Declared with the kinds, per §4's law.
+  // shows in future routing. Declared with the kinds, per §4's law. Addressing
+  // them to the subscriber set instead would put a "you were subscribed" pair
+  // in every mailbox on every change, which is noise nobody acts on.
   'task-subscribed': nobody,
   'task-unsubscribed': nobody,
 

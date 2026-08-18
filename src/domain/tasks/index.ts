@@ -97,6 +97,8 @@ import type {
   TaskCreatedData,
   TaskRevertedData,
   TaskStatusData,
+  TaskSubscribedData,
+  TaskUnsubscribedData,
   TaskUpdatedData,
 } from '../contracts/vocabulary.ts'
 import { taskIdFromStream } from '../contracts/vocabulary.ts'
@@ -105,7 +107,14 @@ import { taskIdFromStream } from '../contracts/vocabulary.ts'
 
 /** One task plus the stack revert pops. The stack is not derivable from the
  *  task — `status` is only its top — so it is state, not a view. */
-type Entry = { readonly task: Task; readonly stack: readonly TaskStatus[] }
+type Entry = {
+  readonly task: Task
+  readonly stack: readonly TaskStatus[]
+  /** THE SUBSCRIBER SET — "everyone involved", as data. A set because
+   *  subscribing twice is subscribing once, and because the automatic
+   *  derivation and an explicit event must coincide rather than stack. */
+  readonly subs: ReadonlySet<AgentName>
+}
 
 /** Keyed by task id; insertion order is creation order, which is the order
  *  `all` reports and `nextTaskId` counts. */
@@ -239,11 +248,83 @@ function replace(current: Board, id: string, entry: Entry): Board {
   return next
 }
 
-const fold = (state: TasksState, event: StoredEvent, isRosterMember: (name: AgentName) => boolean): TasksState => {
+/**
+ * THE AUTOMATIC SURFACE, STATED ONCE — and this function is what "once" means.
+ *
+ * Going forward the shell appends these events after the triggering one; on
+ * replay the fold applies the same call to old events. That is the whole
+ * migration: a log with no subscription events resolves as it always did,
+ * because the derivation reconstructs the subscriptions that were implicit in
+ * the old owner+orchestrator predicate. Two paths, one rule — so they cannot
+ * drift, and on a new log they coincide (set semantics make the derived and the
+ * written subscription the same fact).
+ *
+ * The surface is CLOSED, and its absences are the ruling rather than gaps.
+ * Creation subscribes the queue-owner (if roster) and the orchestrator;
+ * reassignment subscribes the new owner. Nothing else: commenting does not
+ * subscribe, and nothing anywhere unsubscribes automatically — the previous
+ * owner keeps its subscription through a reassignment, because it was involved
+ * and still is. The tiebreaker for anything unruled is no automatic behaviour
+ * plus an explicit operation, and that is why this list is short.
+ */
+const autoSubscriptionsFor = (
+  event: StoredEvent,
+  isRosterMember: (name: AgentName) => boolean,
+  orchestratorAt: AgentName | undefined,
+): readonly { taskId: string; data: TaskSubscribedData }[] => {
+  const taskId = taskIdFromStream(event.stream)
+  if (taskId === undefined) return []
+  const data = (event.data ?? {}) as Record<string, unknown>
+
+  // `actor: 'infra'` on every one: subscriptions are always DATA, never an
+  // implicit rule resolution has to know about, and the log says who wrote
+  // them.
+  const subscribe = (agent: unknown): { taskId: string; data: TaskSubscribedData }[] =>
+    typeof agent === 'string' && agent.length > 0 && isRosterMember(agent)
+      ? [{ taskId, data: { agent, actor: 'infra' } }]
+      : []
+
+  if (event.type === 'task-created') {
+    // The QUEUE, not `task.agent` — at creation there is no owner yet, and the
+    // queue is who the task was dispatched to. Gated by the roster, which is
+    // Q-1's never-invent-an-acker holding here too: a 'someday' shelf gets no
+    // subscription, so nothing accumulates for a mailbox nobody reads.
+    //
+    // DEDUPED ON THE WAY OUT. The fold's set would absorb a repeat, but this
+    // list is what the SHELL APPENDS: an orchestrator that queues a task to
+    // itself would otherwise put two identical subscribe events in the log for
+    // one subscription (codex pass, task 094). Set semantics in the state do
+    // not excuse writing the same fact twice.
+    const emitted = [...subscribe((data as TaskCreatedData).queue), ...subscribe(orchestratorAt)]
+    const byAgent = new Map(emitted.map((e) => [e.data.agent, e]))
+    return [...byAgent.values()]
+  }
+  if (event.type === 'task-updated') {
+    // A reassignment, and only a reassignment: a description edit carries no
+    // `agent` and subscribes nobody.
+    return subscribe((data as TaskUpdatedData).agent)
+  }
+  return []
+}
+
+const fold = (
+  state: TasksState,
+  event: StoredEvent,
+  isRosterMember: (name: AgentName) => boolean,
+  orchestratorAt?: AgentName,
+): TasksState => {
   const current = board(state)
   const id = taskIdFromStream(event.stream)
   if (id === undefined) return state
   const data = (event.data ?? {}) as Record<string, unknown>
+
+  /** The automatic derivation, applied on replay. Same call the shell makes
+   *  forward — see `autoSubscriptionsFor`. */
+  const derived = (into: ReadonlySet<AgentName>): ReadonlySet<AgentName> => {
+    const next = new Set(into)
+    for (const { data: sub } of autoSubscriptionsFor(event, isRosterMember, orchestratorAt)) next.add(sub.agent)
+    return next
+  }
 
   if (event.type === 'task-created') {
     // FIRST WINS. A task is created once; a second `task-created` for an id
@@ -264,8 +345,10 @@ const fold = (state: TasksState, event: StoredEvent, isRosterMember: (name: Agen
       updatedAt: event.ts,
     }
     // Creation pushes `todo`: the stack is the task's history of statuses
-    // ENTERED, and it entered this one.
-    return seal(replace(current, id, { task, stack: ['todo'] }))
+    // ENTERED, and it entered this one. And it seeds the subscriber set from
+    // the derivation, which is what makes an old log's tasks resolve exactly as
+    // they did before subscriptions existed.
+    return seal(replace(current, id, { task, stack: ['todo'], subs: derived(new Set()) }))
   }
 
   const entry = current.get(id)
@@ -287,6 +370,7 @@ const fold = (state: TasksState, event: StoredEvent, isRosterMember: (name: Agen
             isRosterMember,
           ),
           stack: [...entry.stack, to],
+          subs: entry.subs,
         }),
       )
     }
@@ -321,6 +405,7 @@ const fold = (state: TasksState, event: StoredEvent, isRosterMember: (name: Agen
         replace(current, id, {
           task: settle(entry.task, to, event.ts, {}, isRosterMember),
           stack: cut >= 0 ? entry.stack.slice(0, cut + 1) : [...entry.stack.slice(0, -1), to],
+          subs: entry.subs,
         }),
       )
     }
@@ -359,8 +444,41 @@ const fold = (state: TasksState, event: StoredEvent, isRosterMember: (name: Agen
             ...(d.description !== undefined && { description: d.description }),
             updatedAt: event.ts,
           },
+          // A reassignment subscribes the new owner, and never unsubscribes the
+          // previous one — `derived` only adds.
+          subs: derived(entry.subs),
         }),
       )
+    }
+
+    case 'task-subscribed': {
+      const d = data as TaskSubscribedData
+      // CONSTRAINT 3 AT THE FOLD — the second of the two gates. The decision
+      // refuses a polite caller; THIS stops a rogue or buggy writer, and it is
+      // the reason never-invent-an-acker holds by construction rather than by
+      // convention: a well-shaped event naming a non-roster agent would
+      // otherwise mint a subscriber with no mailbox, and every later task event
+      // would pile an unclearable pair into nothing.
+      //
+      // A malformed agent folds to nothing for the same reason it does
+      // everywhere else here: the log is permanent, and a reader that trusts
+      // `data.agent` to be a string is one bad writer away from a set with a
+      // number in it.
+      if (typeof d?.agent !== 'string' || d.agent.length === 0 || !isRosterMember(d.agent)) return state
+      if (entry.subs.has(d.agent)) return state
+      return seal(replace(current, id, { ...entry, subs: new Set(entry.subs).add(d.agent) }))
+    }
+
+    case 'task-unsubscribed': {
+      const d = data as TaskUnsubscribedData
+      // No roster gate here, deliberately: LEAVING is always allowed. A name
+      // that should not have been subscribed must still be able to come out,
+      // and gating the exit on the roster would trap exactly the agents a
+      // roster change stranded.
+      if (typeof d?.agent !== 'string' || !entry.subs.has(d.agent)) return state
+      const subs = new Set(entry.subs)
+      subs.delete(d.agent)
+      return seal(replace(current, id, { ...entry, subs }))
     }
 
     default:
@@ -485,6 +603,40 @@ const decideRevert = (state: TasksState, taskId: string, actor: string): RevertD
 export const tasks: TasksContract = {
   initial: () => seal(new Map()),
   fold,
+
+  autoSubscriptionsFor,
+
+  /** Indirectly-visible state — nothing else returns it, which is exactly why
+   *  the mutation pass aimed here. Empty for an unknown task: nobody is
+   *  involved with a task that does not exist, and resolution reads that as
+   *  history rather than as an error. */
+  subscribersOf: (state, taskId) => [...(board(state).get(taskId)?.subs ?? [])],
+
+  decideSubscribe: (state, cmd, isRosterMember) => {
+    const entry = board(state).get(cmd.taskId)
+    if (entry === undefined) return { ok: false, refusal: { kind: 'unknown-task' } }
+    // CONSTRAINT 3, first gate. Named with the offending name so the caller
+    // learns WHICH name was rejected — the usual case is a typo, and a bare
+    // "not allowed" sends them looking at permissions instead.
+    if (!isRosterMember(cmd.agent)) {
+      return { ok: false, refusal: { kind: 'not-a-mailbox-holder', name: cmd.agent } }
+    }
+    // REFUSED rather than treated as a no-op, so the shell never appends an
+    // event that changes nothing. A no-op subscription event would still cost
+    // a log entry and a re-fold, and it would read to a later reader as a
+    // moment when something happened.
+    if (entry.subs.has(cmd.agent)) return { ok: false, refusal: { kind: 'already-subscribed' } }
+    return { ok: true, data: { agent: cmd.agent, actor: cmd.actor } }
+  },
+
+  decideUnsubscribe: (state, cmd) => {
+    const entry = board(state).get(cmd.taskId)
+    if (entry === undefined) return { ok: false, refusal: { kind: 'unknown-task' } }
+    // Same no-op argument as above, mirrored: dropping out of something you
+    // are not in changes nothing, so it is refused rather than recorded.
+    if (!entry.subs.has(cmd.agent)) return { ok: false, refusal: { kind: 'not-subscribed' } }
+    return { ok: true, data: { agent: cmd.agent, actor: cmd.actor } }
+  },
 
   all: (state) => [...board(state).values()].map((e) => e.task),
 
