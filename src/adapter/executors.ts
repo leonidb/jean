@@ -41,13 +41,21 @@
 
 import type { AnnounceEffect, NotifierExecutor, NotifyOutcome } from '../domain/contracts/notifier.ts'
 import type { SupervisorEffect } from '../domain/contracts/supervisor.ts'
-import type { AgentName, DeliveredVia } from '../domain/contracts/vocabulary.ts'
+import type { DeliveredVia } from '../domain/contracts/vocabulary.ts'
 
-/** What the shell can do with a supervision effect. Separate from the
- *  notifier's because the two decide different things — sharing one executor
- *  would make an unrelated change to one able to break the other. */
+/**
+ * What the shell can do with a supervision effect: EMIT, and nothing else.
+ *
+ * Separate from the notifier's because the two decide different things —
+ * sharing one executor would make an unrelated change to one able to break
+ * the other. And narrower than the notifier's on purpose: E1 gave this type a
+ * `deliver` that `runSupervision` never called, and an executor capability
+ * nobody uses is a weld waiting to be made. A reminder, a probe and a report
+ * are ADDRESSED MAIL — they reach their subjects through the ordinary
+ * resolution path, and a shell that also handed them to a transport here
+ * would deliver each of them twice. The type is now unable to say it (E2).
+ */
 export type SupervisionExecutor = {
-  deliver: (to: AgentName, text: string) => boolean
   emit: (type: string, data: unknown) => void
 }
 
@@ -95,11 +103,34 @@ export function runAnnouncements(
   return outcomes
 }
 
+/** Minutes, rounded, never NaN (R13): a quietMs the composer could not
+ *  measure must not become a `NaN` in a fact — it fails every comparison and
+ *  reads LOUD downstream. Zero is the honest floor for "no measured silence". */
+const quietMinutes = (ms: number): number => (Number.isFinite(ms) ? Math.round(ms / 60_000) : 0)
+
 /**
- * Perform one supervisor decision's effects. Same shape and the same laws;
- * there is no stamp here because a reminder, probe or report is addressed
- * mail, not an announcement about mail — the events it emits go through the
- * ordinary resolution path and get their evidence when they are delivered.
+ * Perform one supervisor decision's effects.
+ *
+ * SYNCHRONOUS BY CONSTRUCTION, like `runAnnouncements` and for the same
+ * reason — laws (a) and (c) with no mechanism beyond the absence of a yield.
+ * Law (b) has nothing to bind here: there is no stamp, because a reminder,
+ * probe or report is ADDRESSED MAIL rather than an announcement ABOUT mail;
+ * the events below go through the ordinary resolution path and get their
+ * delivery evidence when they are delivered.
+ *
+ * ── WHAT THIS FUNCTION IS ACTUALLY DECIDING, AND WHY IT IS PINNED ──
+ *
+ * It looks like a rename and is not quite one: the effect union says
+ * `status: 'down' | 'up-but-stuck' | 'recovered'`, and the VOCABULARY has two
+ * different kinds with two different data shapes behind those three values.
+ * Choosing the kind, and filling the shape that kind declares, is this
+ * executor's own mapping — which is exactly the kind of code that can be
+ * wrong in silence. `data.agent` on an `agent-probe` is what the resolution
+ * table reads to address the probe; spell it `subject` and the probe is
+ * written, folded, and delivered to nobody, with nothing anywhere failing.
+ * `executors.conformance.test.ts` holds the mapping against the vocabulary
+ * and against the real resolver, which is the only reader whose opinion
+ * decides whether these events arrive.
  */
 export function runSupervision(effects: readonly SupervisorEffect[], exec: SupervisionExecutor): void {
   for (const effect of effects) {
@@ -113,9 +144,12 @@ export function runSupervision(effects: readonly SupervisorEffect[], exec: Super
         })
         break
       case 'probe':
+        // `agent` IS THE ADDRESS. §4 resolves a probe by reading this field —
+        // it is the one event whose entire purpose is to reach the agent it
+        // is about, and the only field name here that can fail silently.
         exec.emit('agent-probe', {
           agent: effect.agent,
-          quietMinutes: Math.round(effect.quietMs / 60_000),
+          quietMinutes: quietMinutes(effect.quietMs),
           text: 'Still there? Acknowledging this resets your liveness clock.',
           queued: true,
         })
@@ -124,12 +158,29 @@ export function runSupervision(effects: readonly SupervisorEffect[], exec: Super
         // ONE EVENT, NOT A PAIR (the liveness block): the addressed record IS
         // the report. A general record plus a follow-up to handle would
         // reintroduce the forgot-to-route hazard one level up.
-        exec.emit(effect.status === 'recovered' || effect.status === 'up-but-stuck' ? 'worker-status' : 'agent-down', {
-          ...(effect.status === 'down'
-            ? { subject: effect.subject, to: effect.to }
-            : { agent: effect.subject, status: effect.status }),
-          quietMinutes: Math.round(effect.quietMs / 60_000),
-          text: `${effect.subject}: ${effect.status}`,
+        //
+        // TWO KINDS, TWO SHAPES. `agent-down` names its `subject` and its
+        // addressee; `worker-status` names the `agent` and its verdict and
+        // has NO quietMinutes field in the census — so the silence goes into
+        // the prose, where it is presentation, rather than into an undeclared
+        // field a reader of the vocabulary would never look for.
+        if (effect.status === 'down') {
+          exec.emit('agent-down', {
+            subject: effect.subject,
+            to: effect.to,
+            quietMinutes: quietMinutes(effect.quietMs),
+            text: `${effect.subject} is down — silent for ${quietMinutes(effect.quietMs)} minutes.`,
+            queued: true,
+          })
+          break
+        }
+        exec.emit('worker-status', {
+          agent: effect.subject,
+          status: effect.status,
+          text:
+            effect.status === 'recovered'
+              ? `${effect.subject} is back.`
+              : `${effect.subject} is up but stuck — silent for ${quietMinutes(effect.quietMs)} minutes.`,
           queued: true,
         })
         break
