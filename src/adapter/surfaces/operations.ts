@@ -31,8 +31,16 @@ import type { SurfaceContext } from './../context.ts'
  * why resolution refuses to read it and answers per kind instead. This is a
  * DISPLAY column in `jean task log`, not an addressing decision, and the old
  * surface derived it this way; matching it is what "the caller cannot tell"
- * means. If it should be a module function with a per-kind answer, that is
- * the architect's call — flagged rather than quietly diverged from.
+ * means.
+ *
+ * RULED (task 110): BLESSED as display-only parity — no module home. A
+ * per-kind module answer would be shape without a consumer: the only
+ * reader is a human eye on an operator column, and a wrong guess costs a
+ * mislabelled row, never a misrouted message. The blessing's conditions:
+ * the read stays confined to THIS function; the label stays; and nothing
+ * anywhere may consume `apiEvent().agent` as a FACT — anything needing
+ * "who is this event about" uses `resolution.authorOf`, which answers per
+ * kind or honestly declines.
  */
 export function apiEvent(event: StoredEvent): Record<string, unknown> {
   const taskId = taskIdFromStream(event.stream)
