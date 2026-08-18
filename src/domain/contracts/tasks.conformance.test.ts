@@ -534,13 +534,84 @@ describe('SUBSCRIPTIONS (A-SUB) — red against the pre-subscriber implementatio
 
   test('reassignment subscribes the NEW owner and never unsubscribes the previous one', () => {
     const { s, log } = withSubs()
-    const reassign = log.append('task-updated', 'task-001', { agent: 'worker-b', actor: ORCH })
     const roster = (n: string) => n === WORKER_A || n === ORCH || n === 'worker-b'
+    // THE TASK IS STARTED FIRST (D-SUB report, gap 1): without this line the
+    // "previous owner" was only queue-derived — task.agent undefined — and an
+    // implementation auto-unsubscribing the REAL previous owner passed. Same
+    // shape as blockedSince: the indirect-state cluster.
+    const started = tasks.fold(
+      s,
+      log.append('task-status', 'task-001', { from: 'todo', to: 'in-progress', actor: ORCH }),
+      roster,
+      ORCH,
+    )
+    expect(tasks.taskOf(started, '001')?.agent).toBe(WORKER_A) // the previous owner is REAL now
+    const reassign = log.append('task-updated', 'task-001', { agent: 'worker-b', actor: ORCH })
     const auto = (tasks.autoSubscriptionsFor?.(reassign, roster, ORCH) ?? []).map((a) => a.data.agent)
     expect(auto).toEqual(['worker-b'])
-    const after = tasks.fold(s, reassign, roster, ORCH)
+    const after = tasks.fold(started, reassign, roster, ORCH)
     const subs = [...(tasks.subscribersOf?.(after, '001') ?? [])].sort()
     expect(subs).toEqual([ORCH, WORKER_A, 'worker-b'].sort()) // the previous owner KEEPS its subscription
+  })
+
+  test('RULED (097): provenance tolerance — a subscription with a valid agent but MISSING actor still subscribes', () => {
+    // Typed tolerance governs EFFECT-DETERMINING fields (who is subscribed);
+    // actor is provenance — a log with imperfect provenance is still a log
+    // of what happened, and dropping a real subscription over a missing
+    // actor would under-deliver mail. The WRITER'S obligation (vocabulary
+    // types actor required) is unchanged; the fold tolerates history.
+    const { s, log } = withSubs()
+    const roster3 = (n: string) => ROSTER(n) || n === 'worker-b'
+    const noActor = log.appendRaw('task-subscribed', 'task-001', { agent: 'worker-b' })
+    const after = tasks.fold(s, noActor, roster3, ORCH)
+    expect([...(tasks.subscribersOf?.(after, '001') ?? [])].sort()).toEqual([ORCH, WORKER_A, 'worker-b'].sort())
+  })
+
+  test('PINNED AS DELIBERATE (097): a seat handover does not move old subscriptions — the documented migration edge', () => {
+    const { s, log } = withSubs() // created under ORCH
+    // A new orchestrator takes the seat. The discriminating event is a
+    // REASSIGNMENT under the new seat (codex pass, 097): the derivation runs
+    // for it — the new OWNER subscribes — but the orchestrator rule fires at
+    // CREATION only, so the new seat must NOT ride in. The explicit
+    // subscribe operation is the remedy, not an automatic rule.
+    const roster3 = (n: string) => ROSTER(n) || n === 'worker-b' || n === 'orchestrator-two'
+    const reassigned = log.append('task-updated', 'task-001', { agent: 'worker-b', actor: 'orchestrator-two' })
+    const after = tasks.fold(s, reassigned, roster3, 'orchestrator-two')
+    const subs = [...(tasks.subscribersOf?.(after, '001') ?? [])].sort()
+    expect(subs).toEqual([ORCH, WORKER_A, 'worker-b'].sort()) // creation-time seat kept; the NEW seat not auto-added
+  })
+
+  test('R10 at the fold boundary (097): orchestratorAt undefined means NO SEAT ON RECORD — owner-only subscription, never a fallback', () => {
+    const { log } = world()
+    const created = log.append('task-created', 'task-009', {
+      title: 'b',
+      description: '',
+      queue: WORKER_A,
+      actor: ORCH,
+    })
+    const auto = (tasks.autoSubscriptionsFor?.(created, ROSTER, undefined) ?? []).map((a) => a.data.agent)
+    expect(auto).toEqual([WORKER_A]) // the between-boot state: empty seat is honest; a composer HAVING a seat and omitting it violates R10
+    let s = tasks.initial()
+    s = tasks.fold(s, created, ROSTER, undefined)
+    expect(tasks.subscribersOf?.(s, '009')).toEqual([WORKER_A])
+  })
+
+  test('malformed unsubscribes fold to nothing: bad agent, and a well-shaped unsubscribe of a NON-subscriber (097)', () => {
+    const { s, log } = withSubs()
+    const badAgent = tasks.fold(
+      s,
+      log.appendRaw('task-unsubscribed', 'task-001', { agent: 42, actor: 'x' }),
+      ROSTER,
+      ORCH,
+    )
+    expect([...(tasks.subscribersOf?.(badAgent, '001') ?? [])].sort()).toEqual([ORCH, WORKER_A].sort())
+    const phantom = tasks.fold(
+      s,
+      log.appendRaw('task-unsubscribed', 'task-001', { agent: 'worker-b', actor: 'worker-b' }),
+      ROSTER,
+      ORCH,
+    )
+    expect([...(tasks.subscribersOf?.(phantom, '001') ?? [])].sort()).toEqual([ORCH, WORKER_A].sort())
   })
 
   test('explicit subscribe: roster-only (constraint 3), unknown tasks refuse, duplicates refuse so no no-op event is appended', () => {

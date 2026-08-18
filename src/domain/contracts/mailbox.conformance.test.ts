@@ -546,7 +546,6 @@ describe('randomized scaled run — generic validity alongside the specifics (sp
         const owner = workers[Number(id) % workers.length]
         return owner ? [owner, 'orch-1'] : ['orch-1']
       },
-      taskOwner: (id) => workers[Number(id) % workers.length],
     }
     // The composed resolver — the REAL resolution bound to the run's context.
     // This is the one place the suite crosses modules, deliberately.

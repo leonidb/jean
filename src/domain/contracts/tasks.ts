@@ -112,10 +112,29 @@
  * ONE RULE, TWO USES: `autoSubscriptionsFor` states the automatic surface
  * once. Going FORWARD the shell appends its output after the triggering
  * event; on REPLAY the fold applies the same derivation to old logs — which
- * IS the migration: a log with no subscription events resolves exactly as
- * today (owner + orchestrator), because the derivation reconstructs those
- * subscriptions. Set semantics make the two paths idempotent on new logs
- * (the derived and the explicitly-written subscription coincide).
+ * IS the migration. NARROWED (097, from D-SUB's measurement): a
+ * reassignment-free old log resolves exactly as today (owner +
+ * orchestrator); a log CONTAINING reassignments diverges deliberately —
+ * the derivation yields {creation owner, orchestrator, each subsequent
+ * owner} where the old predicate resolved only {current owner,
+ * orchestrator}, because rule 4 forbids automatic unsubscription. The
+ * divergence OVER-delivers (previous owners keep hearing about their old
+ * task), the safe direction, and it is produced by the ruling itself — in
+ * the ruling batch as a note, not a question. Set semantics make the two
+ * paths idempotent on new logs. The shell MAY skip appending an automatic
+ * subscription for an already-subscribed agent, but is NOT obliged to
+ * (ruled 097, declined as an obligation): the fold's set semantics make
+ * the duplicate a no-op, the noise is at most one event per reassignment,
+ * and keeping `autoSubscriptionsFor` stateless preserves the one-rule-two-
+ * uses symmetry that makes the migration trustworthy.
+ *
+ * PROVENANCE TOLERANCE (ruled 097): typed tolerance at the fold governs
+ * EFFECT-DETERMINING fields only — a subscription event with a malformed
+ * `agent` folds to nothing, but a valid agent with a MISSING `actor` still
+ * subscribes: a log with imperfect provenance is still a log of what
+ * happened, and dropping real mail routing over missing bookkeeping would
+ * under-deliver. The writer's obligation (actor is required in the
+ * vocabulary) is unchanged; the fold tolerates history.
  *
  * DOCUMENTED MIGRATION EDGE: subscriptions are per-NAME, so on an old log
  * the CREATION-TIME orchestrator is the derived subscriber; a later seat
@@ -266,10 +285,11 @@ export type TasksContract = {
    *  fact (Q-1): the start-assigns-queue clause and the automatic
    *  owner-subscription both consult it. `orchestratorAt` is the seat
    *  current AS OF the event (injected like every fold fact) — the
-   *  migration derivation subscribes it at creation; optional this one
-   *  round so the merged implementation stays assignable, REQUIRED once
-   *  the subscriber D-task lands (it may consolidate the two facts into
-   *  one object then). */
+   *  migration derivation subscribes it at creation. `undefined` is
+   *  MEANINGFUL: no seat on record at that instant (the between-boot
+   *  state) — owner-only subscription, never a fallback; a composer that
+   *  HAS a seat and omits it violates R10 (ruled 097). The parameter
+   *  stays optional to carry that meaning. */
   fold: (
     state: TasksState,
     event: StoredEvent,

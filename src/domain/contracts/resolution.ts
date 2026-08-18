@@ -77,11 +77,6 @@ export type ResolutionContext = {
    *  new owner) whether written explicitly or derived from an old log by
    *  the migration reading. */
   subscribersOf: (taskId: string) => readonly AgentName[]
-  /** @deprecated The pre-subscriber owner lookup. The task row no longer
-   *  consults it; REMOVED by the subscriber D-task together with the
-   *  implementation's switch to `subscribersOf`. Kept this one round only
-   *  so the merged implementation stays type-assignable between merges. */
-  taskOwner: (taskId: string) => AgentName | undefined
 }
 
 /** Recipients of one event — possibly several, possibly none. Author never

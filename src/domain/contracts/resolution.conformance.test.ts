@@ -49,7 +49,6 @@ const ctx: ResolutionContext = {
   // automatic pair; task 202 carries a third, explicit subscriber, which is
   // the case the pre-subscriber implementation cannot answer.
   subscribersOf: (taskId) => (taskId === '101' ? [WORKER_A, ORCH] : taskId === '202' ? [WORKER_A, ORCH, WORKER_B] : []),
-  taskOwner: (taskId) => (taskId === '101' || taskId === '202' ? WORKER_A : undefined),
 }
 
 /** ctx for a dojo with no orchestrator on record — the between-boot state
@@ -108,7 +107,7 @@ describe('spec §4 — the task row: everyone involved, minus the author', () =>
       queue: WORKER_A,
       actor: ORCH,
     })
-    expect(resolution.resolve(e, { ...ctx, taskOwner: () => WORKER_A })).toEqual([WORKER_A])
+    expect(resolution.resolve(e, { ...ctx, subscribersOf: () => [WORKER_A, ORCH] })).toEqual([WORKER_A])
   })
 
   test('task created UNASSIGNED by the orchestrator → nobody; it is history (spec §4, verbatim case)', () => {
@@ -119,7 +118,7 @@ describe('spec §4 — the task row: everyone involved, minus the author', () =>
       queue: 'someday',
       actor: ORCH,
     })
-    expect(resolution.resolve(e, { ...ctx, taskOwner: () => undefined })).toEqual([])
+    expect(resolution.resolve(e, { ...ctx, subscribersOf: () => [ORCH] })).toEqual([]) // only party = author → history
   })
 
   test("a worker's comment on its task → the orchestrator (the author is excluded, not the other party)", () => {
@@ -164,7 +163,6 @@ describe('spec §4 — the task row: everyone involved, minus the author', () =>
     const recipients = resolution.resolve(e, {
       orchestrator: ORCH,
       subscribersOf: () => [ORCH],
-      taskOwner: () => ORCH,
     })
     expect(recipients).toEqual([ORCH])
   })

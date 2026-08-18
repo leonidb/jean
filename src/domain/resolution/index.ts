@@ -87,16 +87,14 @@ const nobody: Resolver = () => []
 const orchestratorOnly: Resolver = (_event, ctx) => named(ctx.orchestrator)
 
 /**
- * The task row: "everyone involved with the task, minus the author". The
- * contract fixes today's membership — the task's agent and the orchestrator —
- * and the minus is `resolve`'s, not this function's.
+ * The task row: "everyone involved with the task, minus the author" —
+ * "involved" IS the subscriber set (A-SUB), and the minus is `resolve`'s,
+ * not this function's.
  *
  * The task id comes from the STREAM rather than the payload, because the
  * stream is the one place every kind in this family carries it; `data` names
- * it inconsistently across the census. An event on a non-task stream yields
- * no owner and falls back to the orchestrator alone, which is what makes an
- * orchestrator-created unassigned task resolve to nobody: the only party is
- * also the author.
+ * it inconsistently across the census. A non-task stream, an unknown task,
+ * or one nobody subscribes to resolves EMPTY.
  */
 const taskParties: Resolver = (event, ctx) => {
   const taskId = taskIdFromStream(event.stream)

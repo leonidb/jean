@@ -253,7 +253,9 @@ function replace(current: Board, id: string, entry: Entry): Board {
  *
  * Going forward the shell appends these events after the triggering one; on
  * replay the fold applies the same call to old events. That is the whole
- * migration: a log with no subscription events resolves as it always did,
+ * migration: a reassignment-free log resolves as it always did (with
+ * reassignments the derivation deliberately over-delivers — the narrowed
+ * sentence in the contract, 097),
  * because the derivation reconstructs the subscriptions that were implicit in
  * the old owner+orchestrator predicate. Two paths, one rule — so they cannot
  * drift, and on a new log they coincide (set semantics make the derived and the
@@ -346,7 +348,7 @@ const fold = (
     }
     // Creation pushes `todo`: the stack is the task's history of statuses
     // ENTERED, and it entered this one. And it seeds the subscriber set from
-    // the derivation, which is what makes an old log's tasks resolve exactly as
+    // the derivation, which is what makes a reassignment-free old log resolve as
     // they did before subscriptions existed.
     return seal(replace(current, id, { task, stack: ['todo'], subs: derived(new Set()) }))
   }
