@@ -10,7 +10,8 @@
  * mail waiting is answered by the notifier repeating, so a second mechanism
  * asking the same question would only add a message the agent must clear.
  *
- * Register row 7 (a down report with no matching return) cannot be written
+ * Register row 7 (a report with no matching return — extended to EVERY
+ * report kind, down or up-but-stuck, at task 100's round) cannot be written
  * either, because the recovery is emitted by the same code that clears the
  * episode — the report and its return are one branch, not two that have to
  * agree. An episode that never reported ends silently for the same reason:
@@ -33,8 +34,9 @@
  * configured answer to "how long is too long to hear nothing", and reading it
  * as one bound with two consequences — ask if you can, conclude if you cannot
  * — is the only interpretation that does not invent a number. Recorded on
- * task 099; if the architect wants them separate it is a config field, not a
- * rewrite.
+ * task 099; CONFIRMED into the contract at task 100 (see `stuckAfterMs`'s
+ * doc there — splitting, if operations ever want it, is an additive config
+ * field, not a rewrite).
  *
  * ── REMINDERS: THE BLOCKER PICKS THE CLOCK, THE SNOOZE DEMOTES IT ──
  *

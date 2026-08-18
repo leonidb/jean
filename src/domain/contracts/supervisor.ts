@@ -19,12 +19,27 @@
  *    acknowledgement. An agent mid-task with unread mail is busy, not down.
  *  - INFRA DOES NOT SUPERVISE THE ORCHESTRATOR (§0): never probed, never
  *    the subject of a down report — reports go TO the orchestrator; a
- *    report about its own failure has no in-dojo consumer.
+ *    report about its own failure has no in-dojo consumer. The exclusion
+ *    is BY SEAT (the orchestrator's name), not by role: a worker-role
+ *    record holding the seat is excluded all the same (pinned, task 100 —
+ *    the role filter alone pins only the weaker rule).
  *  - ONE EVENT, NOT A PAIR: a status report is a single addressed event.
- *  - EVERY DOWN GETS A MATCHING RETURN (register row 7 closes by
- *    construction): an episode that produced a down report ends with a
- *    recovery report when the agent comes back — whether or not it still
- *    holds work; an episode that produced no report ends silently.
+ *  - EVERY REPORT GETS A MATCHING RETURN (register row 7 closes by
+ *    construction; extended at D9's round, task 100): an episode that
+ *    produced a report — `down` OR `up-but-stuck`; row 7 named down, but a
+ *    stale stuck alarm is the same unclosed claim in the orchestrator's
+ *    hands — ends with a recovery report when the agent comes back,
+ *    whether or not it still holds work; an episode that produced no
+ *    report ends silently.
+ *  - THE STATE RECORDS ONLY WHAT WAS ACTUALLY EMITTED (ruled at D9's
+ *    round, task 100 — both of D9's liveness bugs violated it, both in
+ *    the orchestrator-absent moment, which is a between-boot gap: exactly
+ *    when supervision matters). With no orchestrator there is nobody to
+ *    tell, so nothing is emitted AND nothing is marked emitted: an open
+ *    report waits for a recipient to exist — the matching return is never
+ *    lost to the gap — and a verdict that could not be reported is not
+ *    recorded as reported, so no stray `recovered` ever closes a report
+ *    that was never made.
  *
  * ── REMINDERS (canon 7/9, ruled 2026-08-14) ──
  *
@@ -115,7 +130,15 @@ export type SupervisorConfig = {
   idlePingAfterMs: number
   /** How long a probed agent has to answer before it reads down. */
   probeTimeoutMs: number
-  /** Session-alive + holding work + jean-silent this long = up-but-stuck. */
+  /** The silence bound — ONE bound, two consequences (D9's reading,
+   *  CONFIRMED at task 100): a LIVE session quiet this long is PROBED
+   *  (ask if you can); a DISCONNECTED agent quiet this long reads DOWN
+   *  (conclude if you cannot — there is no session to ask, so the verdict
+   *  comes from silence alone). Both consequences answer the same
+   *  question — "how long is too long to hear nothing" — so a separate
+   *  `downAfterMs` would be a second number with no independent meaning.
+   *  If operations ever want the bounds apart, that is an additive config
+   *  field, not a rewrite. */
   stuckAfterMs: number
 }
 
