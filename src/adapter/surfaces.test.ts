@@ -221,19 +221,23 @@ describe('the tasks surface', () => {
     expect((update?.data as unknown as { actor: string }).actor).toBe('api')
   })
 
-  test('an unknown include is REFUSED, and `playbook` is named unavailable rather than dropped', async () => {
+  test('an unknown include is REFUSED; a task with no playbook simply gets no include', async () => {
     const bad = await get(`/tasks/${id}?include=comments,history`)
     expect(bad.status).toBe(400)
     expect((bad.body as unknown as { error: string }).error).toContain('history')
 
     const asked = await get(`/tasks/${id}?include=comments,messages,playbook`)
     expect(asked.status).toBe(200)
-    const body = asked.body as unknown as { comments: unknown[]; messages: unknown[]; unavailable: string[] }
+    const body = asked.body as unknown as { comments: unknown[]; messages: unknown[]; playbook?: unknown }
     expect(Array.isArray(body.comments)).toBe(true)
     expect(Array.isArray(body.messages)).toBe(true)
-    // No playbook module exists in the rewrite; the flag is answered, not
-    // silently ignored.
-    expect(body.unavailable).toEqual(['playbook'])
+    // E2 answered this flag with `unavailable: ["playbook"]` because no
+    // module owned playbooks. D-PB closed that; this task has no playbook
+    // REFERENCE, so there is simply nothing to attach — an empty
+    // `Task.playbook` means absent, not "look up the empty id". The live
+    // include has its own suite (`playbooks.test.ts`).
+    expect(body.playbook).toBeUndefined()
+    expect(body).not.toHaveProperty('unavailable')
   })
 
   test('a comment frame lands on the task’s stream and comes back through include=comments', async () => {

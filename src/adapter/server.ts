@@ -44,6 +44,8 @@
  * makes disabled triggers fire on every boot, and nothing fails.
  */
 
+import { type FSWatcher, mkdirSync, watch } from 'node:fs'
+import { resolve as resolvePath } from 'node:path'
 import { agents as agentsModule } from '../domain/agents/index.ts'
 import type { AckPair, MailboxState, ViewFacts } from '../domain/contracts/mailbox.ts'
 import type { NotifierExecutor, NotifierView } from '../domain/contracts/notifier.ts'
@@ -52,12 +54,14 @@ import type { Trigger } from '../domain/contracts/triggers.ts'
 import type { AckData, AgentName, AgentRole, DeliveredVia } from '../domain/contracts/vocabulary.ts'
 import {
   agentStream,
+  PLAYBOOKS_STREAM,
   SYSTEM_STREAM,
   TRIGGERS_STREAM,
   taskIdFromStream,
   taskStream,
 } from '../domain/contracts/vocabulary.ts'
 import { mailbox } from '../domain/mailbox/index.ts'
+import { playbooks } from '../domain/playbooks/index.ts'
 import { resolution } from '../domain/resolution/index.ts'
 import { routing } from '../domain/routing/index.ts'
 import { tasks } from '../domain/tasks/index.ts'
@@ -66,8 +70,10 @@ import { createStore, jsonlBackend, memoryBackend, type StoredEvent } from '../e
 import { type Attention, type AttentionConfig, createAttention } from './attention.ts'
 import type { Caller, SurfaceContext } from './context.ts'
 import type { SupervisionExecutor } from './executors.ts'
+import { scanPlaybooks } from './playbook-files.ts'
 import { createScheduler, type Scheduler } from './schedule.ts'
 import { knowledgeRoutes } from './surfaces/knowledge.ts'
+import { playbookRoutes } from './surfaces/playbooks.ts'
 import { taskRoutes } from './surfaces/tasks.ts'
 import { triggerRoutes } from './surfaces/triggers.ts'
 
@@ -257,6 +263,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
   let taskState = tasks.initial()
   let mailState = mailbox.initial()
   let triggerState = triggers.initial()
+  let playbookState = playbooks.initial()
   /** Epoch ms of the last real event on each task's stream — shell
    *  bookkeeping, and the contract asks for it as the caller's fact. */
   const taskActivity = new Map<string, number>()
@@ -323,6 +330,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     taskState = tasks.fold(taskState, event, isRosterMember, orchestratorOf())
     mailState = mailbox.fold(mailState, event, (e) => resolution.resolve(e, resolutionContext()))
     triggerState = triggers.fold(triggerState, event)
+    playbookState = playbooks.fold(playbookState, event)
 
     const onTask = taskIdFromStream(event.stream)
     if (onTask !== undefined && TASK_ACTIVITY_KINDS.has(event.type)) {
@@ -596,6 +604,41 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
   let scheduler: Scheduler | undefined
   /** Set the instant `stop` begins — see the WS close handler. */
   let stopping = false
+  /** The playbook directory watcher and its debounce, held so `stop` can
+   *  release them: an fs watcher outliving its server keeps a handle open
+   *  and fires reconciles into a store nobody is reading. */
+  let playbookWatcher: FSWatcher | undefined
+  let playbookDebounce: ReturnType<typeof setTimeout> | undefined
+
+  /**
+   * Watch the playbook directory, debounced.
+   *
+   * DEBOUNCED because one save is several filesystem events — an editor
+   * writes, renames and touches — and each would otherwise start its own
+   * scan. The reconcile is idempotent, so the cost of a redundant pass is
+   * only work; the debounce is what keeps it from being work on every
+   * keystroke of an auto-saving editor.
+   */
+  function watchPlaybooks(): void {
+    if (options.dataDir === undefined) return
+    const dir = resolvePath(options.dataDir, 'playbooks')
+    try {
+      // CREATED IF ABSENT, and that is what makes the watcher reliable
+      // rather than a nicety: with no directory there is nothing to watch,
+      // so a fresh dojo's FIRST playbook would be invisible until the next
+      // restart (codex pass, task 106). The old system created it too — for
+      // the second reason, which is that a user needs somewhere to put one.
+      mkdirSync(dir, { recursive: true })
+      playbookWatcher = watch(dir, () => {
+        if (playbookDebounce !== undefined) clearTimeout(playbookDebounce)
+        // DEBOUNCED: one save is several filesystem events, and each would
+        // otherwise start its own scan.
+        playbookDebounce = setTimeout(() => void reconcilePlaybooks(), 200)
+      })
+    } catch (err) {
+      ports.log(`[jean:new] not watching playbooks: ${String(err)}\n`)
+    }
+  }
 
   // ── Caller context ─────────────────────────────────────────────
 
@@ -804,6 +847,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     observeActivity,
     tasksState: () => taskState,
     triggersState: () => triggerState,
+    playbooksState: () => playbookState,
     isRosterMember,
     orchestratorOf,
     roleOf,
@@ -815,7 +859,12 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
 
   /** Each surface owns its own paths and answers `undefined` for anything
    *  else, so the route table is not duplicated between here and there. */
-  const surfaces = [taskRoutes(surfaceContext), triggerRoutes(surfaceContext), knowledgeRoutes(surfaceContext)]
+  const surfaces = [
+    taskRoutes(surfaceContext),
+    triggerRoutes(surfaceContext),
+    knowledgeRoutes(surfaceContext),
+    playbookRoutes(surfaceContext),
+  ]
 
   // ── The piggyback ──────────────────────────────────────────────
 
@@ -915,6 +964,58 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
       // nothing runs. Flagged for G1 — a dojo whose nightly consolidation is
       // a headless trigger would find it quietly not happening.
       ports.log(`[jean:new] trigger ${trigger.id} is headless — no spawn adapter yet; firing recorded only\n`)
+    }
+  }
+
+  /**
+   * Reconcile the playbook directory into the log.
+   *
+   * The FILES are the source of truth; the log records what changed. The
+   * diff is the domain's (`decideReconcile`) and it emits NOTHING when
+   * nothing changed — which is what makes this safe to call on every
+   * filesystem event.
+   *
+   * A SCAN THAT FAILS APPENDS NOTHING. `decideReconcile` removes entries
+   * whose files have vanished, so a half-read directory would emit
+   * `playbook-removed` for playbooks that are sitting right there — and the
+   * next scan would create them again, a log that flaps with the weather.
+   * Absence is handled inside the scan; anything else abandons the pass.
+   */
+  let reconciling: Promise<void> | undefined
+  /** A request that arrived DURING a pass. The scan takes a snapshot, so a
+   *  save landing after it is invisible to the pass in flight — dropping the
+   *  request would lose that edit until the next unrelated filesystem event
+   *  (codex pass, task 106). One more pass, not a queue of them: the
+   *  reconcile is idempotent, so a single follow-up sees everything. */
+  let reconcileAgain = false
+
+  async function reconcilePlaybooks(): Promise<void> {
+    if (options.dataDir === undefined) return
+    if (reconciling !== undefined) {
+      reconcileAgain = true
+      return reconciling
+    }
+    const pass = (async () => {
+      do {
+        reconcileAgain = false
+        try {
+          const files = await scanPlaybooks(resolvePath(options.dataDir as string, 'playbooks'))
+          for (const decided of playbooks.decideReconcile(playbookState, files)) {
+            await record(decided.type, PLAYBOOKS_STREAM, decided.data)
+            ports.log(`[jean:new] playbook ${decided.type.replace('playbook-', '')}: ${decided.data.id}\n`)
+          }
+        } catch (err) {
+          // A SCAN THAT FAILED APPENDS NOTHING — see the note above. Logged
+          // and abandoned; the next filesystem event tries again.
+          ports.log(`[jean:new] playbook reconcile skipped: ${String(err)}\n`)
+        }
+      } while (reconcileAgain)
+    })()
+    reconciling = pass
+    try {
+      await pass
+    } finally {
+      reconciling = undefined
     }
   }
 
@@ -1135,6 +1236,8 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
   // And guarded, for the same reason the creation sits above `Bun.serve`: a
   // throw here would leave a bound socket with no handle to close it.
   try {
+    await reconcilePlaybooks()
+    watchPlaybooks()
     await scheduler.catchUpOnBoot()
     scheduler.sync()
     if (options.startTimers === true) attention.start()
@@ -1161,6 +1264,15 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
       // then the appends already accepted are awaited; then the socket.
       attention?.stop()
       scheduler?.stop()
+      playbookWatcher?.close()
+      playbookWatcher = undefined
+      if (playbookDebounce !== undefined) clearTimeout(playbookDebounce)
+      playbookDebounce = undefined
+      // A RECONCILE IN FLIGHT is not an append in flight yet — `drain` only
+      // knows about writes already inside `record`, so a scan still running
+      // would append after `stop` returned (codex pass, task 106). Wait for
+      // the pass, THEN for the writes it started.
+      await reconciling
       await drain()
       server.stop(true)
     },
@@ -1241,11 +1353,13 @@ export function replayInto(events: readonly StoredEvent[]): {
   tasks: ReturnType<typeof tasks.initial>
   mail: MailboxState
   triggers: ReturnType<typeof triggers.initial>
+  playbooks: ReturnType<typeof playbooks.initial>
 } {
   let agentState = agentsModule.initial()
   let taskState = tasks.initial()
   let mailState = mailbox.initial()
   let triggerState = triggers.initial()
+  let playbookState = playbooks.initial()
   for (const event of events) {
     agentState = agentsModule.fold(agentState, event)
     const ctx = {
@@ -1260,6 +1374,7 @@ export function replayInto(events: readonly StoredEvent[]): {
     )
     mailState = mailbox.fold(mailState, event, (e) => resolution.resolve(e, ctx))
     triggerState = triggers.fold(triggerState, event)
+    playbookState = playbooks.fold(playbookState, event)
   }
-  return { agents: agentState, tasks: taskState, mail: mailState, triggers: triggerState }
+  return { agents: agentState, tasks: taskState, mail: mailState, triggers: triggerState, playbooks: playbookState }
 }

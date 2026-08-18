@@ -15,6 +15,7 @@
  * holds the orchestrator's seat.
  */
 
+import type { PlaybooksState } from './../domain/contracts/playbooks.ts'
 import type { TasksState } from './../domain/contracts/tasks.ts'
 import type { TriggersState } from './../domain/contracts/triggers.ts'
 import type { AgentName, AgentRole } from './../domain/contracts/vocabulary.ts'
@@ -44,6 +45,7 @@ export type SurfaceContext = {
 
   tasksState: () => TasksState
   triggersState: () => TriggersState
+  playbooksState: () => PlaybooksState
   isRosterMember: (name: AgentName) => boolean
   orchestratorOf: () => AgentName | undefined
   roleOf: (name: AgentName) => AgentRole | undefined

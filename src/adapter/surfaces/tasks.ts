@@ -28,6 +28,7 @@
 import type { BlockedOn, TaskStatus } from './../../domain/contracts/tasks.ts'
 import type { AgentRole, ReplyData, SendData, TaskCommentData } from './../../domain/contracts/vocabulary.ts'
 import { taskStream } from './../../domain/contracts/vocabulary.ts'
+import { playbooks } from './../../domain/playbooks/index.ts'
 import { tasks } from './../../domain/tasks/index.ts'
 import type { SurfaceContext } from './../context.ts'
 import { renameTaskRefusal } from './../refusals.ts'
@@ -137,14 +138,19 @@ export function taskRoutes(ctx: SurfaceContext): (req: Request, url: URL) => Pro
         return []
       })
     }
-    // PLAYBOOKS HAVE NO MODULE IN THE REWRITE. The kinds are in the
-    // vocabulary and the worker skill's canonical call asks for them, but no
-    // contract owns folding them, and folding them here would be domain logic
-    // in the shell. So the flag is ACCEPTED and its absence is NAMED: a
-    // caller learns it asked for a view this server cannot serve yet, which
-    // is the one thing a silent drop would never tell it. Flagged to the
-    // architect on task 103.
-    if (include.has('playbook')) enriched.unavailable = ['playbook']
+    // THE INCLUDE SEAM, composed from the two owning modules: the tasks
+    // module names the reference (`Task.playbook` — the playbook's ID, never
+    // its frontmatter name) and the playbooks module supplies the body.
+    // Neither imports the other; the shell holds them together (R10).
+    //
+    // E2 served `unavailable: ["playbook"]` here because no module owned
+    // playbooks — flagged, ruled, and closed at D-PB. A task with no
+    // reference simply gets no include: an empty `Task.playbook` means
+    // absent, and `includeFor` answers undefined for it.
+    if (include.has('playbook')) {
+      const attached = playbooks.includeFor(ctx.playbooksState(), task.playbook)
+      if (attached !== undefined) enriched.playbook = attached
+    }
     return ctx.json(enriched)
   }
 

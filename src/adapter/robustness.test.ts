@@ -270,7 +270,13 @@ describe('an emission that cannot be appended', () => {
 
     chmodSync(resolve(dir, 'events.jsonl'), 0o444)
     server.tick()
-    await new Promise((r) => setTimeout(r, 60))
+    // POLLED, not slept for: the append is asynchronous and its rejection
+    // lands a microtask later, so a fixed wait is a race that passes on a
+    // quiet machine and fails on a loaded one (measured — this test flaked
+    // once at 60ms while another suite was running).
+    for (let i = 0; i < 40 && !lines.join('').includes('LOST EMISSION'); i++) {
+      await new Promise((r) => setTimeout(r, 25))
+    }
     chmodSync(resolve(dir, 'events.jsonl'), 0o644)
 
     // Both units advance their state as they DECIDE, so an append that fails
