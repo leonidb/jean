@@ -503,6 +503,15 @@ function heldBy(task: Task, agent: AgentName): boolean {
  *  task is still that agent's, which is exactly why it is being nagged. */
 const ENGAGED: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['in-progress', 'waiting'])
 
+/** A claim its holder has not finished. Wider than engagement on purpose —
+ *  it answers "is this agent empty", never "is this agent working". */
+const UNDONE: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['assigned', 'in-progress', 'waiting'])
+
+/** The claims whose silence can stall. `waiting` is absent BY RULING (115):
+ *  a parked task's holder owes nothing, so its age measures nothing about
+ *  the holder — it is the ORCHESTRATOR's reminder clock, on the blocker. */
+const STALLING: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['assigned', 'in-progress'])
+
 // ── Decisions ────────────────────────────────────────────────────
 
 const decideStatus = (state: TasksState, cmd: StatusCommand): StatusDecision => {
@@ -646,6 +655,44 @@ export const tasks: TasksContract = {
 
   activeTaskOf: (state, agent) =>
     [...board(state).values()].map((e) => e.task).find((t) => ENGAGED.has(t.status) && heldBy(t, agent)),
+
+  // ONE WALK, THREE FACTS — and they are deliberately not the same
+  // question. `engaged` starts the stuck clock, `holdsUndone` only says the
+  // agent is not empty, and the floor comes from stalling claims alone. The
+  // shakedown's probe loop was one composer answering all three with one
+  // status filter it wrote itself; stating them together here is what stops
+  // the next composer from doing it again.
+  supervisionLoadOf: (state, agent) => {
+    let engaged = false
+    let holdsUndone = false
+    let newest: { at: string; ms: number } | undefined
+    for (const { task } of board(state).values()) {
+      if (!heldBy(task, agent)) continue
+      if (!UNDONE.has(task.status)) continue
+      holdsUndone = true
+      if (task.status === 'in-progress') engaged = true
+      if (!STALLING.has(task.status)) continue
+      // ORDERED BY INSTANT, REPORTED AS THE STRING. Old logs hold stamps in
+      // more than one ISO shape, and those sort lexicographically in an
+      // order that is not chronological.
+      //
+      // AN UNREADABLE STAMP IS NOT EVIDENCE and supplies no floor at all
+      // (ruled, task 115): measuring silence needs to know when it began,
+      // and a claim that cannot say is skipped rather than ordered against
+      // the ones that can. With none readable the key is absent and the
+      // holder is simply not in the disconnected view — honest absence,
+      // where a floor invented at `now` would be exclusion dressed as
+      // inclusion, resetting every tick so the row could never alarm.
+      const ms = Date.parse(task.updatedAt)
+      if (!Number.isFinite(ms)) continue
+      if (newest === undefined || ms > newest.ms) newest = { at: task.updatedAt, ms }
+    }
+    const newestStallingClaim = newest?.at
+    // ABSENT, not undefined-valued: no stalling claim is the disconnected
+    // agent's ticket OUT of the supervision view, and a key carrying
+    // undefined reads as a floor to anyone spreading this into facts.
+    return newestStallingClaim === undefined ? { engaged, holdsUndone } : { engaged, holdsUndone, newestStallingClaim }
+  },
 
   nextTaskId: (state) => {
     let highest = 0

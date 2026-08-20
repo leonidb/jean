@@ -248,31 +248,19 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
       // NOTIFIER view above keeps the honest blank deliberately.
       agents: cast.flatMap((a) => {
         const live = connected.get(a.name) ?? false
-        const board = tasks.all(tasksState)
-        const mine = (t: (typeof board)[number]) => t.agent === a.name || t.queue === a.name
-        // THE PINNED PREDICATE (ruled, task 115): `engaged` is in-progress
-        // ONLY — this harness's first composition inherited `activeTaskOf`
-        // (whose engaged set includes `waiting` for a different consumer),
-        // the same seam bug the adapter shipped, and scenario 5 SAW the
-        // parked holder's probe noise and tolerated it. Switches to
-        // `tasks.supervisionLoadOf` when the D-side lands it.
-        const engaged = board.some((t) => t.status === 'in-progress' && mine(t))
-        const holdsUndone = board.some(
-          (t) => (t.status === 'in-progress' || t.status === 'assigned' || t.status === 'waiting') && mine(t),
-        )
-        // The disconnected floor: the newest STALLING claim — assigned or
+        // THE PINNED PREDICATE (ruled, task 115), read from the tasks module.
+        // This harness's first composition inherited `activeTaskOf` (whose
+        // engaged set includes `waiting` for a different consumer) — the same
+        // seam bug the adapter shipped, and scenario 5 SAW the parked
+        // holder's probe noise and tolerated it. Two composers re-deriving
+        // one rule is what made that possible; neither derives it now.
+        const load = tasks.supervisionLoadOf(tasksState, a.name)
+        // The disconnected floor is the newest STALLING claim — assigned or
         // in-progress, never waiting (the ruling reaches membership too) —
         // with R13's guard: an unparseable claim yields no floor, and no
-        // honest floor means not in the view — never NaN.
-        const stallingClaims = board
-          .filter((t) => (t.status === 'in-progress' || t.status === 'assigned') && mine(t))
-          .map((t) => Date.parse(t.updatedAt))
-          .filter((ms) => Number.isFinite(ms))
-        const floor = live
-          ? connectedAt.get(a.name)
-          : stallingClaims.length > 0
-            ? Math.max(...stallingClaims)
-            : undefined
+        // honest floor means not in the view, never NaN.
+        const claimed = load.newestStallingClaim === undefined ? Number.NaN : Date.parse(load.newestStallingClaim)
+        const floor = live ? connectedAt.get(a.name) : Number.isFinite(claimed) ? claimed : undefined
         if (!live && floor === undefined) return []
         return [
           {
@@ -280,8 +268,8 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
             role: agents.roleOf(agentsState, a.name) ?? a.role,
             connected: live,
             lastActivityAt: lastActivity.get(a.name) ?? floor,
-            engaged,
-            holdsUndone,
+            engaged: load.engaged,
+            holdsUndone: load.holdsUndone,
             hasPendingMail: mailbox.mailboxOf(mailboxState, a.name).length > 0,
           },
         ]

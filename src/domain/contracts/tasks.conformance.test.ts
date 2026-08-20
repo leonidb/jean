@@ -694,7 +694,11 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
     ).toBeDefined()
     if (!tasks.supervisionLoadOf) throw new Error('unreachable')
 
-    const log = createLog(createClock())
+    // The clock is HELD, not anonymous: every event otherwise carries one
+    // identical `ts`, and a floor that must be the NEWEST of several claims
+    // cannot be told from the oldest when they all coincide.
+    const clock = createClock()
+    const log = createLog(clock)
     let s = tasks.initial()
     // worker-a: one task parked (waiting), one merely assigned — the two
     // statuses the shakedown's probe loop wrongly counted as engagement.
@@ -706,7 +710,10 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
     )
     s = tasks.fold(
       s,
-      log.append('task-status', 'task-201', { from: 'assigned', to: 'in-progress', actor: WORKER_A }),
+      // `from: 'todo'` — creation folds to `todo`, never to `assigned`. The
+      // fold reads only `to`, so a false `from` folds the same and models an
+      // edge the board cannot take.
+      log.append('task-status', 'task-201', { from: 'todo', to: 'in-progress', actor: WORKER_A }),
       ROSTER,
       ORCH,
     )
@@ -727,13 +734,98 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
       ROSTER,
       ORCH,
     )
+    // AND ASSIGNED — the status the floor below reads. Creation alone leaves a
+    // task `todo`, which is nobody's claim: it would give this walk a parked
+    // task and nothing else, and the floor assertion would then pass only for
+    // an implementation that counted the parked one, which is the bug.
+    s = tasks.fold(
+      s,
+      log.append('task-status', 'task-202', { from: 'todo', to: 'assigned', actor: ORCH }),
+      ROSTER,
+      ORCH,
+    )
 
     const parkedLoad = tasks.supervisionLoadOf(s, WORKER_A)
     expect(parkedLoad.engaged).toBe(false) // waiting + assigned: on NO clock
     expect(parkedLoad.holdsUndone).toBe(true) // …but not idle-empty either
     // The disconnected floor comes from the STALLING claim only — the
     // assigned task's updatedAt, never the parked one's.
-    expect(parkedLoad.newestStallingClaim).toBeDefined()
+    expect(parkedLoad.newestStallingClaim).toBe(tasks.taskOf(s, '202')?.updatedAt)
+
+    // THE NEWEST stalling claim, not merely one of them. A floor taken from
+    // the older claim measures silence that already elapsed, which is the
+    // premature-verdict direction this whole ruling exists to close.
+    clock.advance(60_000)
+    s = tasks.fold(
+      s,
+      log.append('task-created', 'task-204', { title: 'newer', description: '', queue: WORKER_A, actor: ORCH }),
+      ROSTER,
+      ORCH,
+    )
+    s = tasks.fold(
+      s,
+      log.append('task-status', 'task-204', { from: 'todo', to: 'assigned', actor: ORCH }),
+      ROSTER,
+      ORCH,
+    )
+    const twoClaims = tasks.supervisionLoadOf(s, WORKER_A)
+    expect(twoClaims.newestStallingClaim).toBe(tasks.taskOf(s, '204')?.updatedAt)
+
+    // A holder of NOTHING BUT PARKED WORK — the shakedown's own agent, and
+    // the case the ruling is about. Not on the stuck clock, not idle-empty,
+    // and NO floor: a parked claim cannot put its disconnected holder in the
+    // supervision view. Asserted as the whole object, so a `waiting` task
+    // leaking into the stalling set fails here rather than passing quietly
+    // on a walk whose other agent supplies a floor anyway.
+    s = tasks.fold(
+      s,
+      log.append('task-created', 'task-205', { title: 'only parked', description: '', queue: 'worker-c', actor: ORCH }),
+      ROSTER,
+      ORCH,
+    )
+    s = tasks.fold(
+      s,
+      log.append('task-status', 'task-205', { from: 'todo', to: 'in-progress', actor: 'worker-c' }),
+      ROSTER,
+      ORCH,
+    )
+    s = tasks.fold(
+      s,
+      log.append('task-status', 'task-205', {
+        from: 'in-progress',
+        to: 'waiting',
+        actor: 'worker-c',
+        blockedOn: 'human',
+      }),
+      ROSTER,
+      ORCH,
+    )
+    expect(tasks.supervisionLoadOf(s, 'worker-c')).toEqual({ engaged: false, holdsUndone: true })
+
+    // AN UNREADABLE STAMP IS NOT EVIDENCE. Logs are permanent and hold
+    // whatever past writers wrote, so a claim whose `ts` no clock produced is
+    // a shape the fold must survive — and it supplies NO floor: silence is
+    // measured from when it began, and this claim cannot say. The holder is
+    // therefore not in the disconnected view at all, which is the honest
+    // answer; flooring it at `now` would read as inclusion while resetting
+    // every tick, so the row could never alarm.
+    s = tasks.fold(
+      s,
+      log.append('task-created', 'task-206', { title: 'undated', description: '', queue: 'worker-d', actor: ORCH }),
+      ROSTER,
+      ORCH,
+    )
+    s = tasks.fold(
+      s,
+      {
+        ...log.append('task-status', 'task-206', { from: 'todo', to: 'assigned', actor: ORCH }),
+        ts: 'no clock wrote this',
+      },
+      ROSTER,
+      ORCH,
+    )
+    expect(tasks.taskOf(s, '206')?.status).toBe('assigned') // the claim IS stalling…
+    expect(tasks.supervisionLoadOf(s, 'worker-d')).toEqual({ engaged: false, holdsUndone: true }) // …and floors nothing
 
     // worker-b: genuinely engaged.
     s = tasks.fold(

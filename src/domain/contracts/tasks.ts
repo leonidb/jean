@@ -376,10 +376,14 @@ export type TasksContract = {
    *     `updatedAt` (never waiting): the disconnected agent's activity
    *     floor and its ticket into the supervision view at all. Absent =
    *     no stalling work = a disconnected holder is not supervised.
-   *  OPTIONAL exactly one round (the member-level red-by-absence — the
-   *  conformance suite asserts its presence naming task 115's D-side);
-   *  required once implemented. */
-  supervisionLoadOf?: (
+   *     Claims with unreadable stamps supply no floor — the floor is the
+   *     newest READABLE stalling claim, and with none readable the key is
+   *     absent: the agent is not in the disconnected view (honest absence
+   *     beats a floor invented at `now`, which resets each tick and can
+   *     never alarm).
+   *  REQUIRED: the round of member-level red-by-absence closed when task
+   *  115's D-side implemented it. */
+  supervisionLoadOf: (
     state: TasksState,
     agent: AgentName,
   ) => { engaged: boolean; holdsUndone: boolean; newestStallingClaim?: string }

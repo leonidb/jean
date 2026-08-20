@@ -62,6 +62,7 @@ import type { StoredEvent } from '../es/index.ts'
 import { runSupervision, type SupervisionExecutor } from './executors.ts'
 
 const EXECUTORS = resolvePath(import.meta.dir, 'executors.ts')
+const SERVER = resolvePath(import.meta.dir, 'server.ts')
 
 const ORCH = 'orchestrator-o'
 const WORKER = 'worker-a'
@@ -276,5 +277,70 @@ describe('pair-laws over supervision', () => {
     const shape = decl.slice(0, decl.indexOf('}') + 1)
     expect(shape).toContain('emit')
     expect(shape).not.toContain('deliver')
+  })
+})
+
+/**
+ * The supervisor's view is COMPOSED, never re-derived (task 115).
+ *
+ * This is the seam the probe loop actually shipped from. `supervisionView`
+ * held its own status filter, inherited from a query written for a different
+ * consumer, and every parked task's holder rode the stuck clock for it. The
+ * domain now states the predicate once and the composer reads it — but a
+ * composer that reads the WRONG field, or quietly grows its own filter back,
+ * is invisible to every behavioural test in this suite: measured during the
+ * fix round, rewiring `engaged` to `holdsUndone` right here left the adapter
+ * suite at 141 pass / 0 fail.
+ *
+ * So the pin is structural, for the same reason task 074's welds are: the
+ * break that matters does not change what any reachable adapter test
+ * observes. It asserts WIRING — that these facts arrive from the domain's
+ * named predicate — and never what the predicate should answer, which is the
+ * domain's own conformance and is pinned there.
+ */
+describe('the supervisor view composes its held-work facts', () => {
+  const bodyOf = async () => {
+    const source = await Bun.file(SERVER).text()
+    const start = source.indexOf('function supervisionView(')
+    expect(start, 'anchor lost: supervisionView is no longer a function declaration in server.ts').toBeGreaterThan(-1)
+    // COMMENTS STRIPPED FIRST. The prose here explains the defect and names
+    // the statuses to do it, so a guard reading the raw text fails on its own
+    // documentation — measured, on the first form of this test. What is being
+    // asserted is what the composer DOES.
+    const body = source
+      .slice(start, source.indexOf('\n  }\n', start))
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '')
+    // THE ANCHOR PROVES ITSELF. A slice that silently caught the wrong span
+    // would make every assertion below vacuous — the failure mode this
+    // dojo has recorded twice — so the landmarks of both arms are checked
+    // before anything is concluded from the text.
+    expect(body, 'the extracted span is not the two-armed view').toContain('connected: true')
+    expect(body).toContain('connected: false')
+    return body
+  }
+
+  test('both arms read the facts from the domain predicate, by name', async () => {
+    const body = await bodyOf()
+    // COUNTED, NOT MERELY PRESENT — one per arm. `toContain` was the first
+    // form here and it was vacuous: the disconnected arm's correct line
+    // satisfied it while the live arm was rewired to the wrong field, which
+    // is the very break this guard exists for. Measured, not reasoned about.
+    expect(body.match(/tasks\.supervisionLoadOf\(/g)?.length).toBe(2)
+    expect(body.match(/engaged: load\.engaged/g)?.length).toBe(2)
+    expect(body.match(/holdsUndone: load\.holdsUndone/g)?.length).toBe(2)
+  })
+
+  test('the composer names no task status at all — there is nothing here to re-derive', async () => {
+    const body = await bodyOf()
+    // Deliberately every status, not just `waiting`: the defect was not one
+    // wrong member, it was a second copy of the rule living at the seam.
+    // Every quoting form, because the single-quoted one is only the shape
+    // the formatter happens to produce today.
+    expect(body).not.toMatch(/['"`](todo|assigned|in-progress|waiting|done|cancelled)['"`]/)
+    // WHAT THIS CANNOT CATCH, stated rather than implied: a filter built
+    // from an imported constant or a locally named set mentions no status
+    // and passes here. It is caught one test up instead — a re-derivation
+    // has to stop reading `load`, and those reads are counted per arm.
   })
 })

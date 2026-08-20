@@ -585,38 +585,36 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     const rows = new Map<AgentName, SupervisedAgentFacts>()
     for (const session of sessions.values()) {
       const role = roleOf(session.name) ?? session.role
+      // THE PINNED PREDICATE (ruled, task 115 — the live probe-loop bug),
+      // read from the tasks module rather than re-derived here. The earlier
+      // composition inherited `activeTaskOf`, whose engaged set includes
+      // `waiting` for a different consumer, so every parked task's holder
+      // rode the stuck clock in a probe→ack→probe loop. The status filter
+      // that replaced it was correct and still a second copy of the rule;
+      // this is the one place it is stated.
+      const load = tasks.supervisionLoadOf(taskState, session.name)
       rows.set(session.name, {
         name: session.name,
         role,
         connected: true,
         lastActivityAt: lastActivity.get(session.name) ?? session.connectedAt,
-        // THE PINNED PREDICATE (ruled, task 115 — the live probe-loop bug):
-        // `engaged` is in-progress ONLY. The earlier composition inherited
-        // `activeTaskOf`, whose engaged set includes `waiting` for a
-        // different consumer, so every parked task's holder rode the stuck
-        // clock in a probe→ack→probe loop. Composed by status filter until
-        // the tasks module's `supervisionLoadOf` lands (task 115's D-side);
-        // then this switches to consume the named predicate.
-        engaged: tasks
-          .all(taskState)
-          .some((t) => t.status === 'in-progress' && (t.agent === session.name || t.queue === session.name)),
-        holdsUndone: tasks
-          .all(taskState)
-          .some(
-            (t) =>
-              (t.status === 'in-progress' || t.status === 'assigned' || t.status === 'waiting') &&
-              (t.agent === session.name || t.queue === session.name),
-          ),
+        engaged: load.engaged,
+        holdsUndone: load.holdsUndone,
         hasPendingMail: mailbox.mailboxOf(mailState, session.name).length > 0,
       })
     }
     const board = tasks.all(taskState)
     for (const task of board) {
-      if (task.status !== 'in-progress' && task.status !== 'assigned') continue
       // OWNER OR QUEUE (codex pass, task 115): the pinned predicate names
       // both — a queue-only assigned claim (old-log shapes predate Q-1's
       // owner-setting) must still put its disconnected holder in the view.
       // A queue naming a non-agent bucket falls out at the role guard.
+      //
+      // EVERY task offers its names, and `newestStallingClaim` decides who
+      // stays: membership is the predicate's answer, not a status filter
+      // here agreeing with it. A holder of nothing but parked work has no
+      // stalling claim, so it is not supervised — and that stays true
+      // without this loop knowing which statuses stall.
       for (const held of [task.agent, task.queue]) {
         if (held === undefined || rows.has(held)) continue
         const role = roleOf(held)
@@ -624,20 +622,26 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
         // supervisor would not probe it anyway; inventing `worker` to make the
         // row well-typed would be the shell deciding what it does not know.
         if (role === undefined) continue
-        const heldClock = board
-          .filter(
-            (t) => (t.agent === held || t.queue === held) && (t.status === 'in-progress' || t.status === 'assigned'),
-          )
-          .reduce((hi, t) => Math.max(hi, instant(t.updatedAt, 0)), 0)
+        const load = tasks.supervisionLoadOf(taskState, held)
+        if (load.newestStallingClaim === undefined) continue
+        // NO HONEST FLOOR, NO ROW (ruled, task 115). This arm used to floor an
+        // unreadable claim at `now`, which reads as inclusion and is not: a
+        // floor that moves with every tick means quiet never accumulates, so
+        // the row could never alarm. The predicate already withholds the key
+        // for unreadable claims; this is the same answer one layer out, and
+        // it keeps R13's promise that no fact leaves here as NaN.
+        const floor = lastActivity.get(held) ?? instant(load.newestStallingClaim, Number.NaN)
+        if (!Number.isFinite(floor)) continue
         rows.set(held, {
           name: held,
           role,
           connected: false,
-          lastActivityAt: lastActivity.get(held) ?? (heldClock > 0 ? heldClock : now),
+          // The registry forgets a session's clock; the board does not.
+          lastActivityAt: floor,
           // Inert for the down branch (which keys on silence alone), set
           // honestly: this row exists BECAUSE it holds stalling work.
-          engaged: board.some((t) => (t.agent === held || t.queue === held) && t.status === 'in-progress'),
-          holdsUndone: true,
+          engaged: load.engaged,
+          holdsUndone: load.holdsUndone,
           hasPendingMail: mailbox.mailboxOf(mailState, held).length > 0,
         })
       }
