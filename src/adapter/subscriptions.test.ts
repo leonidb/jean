@@ -75,7 +75,7 @@ const SEED: StoredEvent[] = [
 
 beforeAll(async () => {
   dir = mkdtempSync(resolve(tmpdir(), 'jean-e2-subs-'))
-  writeFileSync(resolve(dir, 'events.jsonl'), `${SEED.map((e) => JSON.stringify(e)).join('\n')}\n`)
+  writeFileSync(resolve(dir, 'history.jsonl'), `${SEED.map((e) => JSON.stringify(e)).join('\n')}\n`)
   server = await createAdapterServer({ dataDir: dir })
   base = `http://localhost:${server.port}`
 })
@@ -86,7 +86,7 @@ afterAll(() => {
 })
 
 async function logged(): Promise<StoredEvent[]> {
-  const text = await Bun.file(resolve(dir, 'events.jsonl')).text()
+  const text = await Bun.file(resolve(dir, 'history.jsonl')).text()
   return text
     .split('\n')
     .filter(Boolean)

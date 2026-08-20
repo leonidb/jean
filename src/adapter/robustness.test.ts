@@ -86,7 +86,7 @@ describe('an append that fails', () => {
     // The log becomes unwritable under the running server. Contrived, and
     // the shape is not: a full disk, a revoked permission, a filesystem gone
     // read-only are all this.
-    chmodSync(resolve(dir, 'events.jsonl'), 0o444)
+    chmodSync(resolve(dir, 'history.jsonl'), 0o444)
     const res = await post(server, '/ack', { pairs: [{ id: pair.id, code: pair.code }] }, 'worker-a')
 
     // THE APPEND IS WHAT CLEARS. `applyAck` decided, the append failed, and
@@ -98,7 +98,7 @@ describe('an append that fails', () => {
     const after = await mailboxOf(server, 'worker-a')
     expect(after.events.map((e) => e.id)).toEqual(before.events.map((e) => e.id))
 
-    chmodSync(resolve(dir, 'events.jsonl'), 0o644)
+    chmodSync(resolve(dir, 'history.jsonl'), 0o644)
   })
 })
 
@@ -268,7 +268,7 @@ describe('an emission that cannot be appended', () => {
     server.attachSurface({ name: 'worker-a', role: 'worker', deliver: () => true })
     await post(server, '/send', { from: 'orchestrator-o', to: 'worker-a', text: 'hello' })
 
-    chmodSync(resolve(dir, 'events.jsonl'), 0o444)
+    chmodSync(resolve(dir, 'history.jsonl'), 0o444)
     server.tick()
     // POLLED, not slept for: the append is asynchronous and its rejection
     // lands a microtask later, so a fixed wait is a race that passes on a
@@ -277,7 +277,7 @@ describe('an emission that cannot be appended', () => {
     for (let i = 0; i < 40 && !lines.join('').includes('LOST EMISSION'); i++) {
       await new Promise((r) => setTimeout(r, 25))
     }
-    chmodSync(resolve(dir, 'events.jsonl'), 0o644)
+    chmodSync(resolve(dir, 'history.jsonl'), 0o644)
 
     // Both units advance their state as they DECIDE, so an append that fails
     // here is an emission the unit believes it made. The notifier can be told

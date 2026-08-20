@@ -1712,7 +1712,7 @@ async function cmdInfraStart() {
     }
   }
 
-  const serverPath = resolve(cliDir(), '../infra/server.ts')
+  const serverPath = resolve(cliDir(), '../adapter/server.ts')
   const child = Bun.spawn(['bun', 'run', serverPath], {
     cwd: dataDir,
     env: { ...process.env, JEAN_DATA_DIR: dataDir },

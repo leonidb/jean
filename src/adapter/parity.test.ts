@@ -145,7 +145,7 @@ describe('GET /status — the operator’s first command', () => {
     if (seen === undefined) throw new Error('fixture: nothing pending')
 
     await post(server, '/ack', { pairs: [{ id: seen.id, code: seen.code }] }, 'worker-a')
-    const log = (await Bun.file(resolve(dir, 'events.jsonl')).text())
+    const log = (await Bun.file(resolve(dir, 'history.jsonl')).text())
       .split('\n')
       .filter(Boolean)
       .map(
@@ -343,7 +343,7 @@ describe('GET /history — `jean task log`', () => {
     const dir = mkdtempSync(resolve(tmpdir(), 'jean-e4-diag-'))
     openDirs.push(dir)
     writeFileSync(
-      resolve(dir, 'events.jsonl'),
+      resolve(dir, 'history.jsonl'),
       `${JSON.stringify({
         id: 1,
         ts: '2026-08-18T09:00:00.000Z',
@@ -392,7 +392,7 @@ describe('GET /permissions — the historical reader', () => {
       stream: `agent-${data.agent}`,
       data,
     }))
-    writeFileSync(resolve(dir, 'events.jsonl'), `${seeded.map((e) => JSON.stringify(e)).join('\n')}\n`)
+    writeFileSync(resolve(dir, 'history.jsonl'), `${seeded.map((e) => JSON.stringify(e)).join('\n')}\n`)
     const server = await createAdapterServer({ dataDir: dir })
     openServers.push(server)
 

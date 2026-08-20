@@ -50,7 +50,7 @@ async function boot(dataDir: string): Promise<AdapterHandle> {
 }
 
 async function logged(dir: string): Promise<StoredEvent[]> {
-  const file = Bun.file(resolve(dir, 'events.jsonl'))
+  const file = Bun.file(resolve(dir, 'history.jsonl'))
   if (!(await file.exists())) return []
   return (await file.text())
     .split('\n')

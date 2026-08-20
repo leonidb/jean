@@ -44,7 +44,7 @@
  * makes disabled triggers fire on every boot, and nothing fails.
  */
 
-import { type FSWatcher, mkdirSync, watch } from 'node:fs'
+import { type FSWatcher, mkdirSync, unlinkSync, watch, writeFileSync } from 'node:fs'
 import { resolve as resolvePath } from 'node:path'
 import { agents as agentsModule } from '../domain/agents/index.ts'
 import type { AckPair, MailboxState, Selector, ViewFacts } from '../domain/contracts/mailbox.ts'
@@ -67,10 +67,14 @@ import { routing } from '../domain/routing/index.ts'
 import { tasks } from '../domain/tasks/index.ts'
 import { triggers } from '../domain/triggers/index.ts'
 import { createStore, jsonlBackend, memoryBackend, type StoredEvent } from '../es/index.ts'
-import { INFRA_IDENTITY } from '../probe.ts'
+import { resolveConfig } from '../infra/config.ts'
+import { identityFromConfig, loadPeers } from '../infra/peers.ts'
+import { upsertDojo } from '../infra/registry.ts'
+import { INFRA_IDENTITY, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Attention, type AttentionConfig, createAttention } from './attention.ts'
 import type { Caller, SurfaceContext } from './context.ts'
 import type { SupervisionExecutor } from './executors.ts'
+import { attachPeers, createHosting, type Hosting } from './hosting.ts'
 import { scanPlaybooks } from './playbook-files.ts'
 import { createScheduler, type Scheduler } from './schedule.ts'
 import { knowledgeRoutes } from './surfaces/knowledge.ts'
@@ -91,6 +95,11 @@ export type AdapterPorts = {
   /** Search telemetry. Best-effort by contract: it carries private query text
    *  and is for offline scoring, so a failure here never fails a search. */
   logRetrieval: (record: Record<string, unknown>) => void
+  /** What `/status` says about the chat surface. A PORT, because the bridge
+   *  is a transport this server hosts rather than owns — and because the
+   *  honest answer to "is one configured" comes from the config, not from
+   *  whether a session happens to be attached right now. */
+  bridgeStatus: () => unknown
 }
 
 export type ServerOptions = {
@@ -139,6 +148,11 @@ export type AdapterHandle = {
    *  that has just changed the world and wants the consequence now (a test,
    *  a shakedown) asks directly. */
   tick: () => void
+  /** Infra's own word to an agent, through the ordinary routing decision.
+   *  The peer hop needs it: its POST is async, so a failure lands after the
+   *  synchronous `delivered` the sender was already told — this is the only
+   *  path by which the truth reaches them. */
+  notify: (to: AgentName, text: string) => Promise<void>
 }
 
 /**
@@ -255,9 +269,20 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     log: () => {},
     peerDescriptionOf: () => undefined,
     logRetrieval: () => {},
+    bridgeStatus: () => ({ configured: false }),
     ...options.ports,
   }
-  const store = createStore(options.dataDir ? jsonlBackend(`${options.dataDir}/events.jsonl`) : memoryBackend())
+  // THE LOG IS `history.jsonl`, and that one string is the switch.
+  //
+  // Every real dojo's events live in `<dataDir>/history.jsonl` — the old
+  // server's name for the same file, in the same format (R12 replayed these
+  // exact files through these exact folds). The adapter defaulted to
+  // `events.jsonl` while nothing but its own tests read it, which would have
+  // meant the new server booting against an EMPTY log on a dojo with months
+  // of history: every projection blank, every mailbox empty, and the
+  // fallback's same-log guarantee false in both directions. Caught by codex
+  // fact-checking the runbook (task 110).
+  const store = createStore(options.dataDir ? jsonlBackend(`${options.dataDir}/history.jsonl`) : memoryBackend())
 
   // Folded state, one projection per module — rebuilt by replay, evolved by
   // append. Kept as plain values: every fold is a pure domain function.
@@ -1244,10 +1269,12 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
       // about is how many events are unhandled somewhere.
       pendingEvents: new Set(mailbox.pendingPairs(mailState).map((pair) => pair.eventId)).size,
       activeTriggers: triggers.all(triggerState).filter((t) => t.status === 'active').length,
-      // The bridge is attached as a SURFACE, not owned by this server, so
-      // there is no health to report from here. E3's seam is the whole of
-      // what the adapter knows about it.
-      bridge: { configured: [...sessions.values()].some((session) => session.role === 'user') },
+      // FROM THE PORT, not inferred from live sessions. A configured bridge
+      // that has not attached yet — or has died — is `configured: true` and
+      // disconnected, which is the distinction an operator reading this at
+      // 3am actually needs; inferring it from whether a `user` session exists
+      // answers a different question and calls it the same name.
+      bridge: ports.bridgeStatus(),
     })
   }
 
@@ -1579,6 +1606,10 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
       attention?.runNotifier()
       attention?.runSupervisor()
     },
+
+    async notify(to, text) {
+      await performSend({ from: 'infra', to, text })
+    },
   }
 }
 
@@ -1613,4 +1644,165 @@ export function replayInto(events: readonly StoredEvent[]): {
     playbookState = playbooks.fold(playbookState, event)
   }
   return { agents: agentState, tasks: taskState, mail: mailState, triggers: triggerState, playbooks: playbookState }
+}
+
+// ── CLI entrypoint ────────────────────────────────────────────────
+//
+// Everything above is a library; this is the only part that runs when the file
+// is executed directly — `bun run src/adapter/server.ts`, which is what
+// `jean infra start` spawns. It mirrors the old server's launcher: resolve the
+// data dir, enforce one instance per dojo, bind, write the runtime files the
+// CLI polls for, and sweep them on the way out.
+
+/** Remove a dojo's runtime files. Best-effort in both directions: a file that
+ *  is not there is the normal case on a clean exit path that already ran. */
+function cleanupRuntimeFiles(dataDir: string): void {
+  for (const name of ['infra.port', 'infra.pid']) {
+    try {
+      unlinkSync(resolvePath(dataDir, name))
+    } catch {}
+  }
+}
+
+/**
+ * Refuse to start, in the old server's words.
+ *
+ * The message matters as much as the refusal: an operator who typed `jean
+ * infra start` twice needs to be told which of the two things happened —
+ * their own dojo is already up, or something else owns the port.
+ */
+class InfraStartError extends Error {}
+
+/**
+ * One instance per dojo.
+ *
+ * ONE PROBE, AND THEN THE REAL BIND IS THE TEST. The old launcher also
+ * SPECULATIVELY bound the port and released it to see whether it was free —
+ * and that probe bound `127.0.0.1` while the server itself binds the
+ * wildcard, so the two are not the same question. Measured on the boot
+ * check: with an unrelated process listening on `*:8791` over IPv6, the
+ * speculative bind SUCCEEDED on IPv4 loopback, the real bind then failed,
+ * and the operator got a raw `EADDRINUSE` stack trace instead of the
+ * sentence this function exists to produce. Letting the one real bind answer
+ * the question makes a mismatch impossible.
+ */
+async function enforceSingleInstance(dataDir: string, port: number): Promise<void> {
+  const live = await probeInfra(port)
+  if (live?.name === INFRA_IDENTITY) {
+    const sameDojo = live.dataDir === '' || live.dataDir === dataDir
+    throw new InfraStartError(
+      sameDojo
+        ? `Infrastructure already running for this dojo (pid ${live.pid}, port ${port}). Use "jean infra stop" first.`
+        : `Port ${port} is held by another dojo's infra (${live.dataDir}). Set a different \`port\` in jean.config.json.`,
+    )
+  }
+  // Nothing jean-shaped is answering, so any pid/port files still sitting
+  // there are a crash's leftovers rather than a running server's.
+  const { pid: stale } = readRuntimeFiles(dataDir)
+  if (stale !== null) {
+    process.stderr.write(`[jean:new] cleaning up stale pid/port files (pid ${stale})\n`)
+    cleanupRuntimeFiles(dataDir)
+  }
+}
+
+/** The bind, with its one expected failure renamed. Anything else is a bug
+ *  and keeps its stack. */
+async function startOrRefuse(options: ServerOptions & { port: number }): Promise<AdapterHandle> {
+  try {
+    return await createAdapterServer(options)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'EADDRINUSE') {
+      throw new InfraStartError(`Port ${options.port} is in use by something that is not a jean infra.`)
+    }
+    throw err
+  }
+}
+
+if (import.meta.main) {
+  const dataDir = resolvePath(process.env.JEAN_DATA_DIR ?? '.')
+  // `resolveConfig`, not `readConfig`: the env overrides the file, and
+  // `JEAN_PORT` is how an operator moves a dojo off a taken port without
+  // editing its config. Reading the file alone would bind and probe the
+  // wrong port while looking like it obeyed (codex pass, task 111).
+  const config = resolveConfig(dataDir)
+  const port = config.port ?? 8700
+  try {
+    await enforceSingleInstance(dataDir, port)
+
+    // The bridge is selected before the server exists, because `/status` must
+    // be able to answer "is one configured" from the first request — hosting
+    // holds it and hands the answer over as a port.
+    let hosting: Hosting | undefined
+    // ONE SNAPSHOT OF THE PEER REGISTRY, read here and used by both halves.
+    // The registry is static until restart — `jean peer add` requires a stop
+    // and start, and the old wiring said so in as many words — so a
+    // per-send re-read would let the ENRICHMENT see a peer that outbound
+    // routing has no session for, and disagree with itself between two
+    // reads of one file (codex pass, task 113).
+    const peers = loadPeers(dataDir).peers
+    const infra = await startOrRefuse({
+      dataDir,
+      port,
+      // THE TIMERS RUN IN PRODUCTION. Off by default because a test suite
+      // must not inherit a clock; on here, because without them nothing ever
+      // announces and the whole attention system is inert.
+      startTimers: true,
+      ports: {
+        log: (line) => process.stderr.write(line),
+        bridgeStatus: () => hosting?.bridgeStatus() ?? { configured: false },
+        // THE RECEIVER'S OWN DESCRIPTION of a peer — from this dojo's
+        // registry, never from the message, which is the routing contract's
+        // enrichment rule in one line.
+        peerDescriptionOf: (name) => peers[name]?.description,
+      },
+    })
+
+    // ── THE HANDLERS ARE ARMED HERE, AND NOT EARLIER ──
+    //
+    // The old launcher armed them immediately BEFORE its single-instance
+    // check, and that ordering has a bite: a second `jean infra start`
+    // refuses, exits, and its exit handler sweeps the runtime files of the
+    // server that is still running — leaving a live infra that no CLI
+    // command can discover. Arming after a successful bind keeps every
+    // property the old comment names (a crash still cleans up; a failure
+    // before the bind still leaves the files alone) and drops that one.
+    // Deliberate deviation from "mirror the old block"; flagged in handover.
+    process.on('exit', () => cleanupRuntimeFiles(dataDir))
+    process.on('SIGINT', () => process.exit(0))
+    process.on('SIGTERM', () => process.exit(0))
+
+    // ── PEERS BEFORE THE READINESS SIGNAL ──
+    //
+    // The port file's appearance is what tells the CLI the dojo is up, so
+    // everything a first request could need must already be true. Peers
+    // attach SYNCHRONOUSLY and cost nothing, and a send arriving in the gap
+    // would find no session and record `delivered: false` about a peer that
+    // is perfectly reachable (codex pass, task 113).
+    attachPeers(infra, peers, (line) => process.stderr.write(line), identityFromConfig(dataDir))
+
+    writeFileSync(resolvePath(dataDir, 'infra.port'), String(infra.port))
+    writeFileSync(resolvePath(dataDir, 'infra.pid'), String(process.pid))
+    // A convenience, and never a reason to fail a start.
+    try {
+      upsertDojo({ path: resolvePath(dataDir, '..'), port: infra.port, identity: config.identity })
+    } catch {}
+
+    // ── THE BRIDGE AFTER IT ──
+    //
+    // Its `start` resolves when the TRANSPORT does, which is a network round
+    // trip and sometimes a long one. A dojo must be discoverable while its
+    // chat surface is still shaking hands, and a transport that never
+    // connects must not take the dojo with it — the old launcher put it here
+    // for the same reason.
+    hosting = createHosting(infra, config, dataDir, (line) => process.stderr.write(line))
+    void hosting.start().catch((err: unknown) => {
+      process.stderr.write(`[jean:new] bridge failed to start: ${String(err)}\n`)
+    })
+  } catch (err) {
+    if (err instanceof InfraStartError) {
+      process.stderr.write(`${err.message}\n`)
+      process.exit(1)
+    }
+    throw err
+  }
 }
