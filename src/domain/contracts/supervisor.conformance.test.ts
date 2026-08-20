@@ -48,7 +48,7 @@ const CONFIG: SupervisorConfig = {
 }
 
 function agent(over: Partial<SupervisedAgentFacts> & { name: string }): SupervisedAgentFacts {
-  return { role: 'worker', connected: true, holdsWork: false, hasPendingMail: false, ...over }
+  return { role: 'worker', connected: true, engaged: false, holdsUndone: false, hasPendingMail: false, ...over }
 }
 
 function view(now: number, over?: Partial<SupervisorView>): SupervisorView {
@@ -188,13 +188,25 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
   })
 
   test('DOWN KEYS ON ACTIVITY, NEVER ACK: a busy agent with unread mail and recent activity is never reported', () => {
-    const busy = agent({ name: WORKER, hasPendingMail: true, holdsWork: true, lastActivityAt: T0 - 60_000 })
+    const busy = agent({
+      name: WORKER,
+      hasPendingMail: true,
+      engaged: true,
+      holdsUndone: true,
+      lastActivityAt: T0 - 60_000,
+    })
     const { collected } = run(supervisor.initial(), T0, T0 + 2 * HOUR, (now) => view(now, { agents: [busy] }))
     expect(collected.flatMap((c) => c.effects).filter((e) => e.kind === 'report')).toEqual([])
   })
 
   test('§0: the orchestrator is NEVER probed and never the subject of a report, however silent', () => {
-    const silentOrch = agent({ name: ORCH, role: 'sensei', lastActivityAt: T0 - 7 * DAY, holdsWork: true })
+    const silentOrch = agent({
+      name: ORCH,
+      role: 'sensei',
+      lastActivityAt: T0 - 7 * DAY,
+      engaged: true,
+      holdsUndone: true,
+    })
     const { collected } = run(supervisor.initial(), T0, T0 + 3 * DAY, (now) => view(now, { agents: [silentOrch] }))
     const about = collected
       .flatMap((c) => c.effects)
@@ -205,7 +217,13 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     // the case above pinned the WEAKER rule. An orchestrator whose record
     // says `worker` sails through the role filter; only §0's own exclusion
     // stands between it and a probe.
-    const workerRoleOrch = agent({ name: ORCH, role: 'worker', lastActivityAt: T0 - 7 * DAY, holdsWork: true })
+    const workerRoleOrch = agent({
+      name: ORCH,
+      role: 'worker',
+      lastActivityAt: T0 - 7 * DAY,
+      engaged: true,
+      holdsUndone: true,
+    })
     const byName = run(supervisor.initial(), T0, T0 + 3 * DAY, (now) => view(now, { agents: [workerRoleOrch] }))
     expect(byName.collected.flatMap((c) => c.effects)).toEqual([])
   })
@@ -214,7 +232,13 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     // A disconnected worker holding work goes down; it comes back HOLDING
     // NOTHING (the orchestrator rerouted its tasks) — the recovery must
     // still be reported: the episode that produced a report ends with one.
-    const goneDown = agent({ name: WORKER, connected: false, holdsWork: true, lastActivityAt: T0 - DAY })
+    const goneDown = agent({
+      name: WORKER,
+      connected: false,
+      engaged: true,
+      holdsUndone: true,
+      lastActivityAt: T0 - DAY,
+    })
     const phase1 = run(supervisor.initial(), T0, T0 + DAY, (now) => view(now, { agents: [goneDown] }))
     const downs = phase1.collected.flatMap((c) => c.effects).filter((e) => e.kind === 'report' && e.status === 'down')
     // EXACTLY one — the edge, not a stream (task 100: `toBeGreaterThan(0)`
@@ -223,7 +247,13 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     expect(downs.length).toBe(1)
     for (const d of downs) if (d.kind === 'report') expect(d.to).toBe(ORCH)
     // The worker returns — connected, active, holding nothing.
-    const returned = agent({ name: WORKER, connected: true, holdsWork: false, lastActivityAt: T0 + DAY + 60_000 })
+    const returned = agent({
+      name: WORKER,
+      connected: true,
+      engaged: false,
+      holdsUndone: false,
+      lastActivityAt: T0 + DAY + 60_000,
+    })
     const phase2 = run(phase1.state, T0 + DAY + 60_000, T0 + DAY + 30 * 60_000, (now) =>
       view(now, { agents: [returned] }),
     )
@@ -239,7 +269,7 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
   })
 
   test('UP-BUT-STUCK: session alive, holding work, jean-silent past the bound, probed and unanswered → reported once to the orchestrator', () => {
-    const stuck = (last: number) => [agent({ name: WORKER, holdsWork: true, lastActivityAt: last })]
+    const stuck = (last: number) => [agent({ name: WORKER, engaged: true, holdsUndone: true, lastActivityAt: last })]
     const { collected } = run(supervisor.initial(), T0, T0 + 6 * HOUR, (now) => view(now, { agents: stuck(T0) }))
     const all = collected.flatMap((c) => c.effects)
     const probes = all.filter((e) => e.kind === 'probe')
@@ -253,6 +283,76 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     expect(reportAt - probeAt).toBeGreaterThanOrEqual(CONFIG.probeTimeoutMs) // the answer window elapsed
   })
 
+  test('RULED (task 115): a waiting or assigned task puts its holder on NO clock — never probed, never pinged, however silent', () => {
+    // The live shakedown's probe loop: the builder held ONE waiting task
+    // (blocked external, snoozed) and was probed every 31 quiet minutes
+    // forever — probe, ack, ack resets the clock, probe again. `engaged`
+    // excludes waiting BY RULING (the parked task reminds the orchestrator
+    // on its blocker's clock; the holder owes nothing) and excludes
+    // assigned (an undispatched assignment is the orchestrator's board
+    // follow-up). `holdsUndone` keeps the same holder out of the
+    // idle-empty ping too — the identical bug at a daily cadence. The one
+    // fact shape below covers both cases.
+    const parkedHolder = agent({ name: WORKER, engaged: false, holdsUndone: true, lastActivityAt: T0 - 7 * DAY })
+    const { collected } = run(supervisor.initial(), T0, T0 + 3 * DAY, (now) => view(now, { agents: [parkedHolder] }))
+    expect(collected.flatMap((c) => c.effects)).toEqual([])
+    // The mirror: the ruling removes the FALSE clock, not the real one —
+    // an engaged holder rides the stuck clock exactly as before.
+    const engagedHolder = agent({ name: 'worker-e', engaged: true, holdsUndone: true, lastActivityAt: T0 })
+    const stuck = run(supervisor.initial(), T0, T0 + 2 * HOUR, (now) => view(now, { agents: [engagedHolder] }))
+    expect(stuck.collected.flatMap((c) => c.effects).filter((e) => e.kind === 'probe').length).toBe(1)
+  })
+
+  test('a STUCK probe lapses with the engagement; an idle ping never answers for it — no verdict without a fresh question (task 115)', () => {
+    // Walk A: probed mid-work, then the task PARKS. The question is moot —
+    // and the stale mark must not survive to trigger an instant verdict
+    // when the agent re-engages minutes-silent later. The re-engagement
+    // earns a FRESH probe first, then the ordinary window.
+    const engaged = (last: number) => [agent({ name: WORKER, engaged: true, holdsUndone: true, lastActivityAt: last })]
+    const parked = (last: number) => [agent({ name: WORKER, engaged: false, holdsUndone: true, lastActivityAt: last })]
+    let phase = run(supervisor.initial(), T0, T0 + CONFIG.stuckAfterMs + 60_000, (now) =>
+      view(now, { agents: engaged(T0) }),
+    )
+    expect(phase.collected.flatMap((c) => c.effects).filter((e) => e.kind === 'probe').length).toBe(1)
+    // Parks before the answer window closes; silence continues.
+    phase = run(phase.state, T0 + CONFIG.stuckAfterMs + 2 * 60_000, T0 + HOUR, (now) =>
+      view(now, { agents: parked(T0) }),
+    )
+    expect(phase.collected).toEqual([]) // no verdict off the moot question
+    // Re-engages, still silent since T0 — long past the bound. The stale
+    // ask must not produce an INSTANT verdict; the re-engagement earns a
+    // fresh probe first, and only ITS answer window may report.
+    phase = run(phase.state, T0 + HOUR + 60_000, T0 + HOUR + 10 * 60_000, (now) => view(now, { agents: engaged(T0) }))
+    const effects = phase.collected.flatMap((c) => c.effects)
+    expect(effects.filter((e) => e.kind === 'probe').length).toBe(1) // the fresh question
+    const freshProbeAt = phase.collected.find((c) => c.effects.some((e) => e.kind === 'probe'))?.at ?? 0
+    const reportAt = phase.collected.find((c) => c.effects.some((e) => e.kind === 'report'))?.at
+    if (reportAt !== undefined) {
+      // A report may only follow the FRESH ask's full window — never the
+      // stale one's (which expired an hour ago and would fire instantly).
+      expect(reportAt - freshProbeAt).toBeGreaterThanOrEqual(CONFIG.probeTimeoutMs)
+    }
+    // Walk B: an IDLE PING's mark reaching the engaged branch must not
+    // stand in for a stuck probe (pre-115 leak: idle→engaged fired the
+    // verdict with no stuck question ever asked).
+    const idle = (last: number) => [agent({ name: 'worker-i', lastActivityAt: last })]
+    let b = run(supervisor.initial(), T0, T0 + 10 * 60_000, (now) => view(now, { agents: idle(T0 - DAY) }))
+    expect(b.collected.flatMap((c) => c.effects).filter((e) => e.kind === 'probe').length).toBe(1) // the idle ping
+    const engagedI = (last: number) => [
+      agent({ name: 'worker-i', engaged: true, holdsUndone: true, lastActivityAt: last }),
+    ]
+    b = run(b.state, T0 + 20 * 60_000, T0 + 40 * 60_000, (now) => view(now, { agents: engagedI(T0 - DAY) }))
+    const bEffects = b.collected.flatMap((c) => c.effects)
+    // The first thing that happens is a STUCK probe — never a report.
+    const firstReportAt = b.collected.find((c) => c.effects.some((e) => e.kind === 'report'))?.at
+    const stuckProbeAt = b.collected.find((c) => c.effects.some((e) => e.kind === 'probe'))?.at
+    expect(stuckProbeAt).toBeDefined()
+    if (firstReportAt !== undefined && stuckProbeAt !== undefined) {
+      expect(firstReportAt - stuckProbeAt).toBeGreaterThanOrEqual(CONFIG.probeTimeoutMs)
+    }
+    expect(bEffects.filter((e) => e.kind === 'report' && e.status === 'up-but-stuck').length).toBeLessThanOrEqual(1)
+  })
+
   test('ROW 8 GATES PROBES ONLY (task 102): mail never shields a verdict — a probe mints mail, and a blanket exit cancelled every report', () => {
     // (a) A DISCONNECTED agent with queued mail still reads down — its
     // ladder is refused wakes, not liveness. The first composed run showed
@@ -261,7 +361,8 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     const goneWithMail = agent({
       name: WORKER,
       connected: false,
-      holdsWork: true,
+      engaged: true,
+      holdsUndone: true,
       hasPendingMail: true,
       lastActivityAt: T0 - DAY,
     })
@@ -271,7 +372,7 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     // (b) The stuck VERDICT proceeds although the probe's own mail is now
     // pending: the probe was already asked; the answer window is what runs.
     const stuck = (pendingMail: boolean) => [
-      agent({ name: 'worker-s', holdsWork: true, hasPendingMail: pendingMail, lastActivityAt: T0 }),
+      agent({ name: 'worker-s', engaged: true, holdsUndone: true, hasPendingMail: pendingMail, lastActivityAt: T0 }),
     ]
     const probed = run(supervisor.initial(), T0, T0 + CONFIG.stuckAfterMs + 60_000, (now) =>
       view(now, { agents: stuck(false) }),
@@ -290,7 +391,13 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     // (c) The MIRROR stays: a mail-holding quiet worker is still never
     // asked a NEW question — no probe, however silent (row 8's actual rule,
     // already pinned above; re-asserted here against this fixture's shape).
-    const quietWithMail = agent({ name: 'worker-q', hasPendingMail: true, holdsWork: true, lastActivityAt: T0 - DAY })
+    const quietWithMail = agent({
+      name: 'worker-q',
+      hasPendingMail: true,
+      engaged: true,
+      holdsUndone: true,
+      lastActivityAt: T0 - DAY,
+    })
     const noProbe = run(supervisor.initial(), T0, T0 + 2 * HOUR, (now) => view(now, { agents: [quietWithMail] }))
     expect(noProbe.collected.flatMap((c) => c.effects).filter((e) => e.kind === 'probe')).toEqual([])
   })
@@ -323,7 +430,7 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     // same unclosed claim in the orchestrator's hands, so the ruling extends
     // the return to every report kind.
     const phase1 = run(supervisor.initial(), T0, T0 + HOUR, (now) =>
-      view(now, { agents: [agent({ name: WORKER, holdsWork: true, lastActivityAt: T0 })] }),
+      view(now, { agents: [agent({ name: WORKER, engaged: true, holdsUndone: true, lastActivityAt: T0 })] }),
     )
     const stuckReports = phase1.collected
       .flatMap((c) => c.effects)
@@ -332,7 +439,7 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     // The agent wakes and acts: exactly one `recovered` closes the alarm.
     const wokeAt = T0 + HOUR + 60_000
     const phase2 = run(phase1.state, wokeAt, wokeAt + 20 * 60_000, (now) =>
-      view(now, { agents: [agent({ name: WORKER, holdsWork: true, lastActivityAt: wokeAt })] }),
+      view(now, { agents: [agent({ name: WORKER, engaged: true, holdsUndone: true, lastActivityAt: wokeAt })] }),
     )
     const recoveries = phase2.collected
       .flatMap((c) => c.effects)
@@ -352,14 +459,15 @@ describe('the orchestrator absent — the state records only what was actually e
   // fixture above keeps an orchestrator on record, while a between-boot gap
   // is exactly when supervision matters.
   test('down, then the agent returns during a no-orchestrator gap: the episode stays open; the recovery fires when a recipient exists', () => {
-    const gone = agent({ name: WORKER, connected: false, holdsWork: true, lastActivityAt: T0 - DAY })
+    const gone = agent({ name: WORKER, connected: false, engaged: true, holdsUndone: true, lastActivityAt: T0 - DAY })
     const phase1 = run(supervisor.initial(), T0, T0 + 10 * 60_000, (now) => view(now, { agents: [gone] }))
     const downs = phase1.collected.flatMap((c) => c.effects).filter((e) => e.kind === 'report' && e.status === 'down')
     expect(downs.length).toBe(1)
     // The agent returns while NO orchestrator is on record. Nothing can be
     // told to nobody — and nothing may be lost either: the defect cleared
     // the episode here, and the matching return vanished forever.
-    const back = (last: number) => agent({ name: WORKER, connected: true, holdsWork: false, lastActivityAt: last })
+    const back = (last: number) =>
+      agent({ name: WORKER, connected: true, engaged: false, holdsUndone: false, lastActivityAt: last })
     const gap = run(phase1.state, T0 + 20 * 60_000, T0 + 40 * 60_000, (now) =>
       view(now, { orchestrator: undefined, agents: [back(now - 60_000)] }),
     )
@@ -375,7 +483,7 @@ describe('the orchestrator absent — the state records only what was actually e
   })
 
   test('a stuck timeout reached with no orchestrator reports NOTHING — and the episode ends silently on return, no stray recovered', () => {
-    const stuck = (last: number) => [agent({ name: WORKER, holdsWork: true, lastActivityAt: last })]
+    const stuck = (last: number) => [agent({ name: WORKER, engaged: true, holdsUndone: true, lastActivityAt: last })]
     // Probed while an orchestrator exists…
     const phase1 = run(supervisor.initial(), T0, T0 + CONFIG.stuckAfterMs + 60_000, (now) =>
       view(now, { agents: stuck(T0) }),
@@ -391,7 +499,7 @@ describe('the orchestrator absent — the state records only what was actually e
     // The agent acts, with the orchestrator back: an episode that reported
     // nothing ends SILENTLY.
     const woke = run(gap.state, T0 + 2 * HOUR + 60_000, T0 + 3 * HOUR, (now) =>
-      view(now, { agents: [agent({ name: WORKER, holdsWork: true, lastActivityAt: now - 60_000 })] }),
+      view(now, { agents: [agent({ name: WORKER, engaged: true, holdsUndone: true, lastActivityAt: now - 60_000 })] }),
     )
     expect(woke.collected).toEqual([])
   })

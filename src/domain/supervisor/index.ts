@@ -86,6 +86,12 @@ type Episode = {
   /** A probe is outstanding — the edge-trigger guard. One question at a time,
    *  so nothing accumulates in a down worker's mailbox. */
   readonly probedAt: number | undefined
+  /** WHICH question is outstanding (task 115's round): the stuck probe and
+   *  the idle ping share the edge-trigger, and the verdict may fire only
+   *  off a STUCK ask — an idle ping's mark reaching the engaged branch
+   *  would trigger an up-but-stuck report with no fresh question (a stale
+   *  verdict, reachable pre-115 via idle→engaged). */
+  readonly probeKind: 'stuck' | 'idle' | undefined
   /** What this episode has already told the orchestrator, so the return can
    *  match the report. Undefined = nothing reported, so nothing to close. */
   readonly reported: 'down' | 'up-but-stuck' | undefined
@@ -98,7 +104,7 @@ type Supervision = {
   readonly reminded: ReadonlyMap<string, number>
 }
 
-const NO_EPISODE: Episode = { probedAt: undefined, reported: undefined }
+const NO_EPISODE: Episode = { probedAt: undefined, probeKind: undefined, reported: undefined }
 
 function unwrap(state: SupervisorState): Supervision {
   return state as unknown as Supervision
@@ -233,13 +239,19 @@ export const supervisor: SupervisorContract = {
         continue
       }
 
-      if (agent.holdsWork) {
-        // UP-BUT-STUCK: a live session holding work that has gone quiet.
-        if (episode.probedAt === undefined) {
-          // Row 8's actual scope: never probe a mail-holder.
+      if (agent.engaged) {
+        // UP-BUT-STUCK: a live session MID-WORK that has gone quiet.
+        // `engaged` is in-progress only (ruled, task 115): a waiting
+        // task's holder is on no clock — the parked task reminds the
+        // orchestrator — and an assigned-not-started task is the
+        // orchestrator's follow-up, not a session fault.
+        if (episode.probedAt === undefined || episode.probeKind !== 'stuck') {
+          // No STUCK question outstanding (an idle ping's mark does not
+          // count — the verdict may only answer the question that was
+          // asked). Row 8's actual scope: never probe a mail-holder.
           if (!agent.hasPendingMail && quiet >= config.stuckAfterMs) {
             effects.push({ kind: 'probe', agent: agent.name, quietMs: quiet })
-            agents.set(agent.name, { ...episode, probedAt: view.now })
+            agents.set(agent.name, { ...episode, probedAt: view.now, probeKind: 'stuck' })
           }
           continue
         }
@@ -264,13 +276,32 @@ export const supervisor: SupervisorContract = {
         continue
       }
 
+      // AN OUTSTANDING STUCK PROBE LAPSES WITH THE ENGAGEMENT (task 115's
+      // round): the probe asked "you are mid-work and silent — alive?";
+      // with the work parked or closed the question is moot, and keeping
+      // the mark would let a LATER re-engagement trigger the verdict off
+      // the stale ask — an up-but-stuck report with no fresh question,
+      // minutes into new silence. Only the STUCK mark lapses (an idle
+      // ping's edge-trigger must survive, or every tick past the idle
+      // bound re-pings — the D8 storm's shape); a REPORTED episode is
+      // kept: the report is an open claim only the agent's return closes
+      // (row 7).
+      let current2 = episode
+      if (episode.probeKind === 'stuck' && episode.reported === undefined) {
+        agents.delete(agent.name)
+        current2 = NO_EPISODE
+      }
+      // A holder of only waiting or assigned work: neither probed nor
+      // pinged (task 115) — not engaged, and not idle-empty either.
+      if (agent.holdsUndone) continue
+
       // IDLE AND EMPTY: no work, no mail. Pinged once after the configured
       // silence — ordinary addressed mail whose acknowledgement resets the
       // clock. Edge-triggered, so a worker that never comes back accumulates
       // exactly one. Row 8's guard again: a mail-holder is never pinged.
-      if (!agent.hasPendingMail && quiet >= config.idlePingAfterMs && episode.probedAt === undefined) {
+      if (!agent.hasPendingMail && quiet >= config.idlePingAfterMs && current2.probedAt === undefined) {
         effects.push({ kind: 'probe', agent: agent.name, quietMs: quiet })
-        agents.set(agent.name, { ...episode, probedAt: view.now })
+        agents.set(agent.name, { ...current2, probedAt: view.now, probeKind: 'idle' })
       }
     }
 

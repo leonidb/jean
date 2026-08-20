@@ -331,8 +331,38 @@ export type TasksContract = {
   all: (state: TasksState) => readonly Task[]
   taskOf: (state: TasksState, id: string) => Task | undefined
   /** The task an agent currently holds (in-progress or waiting, as owner or
-   *  queue), if any — messaging attribution's board half. */
+   *  queue), if any — messaging attribution's board half. DO NOT feed this
+   *  into supervision (ruled, task 115): its engaged set includes `waiting`
+   *  for its OWN consumer, and inheriting it put every parked task's
+   *  holder on the stuck clock — the live probe loop. Supervision consumes
+   *  `supervisionLoadOf`. After task 116 removes reply attribution, this
+   *  member's remaining consumers get audited and it is retired or
+   *  re-scoped deliberately — do not grow new callers meanwhile. */
   activeTaskOf: (state: TasksState, agent: AgentName) => Task | undefined
+
+  /** The held-work facts the SUPERVISOR'S composer consumes — the pinned
+   *  predicate (ruled at task 115, from the shakedown's 31-minute probe
+   *  loop), stated once here so no composer re-derives it with its own
+   *  status filter (two did, and both inherited the bug):
+   *   - `engaged` — an IN-PROGRESS task (owner or queue). The only
+   *     stuck-clock input. `waiting` is EXCLUDED by ruling (the parked
+   *     task reminds the orchestrator on its blocker's clock; the holder
+   *     owes nothing); `assigned` is excluded (an undispatched assignment
+   *     is the orchestrator's board follow-up, not a session fault).
+   *   - `holdsUndone` — ANY undone claim (assigned | in-progress |
+   *     waiting). Suppresses the idle-empty ping only; never starts a
+   *     clock.
+   *   - `newestStallingClaim` — the newest assigned|in-progress claim's
+   *     `updatedAt` (never waiting): the disconnected agent's activity
+   *     floor and its ticket into the supervision view at all. Absent =
+   *     no stalling work = a disconnected holder is not supervised.
+   *  OPTIONAL exactly one round (the member-level red-by-absence — the
+   *  conformance suite asserts its presence naming task 115's D-side);
+   *  required once implemented. */
+  supervisionLoadOf?: (
+    state: TasksState,
+    agent: AgentName,
+  ) => { engaged: boolean; holdsUndone: boolean; newestStallingClaim?: string }
   /** Sequential, zero-padded — derived from the board, never random. */
   nextTaskId: (state: TasksState) => string
 

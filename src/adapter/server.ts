@@ -590,31 +590,57 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
         role,
         connected: true,
         lastActivityAt: lastActivity.get(session.name) ?? session.connectedAt,
-        holdsWork: tasks.activeTaskOf(taskState, session.name) !== undefined,
+        // THE PINNED PREDICATE (ruled, task 115 — the live probe-loop bug):
+        // `engaged` is in-progress ONLY. The earlier composition inherited
+        // `activeTaskOf`, whose engaged set includes `waiting` for a
+        // different consumer, so every parked task's holder rode the stuck
+        // clock in a probe→ack→probe loop. Composed by status filter until
+        // the tasks module's `supervisionLoadOf` lands (task 115's D-side);
+        // then this switches to consume the named predicate.
+        engaged: tasks
+          .all(taskState)
+          .some((t) => t.status === 'in-progress' && (t.agent === session.name || t.queue === session.name)),
+        holdsUndone: tasks
+          .all(taskState)
+          .some(
+            (t) =>
+              (t.status === 'in-progress' || t.status === 'assigned' || t.status === 'waiting') &&
+              (t.agent === session.name || t.queue === session.name),
+          ),
         hasPendingMail: mailbox.mailboxOf(mailState, session.name).length > 0,
       })
     }
     const board = tasks.all(taskState)
     for (const task of board) {
-      const held = task.agent
-      if (held === undefined || rows.has(held)) continue
       if (task.status !== 'in-progress' && task.status !== 'assigned') continue
-      const role = roleOf(held)
-      // An unresolvable role is an agent this dojo has no record of. The
-      // supervisor would not probe it anyway; inventing `worker` to make the
-      // row well-typed would be the shell deciding what it does not know.
-      if (role === undefined) continue
-      const heldClock = board
-        .filter((t) => t.agent === held && (t.status === 'in-progress' || t.status === 'assigned'))
-        .reduce((hi, t) => Math.max(hi, instant(t.updatedAt, 0)), 0)
-      rows.set(held, {
-        name: held,
-        role,
-        connected: false,
-        lastActivityAt: lastActivity.get(held) ?? (heldClock > 0 ? heldClock : now),
-        holdsWork: true,
-        hasPendingMail: mailbox.mailboxOf(mailState, held).length > 0,
-      })
+      // OWNER OR QUEUE (codex pass, task 115): the pinned predicate names
+      // both — a queue-only assigned claim (old-log shapes predate Q-1's
+      // owner-setting) must still put its disconnected holder in the view.
+      // A queue naming a non-agent bucket falls out at the role guard.
+      for (const held of [task.agent, task.queue]) {
+        if (held === undefined || rows.has(held)) continue
+        const role = roleOf(held)
+        // An unresolvable role is an agent this dojo has no record of. The
+        // supervisor would not probe it anyway; inventing `worker` to make the
+        // row well-typed would be the shell deciding what it does not know.
+        if (role === undefined) continue
+        const heldClock = board
+          .filter(
+            (t) => (t.agent === held || t.queue === held) && (t.status === 'in-progress' || t.status === 'assigned'),
+          )
+          .reduce((hi, t) => Math.max(hi, instant(t.updatedAt, 0)), 0)
+        rows.set(held, {
+          name: held,
+          role,
+          connected: false,
+          lastActivityAt: lastActivity.get(held) ?? (heldClock > 0 ? heldClock : now),
+          // Inert for the down branch (which keys on silence alone), set
+          // honestly: this row exists BECAUSE it holds stalling work.
+          engaged: board.some((t) => (t.agent === held || t.queue === held) && t.status === 'in-progress'),
+          holdsUndone: true,
+          hasPendingMail: mailbox.mailboxOf(mailState, held).length > 0,
+        })
+      }
     }
     return {
       now,

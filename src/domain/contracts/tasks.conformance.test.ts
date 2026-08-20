@@ -682,3 +682,79 @@ describe('SUBSCRIPTIONS (A-SUB) — red against the pre-subscriber implementatio
     expect([...(tasks.subscribersOf?.(after, '001') ?? [])].sort()).toEqual([ORCH, WORKER_A].sort())
   })
 })
+
+describe('the supervision load — the pinned held-work predicate (ruled, task 115)', () => {
+  test('RED BY ABSENCE until the 115 D-side lands: supervisionLoadOf exists and answers the ruled predicate', () => {
+    // Member-level red-by-absence, the A-SUB pattern: the contract carries
+    // the member optionally one round; this asserts its presence so the
+    // absence is loud and names its implementor.
+    expect(
+      tasks.supervisionLoadOf,
+      'tasks.supervisionLoadOf is missing — task 115’s D-side implements the pinned predicate; nothing else may',
+    ).toBeDefined()
+    if (!tasks.supervisionLoadOf) throw new Error('unreachable')
+
+    const log = createLog(createClock())
+    let s = tasks.initial()
+    // worker-a: one task parked (waiting), one merely assigned — the two
+    // statuses the shakedown's probe loop wrongly counted as engagement.
+    s = tasks.fold(
+      s,
+      log.append('task-created', 'task-201', { title: 'parked', description: '', queue: WORKER_A, actor: ORCH }),
+      ROSTER,
+      ORCH,
+    )
+    s = tasks.fold(
+      s,
+      log.append('task-status', 'task-201', { from: 'assigned', to: 'in-progress', actor: WORKER_A }),
+      ROSTER,
+      ORCH,
+    )
+    s = tasks.fold(
+      s,
+      log.append('task-status', 'task-201', {
+        from: 'in-progress',
+        to: 'waiting',
+        actor: WORKER_A,
+        blockedOn: 'external',
+      }),
+      ROSTER,
+      ORCH,
+    )
+    s = tasks.fold(
+      s,
+      log.append('task-created', 'task-202', { title: 'queued', description: '', queue: WORKER_A, actor: ORCH }),
+      ROSTER,
+      ORCH,
+    )
+
+    const parkedLoad = tasks.supervisionLoadOf(s, WORKER_A)
+    expect(parkedLoad.engaged).toBe(false) // waiting + assigned: on NO clock
+    expect(parkedLoad.holdsUndone).toBe(true) // …but not idle-empty either
+    // The disconnected floor comes from the STALLING claim only — the
+    // assigned task's updatedAt, never the parked one's.
+    expect(parkedLoad.newestStallingClaim).toBeDefined()
+
+    // worker-b: genuinely engaged.
+    s = tasks.fold(
+      s,
+      log.append('task-created', 'task-203', { title: 'live', description: '', queue: 'worker-b', actor: ORCH }),
+      ROSTER,
+      ORCH,
+    )
+    s = tasks.fold(
+      s,
+      log.append('task-status', 'task-203', { from: 'assigned', to: 'in-progress', actor: 'worker-b' }),
+      ROSTER,
+      ORCH,
+    )
+    const engagedLoad = tasks.supervisionLoadOf(s, 'worker-b')
+    expect(engagedLoad.engaged).toBe(true)
+    expect(engagedLoad.holdsUndone).toBe(true)
+
+    // A stranger to the board: nothing at all — and no floor, so a
+    // disconnected stranger is not supervised.
+    const emptyLoad = tasks.supervisionLoadOf(s, 'worker-none')
+    expect(emptyLoad).toEqual({ engaged: false, holdsUndone: false })
+  })
+})

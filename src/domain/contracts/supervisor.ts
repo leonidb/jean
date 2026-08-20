@@ -129,9 +129,13 @@ export type SupervisedAgentFacts = {
    *  (RULED at task 107, confirming E3's composition): an agent with no
    *  recorded act ever reaches this view with the honest floor substituted
    *  — a live session measures from when it CONNECTED; a disconnected
-   *  agent enters the view only if the board says it holds work, measuring
-   *  from its newest held task's claim; an agent with neither is NOT in
-   *  the view at all (nothing to supervise, nothing honest to measure).
+   *  agent enters the view only if the board says it holds STALLING work
+   *  — assigned or in-progress; NEVER waiting (task 115's ruling reaches
+   *  here too: a parked task puts its holder on no clock, and its
+   *  unparking is an orchestrator act that re-engages the holder in
+   *  view) — measuring from its newest such task's claim; an agent with
+   *  neither is NOT in the view at all (nothing to supervise, nothing
+   *  honest to measure).
    *  Without the floors the first post-boot tick reads the whole dojo as
    *  dead. This is the `blockedSinceMs` pattern (R10: the composer's
    *  obligation), and it is NOT R8's forbidden fallback: R8's display
@@ -142,8 +146,25 @@ export type SupervisedAgentFacts = {
    *  announcement costs a wake; a down report costs an alarm a human
    *  reads. */
   lastActivityAt?: number
-  /** Holds active work (in-progress or assigned, per the board). */
-  holdsWork: boolean
+  /** ENGAGED: holds an IN-PROGRESS task — the ONLY input to the
+   *  up-but-stuck path (RULED at task 115, from the live shakedown's
+   *  31-minute probe loop). The predicate is pinned deliberately, not
+   *  inherited: `waiting` is EXCLUDED — a parked task reminds the
+   *  ORCHESTRATOR on its blocker's clock, and its holder owes nothing,
+   *  whoever the blocker is; putting the holder on a clock too was the
+   *  bug (the composer had inherited `activeTaskOf`'s engaged set, whose
+   *  `waiting` member exists for a different consumer). `assigned` is
+   *  ALSO excluded here: an undispatched assignment is the orchestrator's
+   *  board follow-up — probing a live session over work it never started
+   *  asks the wrong party. */
+  engaged: boolean
+  /** Holds ANY undone claim on the board (assigned | in-progress |
+   *  waiting). Consumed ONLY to suppress the idle-empty ping — a holder
+   *  of parked or queued work is not "idle and empty", and pinging a
+   *  waiting-task holder daily would be task 115's bug at a slower
+   *  cadence. This field never STARTS a clock; `engaged` is the only
+   *  clock-starter. */
+  holdsUndone: boolean
   /** Holds pending mail (per the mailbox) — the no-probe condition. */
   hasPendingMail: boolean
 }

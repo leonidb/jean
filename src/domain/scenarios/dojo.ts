@@ -248,19 +248,31 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
       // NOTIFIER view above keeps the honest blank deliberately.
       agents: cast.flatMap((a) => {
         const live = connected.get(a.name) ?? false
-        // The NEWEST held task's claim (the contract's words — codex pass:
-        // `activeTaskOf` answers a different consumer and returns the FIRST
-        // match), with R13's guard: an unparseable claim yields no floor,
-        // and no honest floor means not in the view — never NaN.
-        const heldClaims = tasks
-          .all(tasksState)
-          .filter(
-            (t) => (t.status === 'in-progress' || t.status === 'waiting') && (t.agent === a.name || t.queue === a.name),
-          )
+        const board = tasks.all(tasksState)
+        const mine = (t: (typeof board)[number]) => t.agent === a.name || t.queue === a.name
+        // THE PINNED PREDICATE (ruled, task 115): `engaged` is in-progress
+        // ONLY — this harness's first composition inherited `activeTaskOf`
+        // (whose engaged set includes `waiting` for a different consumer),
+        // the same seam bug the adapter shipped, and scenario 5 SAW the
+        // parked holder's probe noise and tolerated it. Switches to
+        // `tasks.supervisionLoadOf` when the D-side lands it.
+        const engaged = board.some((t) => t.status === 'in-progress' && mine(t))
+        const holdsUndone = board.some(
+          (t) => (t.status === 'in-progress' || t.status === 'assigned' || t.status === 'waiting') && mine(t),
+        )
+        // The disconnected floor: the newest STALLING claim — assigned or
+        // in-progress, never waiting (the ruling reaches membership too) —
+        // with R13's guard: an unparseable claim yields no floor, and no
+        // honest floor means not in the view — never NaN.
+        const stallingClaims = board
+          .filter((t) => (t.status === 'in-progress' || t.status === 'assigned') && mine(t))
           .map((t) => Date.parse(t.updatedAt))
           .filter((ms) => Number.isFinite(ms))
-        const holdsWork = tasks.activeTaskOf(tasksState, a.name) !== undefined
-        const floor = live ? connectedAt.get(a.name) : heldClaims.length > 0 ? Math.max(...heldClaims) : undefined
+        const floor = live
+          ? connectedAt.get(a.name)
+          : stallingClaims.length > 0
+            ? Math.max(...stallingClaims)
+            : undefined
         if (!live && floor === undefined) return []
         return [
           {
@@ -268,7 +280,8 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
             role: agents.roleOf(agentsState, a.name) ?? a.role,
             connected: live,
             lastActivityAt: lastActivity.get(a.name) ?? floor,
-            holdsWork,
+            engaged,
+            holdsUndone,
             hasPendingMail: mailbox.mailboxOf(mailboxState, a.name).length > 0,
           },
         ]

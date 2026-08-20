@@ -342,6 +342,15 @@ describe('scenario 5 — the snooze cycle: demoted, never silenced, resumed auto
     const gap = (later[1]?.at ?? 0) - firstAt
     expect(gap).toBeGreaterThanOrEqual(HOUR)
     expect(gap).toBeLessThanOrEqual(HOUR + 2 * MIN)
+    // RULED (task 115), the live pin: across three-plus hours of the
+    // holder's silence, the PARKED task put worker-p on NO clock — zero
+    // probes, zero reports. Before the ruling this very scenario probed
+    // the holder every 30 quiet minutes and the suite tolerated it as
+    // noise; the shakedown's 31-minute loop was the same bug in
+    // production. The reminders above are the mirror: the RIGHT clock
+    // (the orchestrator's, on the blocker's cadence) never stopped.
+    expect(dojo.probes()).toEqual([])
+    expect(dojo.reports()).toEqual([])
     assertGroundTruth(dojo) // the FINAL state — the second cycle included (codex pass)
   })
 })
