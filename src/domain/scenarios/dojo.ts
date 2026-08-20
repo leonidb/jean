@@ -249,18 +249,25 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
       agents: cast.flatMap((a) => {
         const live = connected.get(a.name) ?? false
         // THE PINNED PREDICATE (ruled, task 115), read from the tasks module.
-        // This harness's first composition inherited `activeTaskOf` (whose
-        // engaged set includes `waiting` for a different consumer) — the same
+        // This harness's first composition borrowed a query written for
+        // messaging, whose notion of engagement counted `waiting` — the same
         // seam bug the adapter shipped, and scenario 5 SAW the parked
         // holder's probe noise and tolerated it. Two composers re-deriving
         // one rule is what made that possible; neither derives it now.
         const load = tasks.supervisionLoadOf(tasksState, a.name)
-        // The disconnected floor is the newest STALLING claim — assigned or
-        // in-progress, never waiting (the ruling reaches membership too) —
-        // with R13's guard: an unparseable claim yields no floor, and no
-        // honest floor means not in the view, never NaN.
+        // MEMBERSHIP, THEN THE HONEST-EVIDENCE HIERARCHY — identical to the
+        // adapter's, deliberately: holding stalling work is what puts a
+        // disconnected agent in the view, and its floor is the observed act
+        // if there is one, else the newest READABLE claim, else nothing —
+        // and nothing means not in the view. R13's guard rides the same
+        // check: never NaN.
         const claimed = load.newestStallingClaim === undefined ? Number.NaN : Date.parse(load.newestStallingClaim)
-        const floor = live ? connectedAt.get(a.name) : Number.isFinite(claimed) ? claimed : undefined
+        const observed = lastActivity.get(a.name)
+        const floor = live
+          ? connectedAt.get(a.name)
+          : !load.holdsStalling
+            ? undefined
+            : (observed ?? (Number.isFinite(claimed) ? claimed : undefined))
         if (!live && floor === undefined) return []
         return [
           {

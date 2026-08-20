@@ -20,7 +20,7 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import type { NotifierExecutor } from '../domain/contracts/notifier.ts'
@@ -78,8 +78,8 @@ async function boot(overrides: Parameters<typeof createAdapterServer>[0] = {}): 
 
 function connect(server: AdapterHandle, agent: string, role = 'worker') {
   const frames: Record<string, unknown>[] = []
+  const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
   const ready = new Promise<void>((done, fail) => {
-    const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
     openSockets.push(ws)
     const timer = setTimeout(() => fail(new Error(`register timed out for ${agent}`)), 4_000)
     ws.onopen = () => ws.send(JSON.stringify({ type: 'register', agent, role }))
@@ -94,7 +94,7 @@ function connect(server: AdapterHandle, agent: string, role = 'worker') {
     }
     ws.onerror = () => fail(new Error('socket error'))
   })
-  return { frames, ready }
+  return { frames, ready, ws }
 }
 
 const post = (server: AdapterHandle, path: string, body: unknown, agent?: string) =>
@@ -492,5 +492,151 @@ describe('the unconsolidated slice', () => {
 
     const bad = await fetch(`http://localhost:${server.port}/context/recent?limit=lots`)
     expect(bad.status).toBe(400)
+  })
+})
+
+/**
+ * THE HONEST-EVIDENCE HIERARCHY for a disconnected holder (ruled, task 115).
+ *
+ * Membership in the disconnected view is a BOARD fact — the agent holds
+ * stalling work — and the floor under it is the best evidence available:
+ * an observed act first, the newest readable claim next, and with neither the
+ * row is skipped. Driven through boot replay because the case that matters
+ * needs a claim whose `updatedAt` no clock produced, and this server's own
+ * writer never makes one; a permanent log written by somebody else can.
+ */
+describe('a disconnected holder whose claim cannot be dated', () => {
+  const seed = (dir: string, lines: unknown[]) =>
+    writeFileSync(resolve(dir, 'history.jsonl'), `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`)
+
+  /** Who the server currently holds a session for. */
+  async function liveNames(server: AdapterHandle): Promise<string[]> {
+    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+      agents: { name: string }[]
+    }
+    return body.agents.map((a) => a.name)
+  }
+
+  /** The composer's observed floor, as `/agents` reports it. */
+  async function activityOf(server: AdapterHandle, name: string): Promise<number | undefined> {
+    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+      agents: { name: string; lastActivityAt?: number }[]
+    }
+    return body.agents.find((a) => a.name === name)?.lastActivityAt
+  }
+
+  /** Poll until the answer is there, or give up loudly rather than silently. */
+  async function until<T>(what: string, read: () => Promise<T | undefined | false>): Promise<T> {
+    let attemptsLeft = 120
+    while (attemptsLeft-- > 0) {
+      const got = await read()
+      if (got !== undefined && got !== false) return got as T
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    throw new Error(`waited 3s for ${what} and it never happened`)
+  }
+  test('is supervised on its OBSERVED activity, and skipped only when there is no evidence at all', async () => {
+    const dir = mkdtempSync(resolve(tmpdir(), 'jean-115-floor-'))
+    openDirs.push(dir)
+    const good = new Date(1_700_000_000_000).toISOString()
+    // Two holders, one difference between them: one will act in this process
+    // and the other never will. Both hold an assigned claim the board cannot
+    // date, so neither has a floor from the board.
+    seed(dir, [
+      {
+        id: 1,
+        ts: good,
+        type: 'register',
+        stream: 'agent-orchestrator-o',
+        data: { agent: 'orchestrator-o', role: 'sensei', idle: false },
+      },
+      {
+        id: 2,
+        ts: good,
+        type: 'task-created',
+        stream: 'task-900',
+        data: { title: 'undatable', description: '', queue: 'worker-seen', actor: 'orchestrator-o' },
+      },
+      {
+        id: 3,
+        ts: 'no clock wrote this',
+        type: 'task-status',
+        stream: 'task-900',
+        data: { from: 'todo', to: 'assigned', actor: 'orchestrator-o' },
+      },
+      // REGISTERED, deliberately: an unknown name is dropped at the role guard
+      // before membership or the floor is ever consulted, which would make the
+      // negative assertion below prove nothing about this rule.
+      {
+        id: 4,
+        ts: good,
+        type: 'register',
+        stream: 'agent-worker-unseen',
+        data: { agent: 'worker-unseen', role: 'worker', idle: false },
+      },
+      {
+        id: 5,
+        ts: good,
+        type: 'task-created',
+        stream: 'task-901',
+        data: { title: 'undatable too', description: '', queue: 'worker-unseen', actor: 'orchestrator-o' },
+      },
+      {
+        id: 6,
+        ts: 'nor this',
+        type: 'task-status',
+        stream: 'task-901',
+        data: { from: 'todo', to: 'assigned', actor: 'orchestrator-o' },
+      },
+    ])
+
+    let clock = 2_000_000_000_000
+    const server = await boot({
+      dataDir: dir,
+      ports: { now: () => clock },
+      attention: { ...FAST, supervisor: { ...FAST.supervisor, stuckAfterMs: 1_000 } },
+    })
+
+    // THE ONE DIFFERENCE: worker-seen acts, and its act is what the composer
+    // remembers. `register` deliberately is not an act (R15), so the reply is.
+    const seen = connect(server, 'worker-seen')
+    await seen.ready
+    seen.ws.send(JSON.stringify({ type: 'reply', text: 'here, briefly' }))
+    // WAIT ON THE FACT, not on a duration: the act is only observed once its
+    // append has landed, and a fixed sleep here is a flake on a loaded machine.
+    await until(
+      'worker-seen’s reply to be observed as activity',
+      async () => (await activityOf(server, 'worker-seen')) !== undefined,
+    )
+    await new Promise<void>((done) => {
+      seen.ws.onclose = () => done()
+      seen.ws.close()
+    })
+    // THE CLIENT'S CLOSE IS NOT THE SERVER'S. Waiting on the client event and
+    // ticking immediately supervised a session the server still had open —
+    // and one tick is all this test gets, so the report never came. Wait for
+    // the fact the assertion depends on: the session is gone from the roster.
+    await until(
+      'the server to let go of the session',
+      async () => (await liveNames(server)).includes('worker-seen') === false,
+    )
+
+    clock += 60 * 60_000 // an hour of silence, well past the bound
+
+    const downs = await until('a down report to be emitted', async () => {
+      server.tick()
+      const seenEvents = (await (await fetch(`http://localhost:${server.port}/history?raw=true`)).json()) as {
+        events: { type: string; data: { subject?: string } }[]
+      }
+      const reported = seenEvents.events.filter((e) => e.type === 'agent-down').map((e) => e.data.subject ?? '')
+      return reported.length > 0 ? reported : undefined
+    })
+
+    // IN the view on observed evidence — the board could not date its claim,
+    // and the composer did not need it to.
+    expect(downs).toContain('worker-seen')
+    // NOT in it with no evidence from either source: the corrupt-log corner,
+    // and the only place silence is the safe answer.
+    expect(downs).not.toContain('worker-unseen')
   })
 })

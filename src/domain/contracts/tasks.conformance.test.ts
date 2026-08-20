@@ -472,25 +472,11 @@ describe('queries — staleness, ids, activity attribution, availability', () =>
     expect(tasks.staleTasks(state, NOW, 1_800_000, unknown)).toEqual(['001'])
   })
 
-  test('nextTaskId is sequential and zero-padded; activeTaskOf and openTaskCount read the board', () => {
+  test('nextTaskId is sequential and zero-padded; openTaskCount reads the board', () => {
     const { state } = withTask('in-progress')
     expect(tasks.nextTaskId(state)).toBe('002')
-    expect(tasks.activeTaskOf(state, WORKER_A)?.id).toBe('001')
-    expect(tasks.activeTaskOf(state, ORCH)).toBeUndefined()
     expect(tasks.openTaskCount(state, WORKER_A)).toBe(1)
     expect(tasks.openTaskCount(state, ORCH)).toBe(0)
-  })
-
-  test('activeTaskOf finds a WAITING task too, and finds a started roster-queue task by its assigned owner', () => {
-    const { state: parked } = withTask('waiting')
-    expect(tasks.activeTaskOf(parked, WORKER_A)?.id).toBe('001')
-    // A dispatched-but-unstarted task has no agent; the queue names its holder.
-    const { log } = world()
-    log.append('task-created', 'task-001', { title: 't', description: '', queue: WORKER_A, actor: ORCH })
-    log.append('task-status', 'task-001', { from: 'todo', to: 'in-progress', actor: ORCH })
-    let s = tasks.initial()
-    for (const e of log.events()) s = tasks.fold(s, e, ROSTER)
-    expect(tasks.activeTaskOf(s, WORKER_A)?.id).toBe('001')
   })
 })
 
@@ -800,7 +786,7 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
       ROSTER,
       ORCH,
     )
-    expect(tasks.supervisionLoadOf(s, 'worker-c')).toEqual({ engaged: false, holdsUndone: true })
+    expect(tasks.supervisionLoadOf(s, 'worker-c')).toEqual({ engaged: false, holdsUndone: true, holdsStalling: false })
 
     // AN UNREADABLE STAMP IS NOT EVIDENCE. Logs are permanent and hold
     // whatever past writers wrote, so a claim whose `ts` no clock produced is
@@ -825,7 +811,7 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
       ORCH,
     )
     expect(tasks.taskOf(s, '206')?.status).toBe('assigned') // the claim IS stalling…
-    expect(tasks.supervisionLoadOf(s, 'worker-d')).toEqual({ engaged: false, holdsUndone: true }) // …and floors nothing
+    expect(tasks.supervisionLoadOf(s, 'worker-d')).toEqual({ engaged: false, holdsUndone: true, holdsStalling: true }) // …and floors nothing
 
     // worker-b: genuinely engaged.
     s = tasks.fold(
@@ -836,7 +822,7 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
     )
     s = tasks.fold(
       s,
-      log.append('task-status', 'task-203', { from: 'assigned', to: 'in-progress', actor: 'worker-b' }),
+      log.append('task-status', 'task-203', { from: 'todo', to: 'in-progress', actor: 'worker-b' }),
       ROSTER,
       ORCH,
     )
@@ -847,6 +833,6 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
     // A stranger to the board: nothing at all — and no floor, so a
     // disconnected stranger is not supervised.
     const emptyLoad = tasks.supervisionLoadOf(s, 'worker-none')
-    expect(emptyLoad).toEqual({ engaged: false, holdsUndone: false })
+    expect(emptyLoad).toEqual({ engaged: false, holdsUndone: false, holdsStalling: false })
   })
 })

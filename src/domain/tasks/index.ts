@@ -499,10 +499,6 @@ function heldBy(task: Task, agent: AgentName): boolean {
   return task.agent === agent || task.queue === agent
 }
 
-/** The statuses that mean an agent is engaged. `waiting` counts: a parked
- *  task is still that agent's, which is exactly why it is being nagged. */
-const ENGAGED: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['in-progress', 'waiting'])
-
 /** A claim its holder has not finished. Wider than engagement on purpose —
  *  it answers "is this agent empty", never "is this agent working". */
 const UNDONE: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['assigned', 'in-progress', 'waiting'])
@@ -653,18 +649,24 @@ export const tasks: TasksContract = {
 
   taskOf: (state, id) => board(state).get(id)?.task,
 
-  activeTaskOf: (state, agent) =>
-    [...board(state).values()].map((e) => e.task).find((t) => ENGAGED.has(t.status) && heldBy(t, agent)),
-
-  // ONE WALK, THREE FACTS — and they are deliberately not the same
-  // question. `engaged` starts the stuck clock, `holdsUndone` only says the
-  // agent is not empty, and the floor comes from stalling claims alone. The
-  // shakedown's probe loop was one composer answering all three with one
-  // status filter it wrote itself; stating them together here is what stops
-  // the next composer from doing it again.
+  // ONE WALK, FOUR FACTS — and they are deliberately not the same question.
+  // `engaged` starts the stuck clock, `holdsUndone` only says the agent is
+  // not empty, `holdsStalling` decides membership in the disconnected view,
+  // and the claim is one candidate floor for it. The shakedown's probe loop
+  // was one composer answering several of these with a single status filter
+  // it wrote itself; stating them together here is what stops the next
+  // composer from doing it again.
+  //
+  // MEMBERSHIP AND FLOOR ARE SEPARATE FACTS (ruled, task 115, correcting a
+  // first ruling that fused them). Absence of a floor used to mean both "no
+  // stalling work" and "stalling work whose stamps cannot be read", and the
+  // second is not a reason to stop supervising anyone: the composer may hold
+  // OBSERVED activity for that agent, which is stronger evidence than any
+  // board claim. So membership is asked and answered on its own.
   supervisionLoadOf: (state, agent) => {
     let engaged = false
     let holdsUndone = false
+    let holdsStalling = false
     let newest: { at: string; ms: number } | undefined
     for (const { task } of board(state).values()) {
       if (!heldBy(task, agent)) continue
@@ -672,26 +674,24 @@ export const tasks: TasksContract = {
       holdsUndone = true
       if (task.status === 'in-progress') engaged = true
       if (!STALLING.has(task.status)) continue
+      // INDEPENDENT OF THE STAMP: whether the agent holds stalling work is a
+      // board fact, and a claim it cannot date is still a claim.
+      holdsStalling = true
       // ORDERED BY INSTANT, REPORTED AS THE STRING. Old logs hold stamps in
       // more than one ISO shape, and those sort lexicographically in an
-      // order that is not chronological.
-      //
-      // AN UNREADABLE STAMP IS NOT EVIDENCE and supplies no floor at all
-      // (ruled, task 115): measuring silence needs to know when it began,
-      // and a claim that cannot say is skipped rather than ordered against
-      // the ones that can. With none readable the key is absent and the
-      // holder is simply not in the disconnected view — honest absence,
-      // where a floor invented at `now` would be exclusion dressed as
-      // inclusion, resetting every tick so the row could never alarm.
+      // order that is not chronological. An unreadable stamp is not evidence
+      // of when silence began, so it never orders against the ones that are
+      // — it simply supplies no floor.
       const ms = Date.parse(task.updatedAt)
       if (!Number.isFinite(ms)) continue
       if (newest === undefined || ms > newest.ms) newest = { at: task.updatedAt, ms }
     }
-    const newestStallingClaim = newest?.at
-    // ABSENT, not undefined-valued: no stalling claim is the disconnected
-    // agent's ticket OUT of the supervision view, and a key carrying
-    // undefined reads as a floor to anyone spreading this into facts.
-    return newestStallingClaim === undefined ? { engaged, holdsUndone } : { engaged, holdsUndone, newestStallingClaim }
+    const claim = newest?.at
+    // ABSENT, not undefined-valued: a key carrying undefined reads as a floor
+    // to anyone spreading this into facts.
+    return claim === undefined
+      ? { engaged, holdsUndone, holdsStalling }
+      : { engaged, holdsUndone, holdsStalling, newestStallingClaim: claim }
   },
 
   nextTaskId: (state) => {
@@ -732,7 +732,7 @@ export const tasks: TasksContract = {
   openTaskCount: (state, agent) => {
     let count = 0
     for (const { task } of board(state).values()) {
-      // OWNER ONLY — deliberately narrower than `activeTaskOf`'s owner-or-queue.
+      // OWNER ONLY — deliberately narrower than `heldBy`'s owner-or-queue.
       // This is the dispatchability signal, and the queue is where a task
       // STARTED, not who holds it now: a task created in one agent's queue and
       // later reassigned would otherwise keep the original agent looking busy

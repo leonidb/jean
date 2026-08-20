@@ -331,6 +331,22 @@ describe('the supervisor view composes its held-work facts', () => {
     expect(body.match(/holdsUndone: load\.holdsUndone/g)?.length).toBe(2)
   })
 
+  test('the disconnected arm gates on membership and skips when no evidence dates the silence', async () => {
+    const body = await bodyOf()
+    // MEMBERSHIP IS THE BOARD FACT, asked before any floor is computed.
+    expect(body).toContain('if (!load.holdsStalling) continue')
+    // THE HIERARCHY, in order: the observed act first, the readable claim
+    // second. Written as one expression so the order is the code's, not a
+    // convention two branches have to keep agreeing on.
+    expect(body).toContain('lastActivity.get(held) ?? instant(load.newestStallingClaim')
+    // AND THE CORNER SKIPS. This one cannot be pinned behaviourally, and the
+    // reason is the same reason it was ruled: a row floored at `now` resets
+    // its own clock every tick, so it emits exactly what a skipped row emits
+    // — nothing. Measured, not assumed: with the skip replaced by a floor at
+    // `now`, every behavioural test in this suite still passes.
+    expect(body).toContain('if (!Number.isFinite(floor)) continue')
+  })
+
   test('the composer names no task status at all — there is nothing here to re-derive', async () => {
     const body = await bodyOf()
     // Deliberately every status, not just `waiting`: the defect was not one

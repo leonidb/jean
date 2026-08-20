@@ -330,35 +330,22 @@ export type TasksContract = {
 
   all: (state: TasksState) => readonly Task[]
   taskOf: (state: TasksState, id: string) => Task | undefined
-  /** CONDEMNED (task 116; the audit is complete). This existed for reply
-   *  attribution — inference the 116 ruling REMOVES — and its only other
-   *  consumer was the supervision composition, which task 115 moved to
-   *  `supervisionLoadOf` after inheriting this member's `waiting` cost a
-   *  live probe loop. After the two D-sides land, its live-consumer count
-   *  is ZERO (verified by census at 116): the D-116 brief retires it —
-   *  member, prose, and conformance cases — as a deliberate line. Do not
-   *  grow new callers.
+  /** ── THE QUESTIONS THIS CONTRACT DELIBERATELY DOES NOT ANSWER ──
    *
-   *  THE VOCABULARY PRINCIPLE that replaces it (Leonid, 2026-08-20,
-   *  sharpening 116): "what is this agent working on", "what is queued to
-   *  it", "what does it hold parked", and "what waits on this PARTY as
-   *  blocker" are DIFFERENT QUESTIONS — one member answering several is
-   *  how the probe loop happened. AND THE AUDIT IS AN EVALUATION, NOT A
-   *  TRANSLATION (his second sharpening): the first verdict on any use is
-   *  whether the question was worth asking at all — the PRIOR is failure,
-   *  since both of this member's original consumers failed the merits
-   *  test (supervision's holdsWork was the probe-loop bug; reply
-   *  attribution was a corruption source — "contributed to a lot of
-   *  spam"). A dropped use is a one-line entry with its reason; only a
-   *  use that justifies itself explicitly earns a named function, and
-   *  nobody re-derives a status filter inline (R18's lesson). The census
-   *  at this writing: actively-working SURVIVED on merits (the stuck
-   *  clock genuinely needs engagement — `supervisionLoadOf.engaged`);
-   *  reply attribution DROPPED (the ruling); assigned-backlog,
-   *  parked-held and blocker-inverse have no in-code consumers and are
-   *  deliberately ABSENT — noted, not minted. A future consumer argues
-   *  its question's merits first, then adds the named member. */
-  activeTaskOf: (state: TasksState, agent: AgentName) => Task | undefined
+   *  "What is this agent working on", "what is queued to it", "what does
+   *  it hold parked", and "what waits on this PARTY as blocker" are
+   *  DIFFERENT QUESTIONS. One member answering several is how a live
+   *  probe loop happened (R18) and how a parked task accumulated fifteen
+   *  unrelated status reports (R19), so each earns its own name or none.
+   *
+   *  Exactly one has a consumer today: actively-working, as
+   *  `supervisionLoadOf.engaged`. Assigned-backlog, parked-held and
+   *  blocker-inverse are ABSENT ON PURPOSE — recorded here rather than
+   *  minted, because a member with no consumer is a question nobody has
+   *  had to justify. A future consumer argues its question's merits
+   *  first — the prior is failure, both uses of the member these replaced
+   *  having been defects — and then adds the one name it needs. Nobody
+   *  re-derives a status filter inline; that is R18's whole lesson. */
 
   /** The held-work facts the SUPERVISOR'S composer consumes — the pinned
    *  predicate (ruled at task 115, from the shakedown's 31-minute probe
@@ -372,21 +359,21 @@ export type TasksContract = {
    *   - `holdsUndone` — ANY undone claim (assigned | in-progress |
    *     waiting). Suppresses the idle-empty ping only; never starts a
    *     clock.
-   *   - `newestStallingClaim` — the newest assigned|in-progress claim's
-   *     `updatedAt` (never waiting): the disconnected agent's activity
-   *     floor and its ticket into the supervision view at all. Absent =
-   *     no stalling work = a disconnected holder is not supervised.
-   *     Claims with unreadable stamps supply no floor — the floor is the
-   *     newest READABLE stalling claim, and with none readable the key is
-   *     absent: the agent is not in the disconnected view (honest absence
-   *     beats a floor invented at `now`, which resets each tick and can
-   *     never alarm).
+   *   - `holdsStalling` — any assigned|in-progress claim, the disconnected
+   *     view's MEMBERSHIP fact, independent of stamp readability. Claims
+   *     with unreadable stamps supply no floor: `newestStallingClaim` is
+   *     the newest READABLE claim, absent when none is. The composer's
+   *     floor hierarchy is `lastActivity` (observed — the strongest
+   *     evidence) else `newestStallingClaim` else skip the row: a holder
+   *     with stalling work but no honest floor from either source is the
+   *     corrupt-log corner, and only there is silence the safe direction.
+   *   - `newestStallingClaim` — that floor when the board can supply one.
    *  REQUIRED: the round of member-level red-by-absence closed when task
    *  115's D-side implemented it. */
   supervisionLoadOf: (
     state: TasksState,
     agent: AgentName,
-  ) => { engaged: boolean; holdsUndone: boolean; newestStallingClaim?: string }
+  ) => { engaged: boolean; holdsUndone: boolean; holdsStalling: boolean; newestStallingClaim?: string }
   /** Sequential, zero-padded — derived from the board, never random. */
   nextTaskId: (state: TasksState) => string
 

@@ -62,6 +62,14 @@ function connect(agent: string, role = 'worker'): Promise<{ ws: WebSocket; inbox
 }
 
 const get = async (path: string) => (await fetch(`${base}${path}`)).json() as Promise<Record<string, never>>
+const patch = async (path: string, body: unknown) =>
+  (
+    await fetch(`${base}${path}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  ).json() as Promise<Record<string, never>>
 const post = async (path: string, body: unknown, agent?: string) =>
   (
     await fetch(`${base}${path}`, {
@@ -179,5 +187,76 @@ describe('E1 smoke — the round trip over a real socket', () => {
       }
     })
     expect(reason).toBe('invalid-role')
+  })
+})
+
+/**
+ * THE RECORDING RULE (ruled task 116) — where an agent's speech lands.
+ *
+ * Driven over the real socket, because the rule governs what the WRITER does
+ * with a frame and the frame is the input. The pins are about the STREAM
+ * only: WHO receives a reply is resolution's business, pinned in its own
+ * conformance and unchanged by any of this.
+ */
+describe('an untagged reply is the agent’s own record', () => {
+  /** The reply landed and was folded — polled, because the frame is fire-and
+   *  -forget and its append resolves a microtask later. */
+  const repliesOn = async (stream: string, want: number) => {
+    for (let i = 0; i < 120; i++) {
+      const seen = (await get(`/history?raw=true&stream=${stream}`)) as unknown as {
+        events: { type: string; data: { text?: string; sourceId?: string } }[]
+      }
+      const replies = seen.events.filter((e) => e.type === 'reply')
+      if (replies.length >= want) return replies
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    return []
+  }
+
+  test('it stays on the agent stream while the agent holds an in-progress task, and an explicit taskId is still honoured', async () => {
+    const worker = await connect('worker-rec', 'worker')
+    const created = (await post('/tasks', {
+      title: 'held while replying',
+      description: '',
+      queue: 'worker-rec',
+      actor: 'orchestrator-o',
+    })) as unknown as { id: string }
+    await patch(`/tasks/${created.id}/status`, { status: 'in-progress', actor: 'orchestrator-o' })
+
+    // THE FIXTURE'S OWN PRECONDITION, asserted rather than assumed: without an
+    // engaged task this test passes against the removed inference too, since
+    // it was the HOLDING that used to capture the reply.
+    const held = (await get(`/tasks/${created.id}`)) as unknown as { status: string }
+    expect(held.status).toBe('in-progress')
+
+    worker.ws.send(JSON.stringify({ type: 'reply', text: 'untagged while holding' }))
+    worker.ws.send(JSON.stringify({ type: 'reply', taskId: created.id, text: 'tagged on purpose' }))
+
+    expect((await repliesOn('agent-worker-rec', 1)).map((e) => e.data.text)).toEqual(['untagged while holding'])
+    expect((await repliesOn(`task-${created.id}`, 1)).map((e) => e.data.text)).toEqual(['tagged on purpose'])
+  })
+
+  test('bridge inbound never task-files — a human’s message is not a claim on a task', async () => {
+    server.attachSurface({ name: 'chat-human', role: 'user', deliver: () => true })
+    const created = (await post('/tasks', {
+      title: 'queued to the human',
+      description: '',
+      queue: 'chat-human',
+      actor: 'orchestrator-o',
+    })) as unknown as { id: string }
+    await patch(`/tasks/${created.id}/status`, { status: 'in-progress', actor: 'orchestrator-o' })
+    // Same precondition as the socket test, and for the same reason: with the
+    // task not actually engaged, the deleted inference would land on the agent
+    // stream too and this assertion would prove nothing.
+    expect(((await get(`/tasks/${created.id}`)) as unknown as { status: string }).status).toBe('in-progress')
+
+    await server.postInbound('chat-human', 'is anyone there', { sentAt: 1_700_000_000_000, sourceId: 'tg-7' })
+
+    const onAgent = await repliesOn('agent-chat-human', 1)
+    expect(onAgent[0]?.data).toMatchObject({ text: 'is anyone there', sourceId: 'tg-7' })
+    const onTask = (await get(`/history?raw=true&stream=task-${created.id}`)) as unknown as {
+      events: { type: string }[]
+    }
+    expect(onTask.events.some((e) => e.type === 'reply')).toBe(false)
   })
 })

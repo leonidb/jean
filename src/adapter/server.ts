@@ -586,9 +586,9 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     for (const session of sessions.values()) {
       const role = roleOf(session.name) ?? session.role
       // THE PINNED PREDICATE (ruled, task 115 — the live probe-loop bug),
-      // read from the tasks module rather than re-derived here. The earlier
-      // composition inherited `activeTaskOf`, whose engaged set includes
-      // `waiting` for a different consumer, so every parked task's holder
+      // read from the tasks module rather than re-derived here. This
+      // composition used to borrow a query written for messaging, whose
+      // notion of engagement counted `waiting`, so every parked task's holder
       // rode the stuck clock in a probe→ack→probe loop. The status filter
       // that replaced it was correct and still a second copy of the rule;
       // this is the one place it is stated.
@@ -623,13 +623,17 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
         // row well-typed would be the shell deciding what it does not know.
         if (role === undefined) continue
         const load = tasks.supervisionLoadOf(taskState, held)
-        if (load.newestStallingClaim === undefined) continue
-        // NO HONEST FLOOR, NO ROW (ruled, task 115). This arm used to floor an
-        // unreadable claim at `now`, which reads as inclusion and is not: a
-        // floor that moves with every tick means quiet never accumulates, so
-        // the row could never alarm. The predicate already withholds the key
-        // for unreadable claims; this is the same answer one layer out, and
-        // it keeps R13's promise that no fact leaves here as NaN.
+        // MEMBERSHIP IS THE BOARD FACT; the floor is separate evidence
+        // (ruled, task 115). Holding stalling work is what puts a
+        // disconnected agent here at all.
+        if (!load.holdsStalling) continue
+        // THE HONEST-EVIDENCE HIERARCHY. An observed act is the strongest
+        // floor there is — it is a thing that happened, where a board claim
+        // only dates a row. Only with neither is the row skipped: that is the
+        // corrupt-log corner (a stamp our own writer never produces), and it
+        // is the one place silence is the safe answer. Flooring at `now`
+        // instead would read as inclusion and never accumulate quiet, so the
+        // row could never alarm. Also keeps R13's promise: no NaN leaves here.
         const floor = lastActivity.get(held) ?? instant(load.newestStallingClaim, Number.NaN)
         if (!Number.isFinite(floor)) continue
         rows.set(held, {
@@ -1535,17 +1539,18 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
         observeActivity(from)
 
         if (msg.type === 'reply' && typeof msg.text === 'string') {
-          // ATTRIBUTION: the taskId the client carried, else the task this
-          // agent currently holds — `activeTaskOf` is the board's half of the
-          // question and exists for exactly this.
+          // THE RECORDING RULE (vocabulary.ts, ruled task 116): an untagged
+          // reply records to the agent's own stream. There is no fallback to
+          // whatever task the agent happens to hold — deliberate task-scoping
+          // is the caller's to claim, and `comment` is the durable
+          // task-writing verb.
           //
           // A SENSEI'S REPLY REACHES NOBODY, and no rule here says so: §4
           // resolves `reply` to the orchestrator and then removes the author,
           // so an orchestrator's own reply resolves empty and becomes history.
           // The old server carried an explicit drop for this; under the
           // rewrite it is a consequence of the table.
-          const taskId = msg.taskId ?? tasks.activeTaskOf(taskState, from)?.id
-          const stream = taskId === undefined ? agentStream(from) : taskStream(taskId)
+          const stream = msg.taskId === undefined ? agentStream(from) : taskStream(msg.taskId)
           void record('reply', stream, { agent: from, text: msg.text })
           return
         }
@@ -1689,8 +1694,11 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
       // private one. `sentAt` and `sourceId` ride because a burst of human
       // messages otherwise collapses onto one record-time and loses its
       // order.
-      const taskId = tasks.activeTaskOf(taskState, name)?.id
-      await record('reply', taskId === undefined ? agentStream(name) : taskStream(taskId), {
+      //
+      // ALWAYS THE AGENT'S OWN STREAM (ruled task 116). Human speech is never
+      // task-filed: there is no taskId to carry on this path and no inference
+      // to make from one — a person who means a task says so.
+      await record('reply', agentStream(name), {
         agent: name,
         text,
         ...(meta?.sentAt !== undefined && Number.isFinite(meta.sentAt) && { sentAt: meta.sentAt }),
