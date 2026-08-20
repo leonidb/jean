@@ -117,8 +117,12 @@ export type TaskStatusData = {
   resumeAt?: string
 }
 
-/** HISTORICAL KIND — the explicit blocker-handoff event; superseded by
- *  `task-status` carrying `blockedOn`. Logs hold it; nothing writes it. */
+/** The explicit blocker-handoff event — LIVE, not historical (census
+ *  corrected at task 117's round: the rewrite's handoff surface writes it
+ *  via `decideHandoff`, per the contract's own restoration note — the old
+ *  system shipped only the fold half, and this kind spent months as a
+ *  fold with no writer). `task-status` carrying `blockedOn` is the other,
+ *  more common path: a park chooses its blocker; a handoff MOVES it. */
 export type TaskBlockedData = {
   blockedOn: BlockedOn
   note?: string

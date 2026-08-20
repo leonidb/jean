@@ -152,7 +152,9 @@
  * ── DATA COMPATIBILITY ──
  *
  * The fold understands the legacy status names real logs hold (`inbox`,
- * `active`, `blocked`, `review`) and the historical `task-blocked` kind.
+ * `active`, `blocked`, `review`) and the `task-blocked` kind in both its
+ * eras — historical records the old system folded but never wrote, and
+ * the LIVE ones the restored handoff surface writes today.
  * A duplicate `task-created` for an existing id is ignored — FIRST WINS
  * (ruled, task 083): the old fold appended a second board entry under the
  * same id, an accident left behind; logs are permanent and a replay must
