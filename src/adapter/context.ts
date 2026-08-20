@@ -17,7 +17,7 @@
 
 import type { PlaybooksState } from './../domain/contracts/playbooks.ts'
 import type { TasksState } from './../domain/contracts/tasks.ts'
-import type { TriggersState } from './../domain/contracts/triggers.ts'
+import type { Trigger, TriggersState } from './../domain/contracts/triggers.ts'
 import type { AgentName, AgentRole } from './../domain/contracts/vocabulary.ts'
 import type { StoredEvent } from './../es/index.ts'
 
@@ -37,6 +37,12 @@ export type SurfaceContext = {
   /** The ONE write path: append, fold every projection, append whatever the
    *  domain says must follow (the A-SUB forward half). */
   record: (type: string, stream: string, data: unknown) => Promise<StoredEvent>
+  /** FIRE A TRIGGER — the whole firing, not just its event. The HTTP fire
+   *  and the scheduler's timer must take ONE path: they diverged at E2 (the
+   *  surface appended the event itself) and the difference was invisible
+   *  until a headless firing had a RUN behind it, at which point a human
+   *  firing `consolidate-wiki` by hand recorded it and ran nothing. */
+  fireTrigger: (trigger: Trigger) => Promise<void>
   /** The log, read — one door, the store's own options. */
   read: (opts?: { stream?: string; types?: string[]; afterId?: number }) => Promise<readonly StoredEvent[]>
   now: () => number

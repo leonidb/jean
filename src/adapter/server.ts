@@ -47,6 +47,7 @@
 import { type FSWatcher, mkdirSync, unlinkSync, watch, writeFileSync } from 'node:fs'
 import { resolve as resolvePath } from 'node:path'
 import { agents as agentsModule } from '../domain/agents/index.ts'
+import type { HeadlessConfig, HeadlessTriggerFacts } from '../domain/contracts/headless.ts'
 import type { AckPair, MailboxState, Selector, ViewFacts } from '../domain/contracts/mailbox.ts'
 import type { NotifierExecutor, NotifierView } from '../domain/contracts/notifier.ts'
 import type { SupervisedAgentFacts, SupervisorView } from '../domain/contracts/supervisor.ts'
@@ -60,6 +61,7 @@ import {
   taskIdFromStream,
   taskStream,
 } from '../domain/contracts/vocabulary.ts'
+import { headless } from '../domain/headless/index.ts'
 import { mailbox } from '../domain/mailbox/index.ts'
 import { playbooks } from '../domain/playbooks/index.ts'
 import { resolution } from '../domain/resolution/index.ts'
@@ -71,10 +73,11 @@ import { resolveConfig } from '../infra/config.ts'
 import { identityFromConfig, loadPeers } from '../infra/peers.ts'
 import { upsertDojo } from '../infra/registry.ts'
 import { INFRA_IDENTITY, probeInfra, readRuntimeFiles } from '../probe.ts'
-import { type Attention, type AttentionConfig, createAttention } from './attention.ts'
+import { type Attention, type AttentionConfig, AttentionConfigError, createAttention } from './attention.ts'
 import type { Caller, SurfaceContext } from './context.ts'
 import type { SupervisionExecutor } from './executors.ts'
-import { attachPeers, createHosting, type Hosting } from './hosting.ts'
+import { runHeadless } from './headless.ts'
+import { attachPeers, createHosting, type Hosting, headlessPorts } from './hosting.ts'
 import { scanPlaybooks } from './playbook-files.ts'
 import { createScheduler, type Scheduler } from './schedule.ts'
 import { knowledgeRoutes } from './surfaces/knowledge.ts'
@@ -95,6 +98,22 @@ export type AdapterPorts = {
   /** Search telemetry. Best-effort by contract: it carries private query text
    *  and is for offline scoring, so a failure here never fails a search. */
   logRetrieval: (record: Record<string, unknown>) => void
+  /**
+   * Run a fired headless trigger. A PORT because the spawn subsystem is
+   * processes and files — and because a suite must never spawn a real
+   * claude. Default: nothing runs.
+   *
+   * THE RECORDER IS PASSED IN, not closed over. The launcher's version used
+   * to reach for the server handle, which does not exist yet while the BOOT
+   * CATCH-UP is firing — and a missed nightly consolidation is fired by
+   * exactly that path, so a fast failure hit a TDZ error and wrote no
+   * record at all (codex pass, task 114).
+   */
+  runHeadless: (
+    trigger: HeadlessTriggerFacts,
+    config: HeadlessConfig,
+    record: (type: string, stream: string, data: unknown) => Promise<StoredEvent>,
+  ) => Promise<void>
   /** What `/status` says about the chat surface. A PORT, because the bridge
    *  is a transport this server hosts rather than owns — and because the
    *  honest answer to "is one configured" comes from the config, not from
@@ -116,6 +135,9 @@ export type ServerOptions = {
   /** Start the tick timers. Off in tests by default — a suite that wants a
    *  tick calls it, and one that does not must not inherit a clock. */
   startTimers?: boolean
+  /** The headless spawn bounds. Injected whole so a suite drives the walk
+   *  without waiting out a sixty-second backoff. */
+  headless?: Partial<HeadlessConfig>
   ports?: Partial<AdapterPorts>
 }
 
@@ -148,6 +170,11 @@ export type AdapterHandle = {
    *  that has just changed the world and wants the consequence now (a test,
    *  a shakedown) asks directly. */
   tick: () => void
+  /** Append an event through the one write path — the fold, the
+   *  auto-subscriptions and the arrival hook all follow. The headless
+   *  runner needs it: its records are appended by a subsystem the server
+   *  hosts rather than serves. */
+  recordEvent: (type: string, stream: string, data: unknown) => Promise<StoredEvent>
   /** Infra's own word to an agent, through the ordinary routing decision.
    *  The peer hop needs it: its POST is async, so a failure lands after the
    *  synchronous `delivered` the sender was already told — this is the only
@@ -243,6 +270,18 @@ function fmtAge(ms: number): string {
   return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`
 }
 
+/** The headless bounds, with the extracted defaults: the old 60s dark-wake
+ *  backoff, the 20-minute spawn ceiling the port used to hold ambiently, and
+ *  the pipeline's per-phase models. */
+function defaultHeadless(): HeadlessConfig {
+  return {
+    retryBackoffMs: envMs('JEAN_HEADLESS_RETRY_BACKOFF_MS', 60_000),
+    spawnTimeoutMs: envMs('JEAN_HEADLESS_TIMEOUT_MS', 1_200_000),
+    librarianDraftModel: process.env.JEAN_LIBRARIAN_DRAFT_MODEL ?? 'haiku',
+    librarianReviewModel: process.env.JEAN_LIBRARIAN_REVIEW_MODEL ?? 'sonnet',
+  }
+}
+
 // ── Live sessions ────────────────────────────────────────────────
 
 type Session = {
@@ -270,6 +309,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     peerDescriptionOf: () => undefined,
     logRetrieval: () => {},
     bridgeStatus: () => ({ configured: false }),
+    runHeadless: async () => {},
     ...options.ports,
   }
   // THE LOG IS `history.jsonl`, and that one string is the switch.
@@ -1049,6 +1089,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     body: parseBody,
     callerOf,
     record,
+    fireTrigger: (trigger) => fireTrigger(trigger),
     read: (opts) => store.read(opts),
     now: ports.now,
     observeActivity,
@@ -1148,6 +1189,14 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
   // nobody has a reference to (codex pass, task 104). Nothing here needs the
   // server; only the boot work below does.
 
+  // THE BOUNDS ARE CONFIGURATION, validated before anything can spawn: an
+  // infinite backoff never comes due and a zero timeout kills every run.
+  const headlessConfig: HeadlessConfig = { ...defaultHeadless(), ...options.headless }
+  const headlessValid = headless.validateConfig(headlessConfig)
+  if (!headlessValid.ok) {
+    throw new AttentionConfigError(`invalid headless configuration: ${headlessValid.refusal.field}`)
+  }
+
   attention = createAttention({
     now: ports.now,
     log: ports.log,
@@ -1163,16 +1212,34 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
    *  target, the mailbox holds it, the notifier announces it. That is why
    *  there is no second event here and no push: a firing that also pushed
    *  would tell the agent twice and record it once. */
-  async function fireTrigger(trigger: Trigger): Promise<void> {
+  async function fireTrigger(trigger: Trigger, opts?: { awaitRun?: boolean }): Promise<void> {
     await record('trigger-fired', TRIGGERS_STREAM, triggers.fireData(trigger))
-    if (trigger.kind === 'headless') {
-      // NOT BUILT, and loud about it rather than silent: a headless firing
-      // is supposed to spawn a one-shot session under a role. The event is
-      // recorded (and resolves to history, exactly as §4 declares), but
-      // nothing runs. Flagged for G1 — a dojo whose nightly consolidation is
-      // a headless trigger would find it quietly not happening.
-      ports.log(`[jean:new] trigger ${trigger.id} is headless — no spawn adapter yet; firing recorded only\n`)
+    if (trigger.kind !== 'headless') return
+    const run = ports.runHeadless(
+      {
+        id: trigger.id,
+        kind: trigger.kind,
+        agent: trigger.agent,
+        prompt: trigger.prompt,
+        ...(trigger.model !== undefined && { model: trigger.model }),
+        ...(trigger.retries !== undefined && { retries: trigger.retries }),
+      },
+      headlessConfig,
+      record,
+    )
+    // THE FIRING IS THE EVENT; THE RUN IS A PROCESS — normally detached,
+    // because a consolidation is half an hour and the trigger that started
+    // it is one appended event.
+    //
+    // EXCEPT ON CATCH-UP. Several triggers can be overdue after a laptop was
+    // shut, and launching their spawns in parallel is a stampede of Claude
+    // processes on one machine; the old startup loop awaited each headless
+    // run for exactly this reason (codex pass, task 114).
+    if (opts?.awaitRun === true) {
+      await run.catch((err: unknown) => ports.log(`[jean:new] headless ${trigger.id} failed: ${String(err)}\n`))
+      return
     }
+    void run.catch((err: unknown) => ports.log(`[jean:new] headless ${trigger.id} failed: ${String(err)}\n`))
   }
 
   /**
@@ -1231,7 +1298,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     now: ports.now,
     log: ports.log,
     triggersState: () => triggerState,
-    fire: fireTrigger,
+    fire: (trigger, opts) => fireTrigger(trigger, opts),
   })
 
   /**
@@ -1607,6 +1674,8 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
       attention?.runSupervisor()
     },
 
+    recordEvent: (type, stream, data) => record(type, stream, data),
+
     async notify(to, text) {
       await performSend({ from: 'infra', to, text })
     },
@@ -1754,6 +1823,21 @@ if (import.meta.main) {
         // registry, never from the message, which is the routing contract's
         // enrichment rule in one line.
         peerDescriptionOf: (name) => peers[name]?.description,
+        // THE SPAWN SUBSYSTEM, and only in production: a run is processes
+        // and files, so a suite gets the default no-op and drives the walk
+        // against stubs instead.
+        runHeadless: (trigger, headlessConfig, record) =>
+          runHeadless(
+            trigger,
+            headlessConfig,
+            headlessPorts({
+              dataDir,
+              now: () => Date.now(),
+              log: (line) => process.stderr.write(line),
+              record: (data) => record('headless-completed', TRIGGERS_STREAM, data),
+              recordConsolidated: (data) => record('wiki-consolidated', SYSTEM_STREAM, data),
+            }),
+          ),
       },
     })
 

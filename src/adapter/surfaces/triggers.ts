@@ -127,7 +127,12 @@ export function triggerRoutes(ctx: SurfaceContext): (req: Request, url: URL) => 
   async function fire(id: string): Promise<Response> {
     const trigger = triggers.triggerOf(ctx.triggersState(), id)
     if (trigger === undefined) return refuse(renameTriggerRefusal({ kind: 'unknown-trigger', id }))
-    await ctx.record('trigger-fired', TRIGGERS_STREAM, triggers.fireData(trigger))
+    // THE SAME PATH THE SCHEDULER TAKES. This surface used to append the
+    // firing event itself, which was indistinguishable from firing until a
+    // headless trigger had a run behind it — and then a hand-fired
+    // consolidation recorded its firing and spawned nothing (measured on the
+    // E4-HL dry run).
+    await ctx.fireTrigger(trigger)
     return ctx.json({ ok: true, triggerId: id })
   }
 

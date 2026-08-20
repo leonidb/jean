@@ -274,7 +274,9 @@ describe('an emission that cannot be appended', () => {
     // lands a microtask later, so a fixed wait is a race that passes on a
     // quiet machine and fails on a loaded one (measured — this test flaked
     // once at 60ms while another suite was running).
-    for (let i = 0; i < 40 && !lines.join('').includes('LOST EMISSION'); i++) {
+    // Three seconds, not one: the first budget was 1s and a loaded suite
+    // clipped it at 1028ms. A marginal wait is a flake waiting to happen.
+    for (let i = 0; i < 120 && !lines.join('').includes('LOST EMISSION'); i++) {
       await new Promise((r) => setTimeout(r, 25))
     }
     chmodSync(resolve(dir, 'history.jsonl'), 0o644)

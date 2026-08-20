@@ -307,6 +307,34 @@ describe('firing exactly once, with what the trigger says NOW', () => {
   })
 })
 
+describe('catch-up awaits the RUN, not just its event', () => {
+  test('overdue headless triggers do not stampede — each finishes before the next fires', async () => {
+    // A headless firing detaches a process. Several triggers overdue after a
+    // laptop was shut is the normal case, and launching their spawns in
+    // parallel puts N Claude processes on one machine — the old startup loop
+    // awaited each for exactly this reason (codex pass).
+    const events = [...overdue('nightly'), ...overdue('second')]
+    const running: string[] = []
+    let overlapped = false
+    const scheduler = createScheduler({
+      now: () => NOW,
+      log: () => {},
+      triggersState: () => registry(events),
+      fire: async (t, opts) => {
+        expect(opts?.awaitRun).toBe(true) // catch-up asks for the whole run
+        if (running.length > 0) overlapped = true
+        running.push(t.id)
+        await new Promise((r) => setTimeout(r, 20))
+        running.pop()
+      },
+      schedule: () => {},
+      unschedule: () => {},
+    })
+    await scheduler.catchUpOnBoot()
+    expect(overlapped).toBe(false)
+  })
+})
+
 describe('the injected cron arithmetic', () => {
   test('a real expression yields the most recent instant at or before now', () => {
     const previous = previousScheduledRun('0 3 * * *', NOW)

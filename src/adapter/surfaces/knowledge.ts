@@ -37,7 +37,7 @@ import type {
   SendData,
   TaskCommentData,
 } from './../../domain/contracts/vocabulary.ts'
-import { agentStream, MEMORY_STREAM, taskIdFromStream } from './../../domain/contracts/vocabulary.ts'
+import { agentStream, MEMORY_STREAM, SYSTEM_STREAM, taskIdFromStream } from './../../domain/contracts/vocabulary.ts'
 import { knowledge } from './../../domain/knowledge/index.ts'
 import { tasks } from './../../domain/tasks/index.ts'
 import type { SurfaceContext } from './../context.ts'
@@ -214,8 +214,38 @@ export function knowledgeRoutes(ctx: SurfaceContext): (req: Request, url: URL) =
     })
   }
 
+  /**
+   * The librarian's end-of-run record.
+   *
+   * A RECORDED FACT, and nothing more (ruled at A-HL): its shape is the
+   * vocabulary's, its resolution is already declared (history), and its
+   * consumers read it from the log. No module grows a fold for it — a fold
+   * with no reader would be shape without a keeper — so this surface is a
+   * thin append of a census shape, and the numbers on it are the
+   * consolidator's own count of what it did.
+   */
+  async function consolidated(req: Request): Promise<Response> {
+    const body = await ctx.body(req)
+    if (body === null) return ctx.json({ error: 'body must be a JSON object' }, 400)
+    const numeric = (key: string): Record<string, number> => {
+      const value = body[key]
+      return typeof value === 'number' && Number.isFinite(value) ? { [key]: value } : {}
+    }
+    const event = await ctx.record('wiki-consolidated', SYSTEM_STREAM, {
+      ...numeric('pagesCreated'),
+      ...numeric('pagesUpdated'),
+      ...numeric('corrections'),
+      ...numeric('tasksDistilled'),
+      ...numeric('eventsProcessed'),
+      ...numeric('rawFilesProcessed'),
+      ...(Array.isArray(body.anomalies) && { anomalies: body.anomalies.map(String) }),
+    })
+    return ctx.json({ ok: true, id: event.id })
+  }
+
   return async (req, url) => {
     if (url.pathname === '/context/search' && req.method === 'GET') return search(url)
+    if (url.pathname === '/context/consolidated' && req.method === 'POST') return consolidated(req)
     if (url.pathname === '/context/recent' && req.method === 'GET') return recent(url)
     if (url.pathname === '/context/memorize' && req.method === 'POST') return memorize(req, url)
     return undefined

@@ -57,7 +57,7 @@ export type SchedulePorts = {
   /** Append the firing. The delivery half is the ordinary mail path — a
    *  firing resolves to its target and the notifier announces it — so this
    *  writes ONE event and nothing else. */
-  fire: (trigger: Trigger) => Promise<void>
+  fire: (trigger: Trigger, opts?: { awaitRun?: boolean }) => Promise<void>
   /** The job table's implementation. Injectable so a test can drive the
    *  scheduler without waiting for a real cron instant. */
   schedule?: (id: string, spec: { cron: string } | { at: string }, run: () => void) => void
@@ -186,7 +186,11 @@ export function createScheduler(ports: SchedulePorts): Scheduler {
       // means the whole backlog lands in one mailbox in one instant.
       firing.add(trigger.id)
       try {
-        await ports.fire(trigger)
+        // AWAITING THE RUN, not just its event: several overdue triggers is
+        // the normal case after a laptop was shut, and a headless firing
+        // detaches a process. Launching them in parallel is a stampede on
+        // one machine (codex pass, task 114).
+        await ports.fire(trigger, { awaitRun: true })
       } finally {
         firing.delete(trigger.id)
       }

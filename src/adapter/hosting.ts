@@ -21,11 +21,14 @@
  * work under time pressure — the seam exists so they can be used as they are.
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import type { AgentRole, HeadlessCompletedData, WikiConsolidatedData } from '../domain/contracts/vocabulary.ts'
 import { type Bridge, type BridgeHealth, selectBridge } from '../infra/bridge.ts'
 import type { JeanConfig } from '../infra/config.ts'
+import { commitConsolidation, probeAnthropicAPI, recoverWikiLayout, spawnHeadless } from '../infra/librarian.ts'
 import { createPeerDeliver, type Peer } from '../infra/peers.ts'
+import { consolidatorPaths, discardDraftPlan, type HeadlessPorts } from './headless.ts'
 import type { AdapterHandle } from './server.ts'
 
 /** What `/status` says about the chat surface. `configured: false` is the
@@ -169,5 +172,86 @@ export function createHosting(
         },
       })
     },
+  }
+}
+
+// ── The headless spawn ports ─────────────────────────────────────
+//
+// The transports the headless runner needs, built from the modules that
+// already own them. `src/infra/librarian.ts` is not part of the rewrite —
+// H2's list leaves it standing beside the bridge and the peers — and it
+// holds the process spawn, the API probe, the wiki-layout recovery and the
+// commit. Re-implementing any of them for tonight's consolidation would be
+// exactly the invention the switch day forbids.
+
+/** Build the ports from the dojo's own paths. `record` and `log` come from
+ *  the server, which owns the log and the writer. */
+export function headlessPorts(args: {
+  dataDir: string
+  now: () => number
+  log: (line: string) => void
+  record: (data: HeadlessCompletedData) => Promise<unknown>
+  recordConsolidated: (data: WikiConsolidatedData) => Promise<unknown>
+}): HeadlessPorts {
+  const dojoRoot = resolve(args.dataDir, '..')
+  return {
+    now: args.now,
+    log: args.log,
+    record: args.record,
+
+    async spawn(spec) {
+      try {
+        const result = await spawnHeadless({
+          dojoRoot,
+          role: spec.role as AgentRole,
+          prompt: spec.prompt,
+          ...(spec.model !== undefined && { model: spec.model }),
+          streamSinkPath: spec.streamSinkPath,
+          // THE DECISION'S BOUND, enforced here. The old path had the port
+          // choose an ambient number nobody declared.
+          timeoutMs: spec.timeoutMs,
+        })
+        return {
+          kind: 'ran',
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          timedOut: result.timedOut,
+          stderr: result.stderr,
+          ...(result.parsed !== undefined && { parsed: result.parsed }),
+        }
+      } catch (err) {
+        // The spawn never happened — a missing role directory, a missing
+        // binary. The -1 sentinel is the decision's to write; this only
+        // reports what it was.
+        return { kind: 'spawn-failed', message: String(err) }
+      }
+    },
+
+    probe: () => probeAnthropicAPI(),
+
+    async prepare() {
+      try {
+        const recovered = recoverWikiLayout(dojoRoot)
+        if (recovered.recovered !== 'none') args.log(`[jean:new] wiki layout recovered (${recovered.recovered})\n`)
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, message: `wiki layout recovery failed: ${String(err)}` }
+      }
+    },
+
+    async commit() {
+      const result = await commitConsolidation({ dojoRoot, recordEvent: args.recordConsolidated })
+      args.log(
+        `[jean:new] consolidation committed — swapped=${result.swapped} pages=${result.pageCount} anomalies=${result.emitted.anomalies?.length ?? 0}\n`,
+      )
+    },
+
+    discardDraft: () => discardDraftPlan(args.dataDir),
+
+    // THE DRAFT'S ARTIFACT IS THE POST CHECK. An exit-0 draft that produced
+    // no plan is a failure — and the reason review can trust its input.
+    postCheck: (phaseTag) => (phaseTag === 'draft' ? existsSync(consolidatorPaths(args.dataDir).planPath) : undefined),
+
+    wait: (ms) => Bun.sleep(ms),
   }
 }
