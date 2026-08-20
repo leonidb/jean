@@ -72,6 +72,19 @@ describe('spec §4 — message kinds', () => {
     expect(resolution.resolve(e, ctx)).toEqual([ORCH])
   })
 
+  test('reply resolution is STREAM-INDEPENDENT (task 116): tagged or untagged, a reply reaches the orchestrator and nobody else', () => {
+    // The 116 ruling removes the write-site's task-filing inference. This
+    // pin is the VERIFIED consequence the ruling relied on: the stream a
+    // reply records to changes its /history filing, never its delivery —
+    // `reply` resolves by KIND, and a task-filed reply does NOT consult
+    // the task's subscribers.
+    const log = build()
+    const onAgent = log.append('reply', `agent-${WORKER_A}`, { agent: WORKER_A, text: 'untagged' })
+    const onTask = log.append('reply', 'task-202', { agent: WORKER_A, text: 'tagged' }) // task 202 has THREE subscribers
+    expect(resolution.resolve(onAgent, ctx)).toEqual([ORCH])
+    expect(resolution.resolve(onTask, ctx)).toEqual([ORCH]) // never the subscriber set
+  })
+
   test('human message → orchestrator', () => {
     const log = build()
     const e = log.append('reply', 'system', { agent: HUMAN, text: 'how is it going?' })

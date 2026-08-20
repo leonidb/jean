@@ -45,6 +45,20 @@ export const TRIGGERS_STREAM = 'triggers'
 export const PLAYBOOKS_STREAM = 'playbooks'
 export const MEMORY_STREAM = 'memory'
 
+/** ── THE RECORDING RULE for agent speech (RULED at task 116, from the
+ *  2026-08-20 stream audit) ── An untagged `reply` records to the AGENT'S
+ *  OWN stream, period. The old inference — file it onto whichever task the
+ *  agent happens to hold — is REMOVED, not replaced: the audit showed it
+ *  was 100% guesswork (workers never tag), and the guesses were wrong at
+ *  scale (a parked task accumulated fifteen unrelated status reports; a
+ *  spec task's record ran half probe-chatter). An EXPLICIT `taskId` on a
+ *  reply stays honored — deliberate task-scoping is the caller's to
+ *  claim, never inferred. `comment` is the durable task-writing verb; no
+ *  task in the audited log relied on replies for its record. Bridge
+ *  inbound (human speech) NEVER task-files — humans never mean a task
+ *  implicitly. Delivery is UNTOUCHED either way: `reply` resolves to the
+ *  orchestrator by kind, stream-independent (pinned in resolution's
+ *  conformance). */
 export function taskStream(taskId: string): string {
   return `task-${taskId}`
 }

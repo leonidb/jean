@@ -330,14 +330,34 @@ export type TasksContract = {
 
   all: (state: TasksState) => readonly Task[]
   taskOf: (state: TasksState, id: string) => Task | undefined
-  /** The task an agent currently holds (in-progress or waiting, as owner or
-   *  queue), if any — messaging attribution's board half. DO NOT feed this
-   *  into supervision (ruled, task 115): its engaged set includes `waiting`
-   *  for its OWN consumer, and inheriting it put every parked task's
-   *  holder on the stuck clock — the live probe loop. Supervision consumes
-   *  `supervisionLoadOf`. After task 116 removes reply attribution, this
-   *  member's remaining consumers get audited and it is retired or
-   *  re-scoped deliberately — do not grow new callers meanwhile. */
+  /** CONDEMNED (task 116; the audit is complete). This existed for reply
+   *  attribution — inference the 116 ruling REMOVES — and its only other
+   *  consumer was the supervision composition, which task 115 moved to
+   *  `supervisionLoadOf` after inheriting this member's `waiting` cost a
+   *  live probe loop. After the two D-sides land, its live-consumer count
+   *  is ZERO (verified by census at 116): the D-116 brief retires it —
+   *  member, prose, and conformance cases — as a deliberate line. Do not
+   *  grow new callers.
+   *
+   *  THE VOCABULARY PRINCIPLE that replaces it (Leonid, 2026-08-20,
+   *  sharpening 116): "what is this agent working on", "what is queued to
+   *  it", "what does it hold parked", and "what waits on this PARTY as
+   *  blocker" are DIFFERENT QUESTIONS — one member answering several is
+   *  how the probe loop happened. AND THE AUDIT IS AN EVALUATION, NOT A
+   *  TRANSLATION (his second sharpening): the first verdict on any use is
+   *  whether the question was worth asking at all — the PRIOR is failure,
+   *  since both of this member's original consumers failed the merits
+   *  test (supervision's holdsWork was the probe-loop bug; reply
+   *  attribution was a corruption source — "contributed to a lot of
+   *  spam"). A dropped use is a one-line entry with its reason; only a
+   *  use that justifies itself explicitly earns a named function, and
+   *  nobody re-derives a status filter inline (R18's lesson). The census
+   *  at this writing: actively-working SURVIVED on merits (the stuck
+   *  clock genuinely needs engagement — `supervisionLoadOf.engaged`);
+   *  reply attribution DROPPED (the ruling); assigned-backlog,
+   *  parked-held and blocker-inverse have no in-code consumers and are
+   *  deliberately ABSENT — noted, not minted. A future consumer argues
+   *  its question's merits first, then adds the named member. */
   activeTaskOf: (state: TasksState, agent: AgentName) => Task | undefined
 
   /** The held-work facts the SUPERVISOR'S composer consumes — the pinned

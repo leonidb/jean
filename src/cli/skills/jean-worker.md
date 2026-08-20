@@ -93,6 +93,8 @@ If the playbook is missing, unclear, or you're unsure which one applies: ask the
 
 When unsure: reply is cheap, comment is curated. Err toward reply for conversation, comment for decisions/findings.
 
+If it belongs on the task, **comment** it — an untagged reply does not reach the task's record. Tag a reply's `taskId` only when the message itself is deliberately task-scoped; an untagged reply is conversation, filed to you.
+
 ## Shell discipline
 
 The sandbox flags patterns that look like obfuscation. Avoid these:

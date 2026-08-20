@@ -229,7 +229,9 @@ Alternatives considered:
 - **Require agent to always specify `taskId`**: rejected as ergonomically heavy. In the common case (one deliver → one reply) the correlation is obvious.
 - **Enforce single-in-progress task per worker** to eliminate ambiguity at the state layer: rejected. Constrains legitimate patterns (workers context-switching across related tasks), and state-based attribution has its own races.
 
-Why message-thread attribution won: the `taskId` is already known at deliver time (sensei set it when dispatching). The plugin carries it forward through to the reply. Explicit override handles multi-task cases cleanly. Legacy inference stays as fallback for older clients; removed once rollout is complete.
+Why message-thread attribution won: the `taskId` is already known at deliver time (sensei set it when dispatching). The plugin carries it forward through to the reply. Explicit override handles multi-task cases cleanly.
+
+**Superseded on the fallback (2026-08-20, task 116):** the legacy inference is REMOVED, not awaiting rollout — a stream audit showed it was 100% guesswork in practice (workers never tag) and corrupted task records at scale. An untagged reply records to the agent's own stream; explicit `taskId` stays honored; `comment` is the durable task-writing verb.
 
 ## 19. Autonomous sensei wake-ups: always on; noise control at the event source
 
