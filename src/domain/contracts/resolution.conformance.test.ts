@@ -313,7 +313,7 @@ describe('degenerate contexts — empty, never a fallback', () => {
   })
 })
 
-describe('the admission flag — five kinds became mail mid-history (surfaced at composition, task 102)', () => {
+describe('the admission flag — the kinds that became mail mid-history (five at task 102; six with task 119)', () => {
   test('without `queued: true` the flagged kinds resolve to NOBODY; the same shapes with it resolve as declared', () => {
     // Every real log holds these WITHOUT the flag: bookkeeping-era records
     // and synchronous `delivered` handovers. Resolving them would resurrect
@@ -342,5 +342,30 @@ describe('the admission flag — five kinds became mail mid-history (surfaced at
     // refuse — the same shape with the flag is mail, per the table above.
     const flagged = log.append('send', `agent-${WORKER_A}`, { agent: WORKER_A, from: ORCH, text: 'go', queued: true })
     expect(resolution.resolve(flagged, ctx)).toEqual([WORKER_A])
+  })
+
+  test('wiki-consolidated is the SIXTH gated kind (task 119): flagged → the orchestrator; historical records stay history', () => {
+    // The first scheduled headless night delivered three anomalies to no
+    // mailbox — the operating contract (the orchestrator's skill surfaces
+    // `data.anomalies` to the human) contradicted the census inference
+    // that lumped this kind with bookkeeping. Routed as mail, admission-
+    // gated: old logs hold many consolidation records that must not
+    // resurrect as pending on replay.
+    const log = build()
+    const flagged = log.append('wiki-consolidated', 'system', {
+      pagesUpdated: 3,
+      anomalies: ['stale reference in ops.md'],
+      queued: true,
+    })
+    expect(resolution.resolve(flagged, ctx)).toEqual([ORCH])
+    // Anomaly-free runs mail too — routine-vs-surface is the reader's
+    // judgement, not a routing split.
+    const routine = log.append('wiki-consolidated', 'system', { pagesUpdated: 1, queued: true })
+    expect(resolution.resolve(routine, ctx)).toEqual([ORCH])
+    // Every historical record (no flag) resolves empty — replay protection.
+    const historical = log.append('wiki-consolidated', 'system', { pagesUpdated: 7, anomalies: ['old'] })
+    expect(resolution.resolve(historical, ctx)).toEqual([])
+    // And with no orchestrator on record: empty, never a fallback (P4).
+    expect(resolution.resolve(flagged, noOrchCtx)).toEqual([])
   })
 })

@@ -33,10 +33,19 @@
  *                                               runs spawn, nothing to mail)
  *   agent-probe (idle-liveness ping)          → the pinged worker
  *   agent-down / worker-status / disconnect   → orchestrator
+ *   wiki-consolidated                         → orchestrator (queued only —
+ *                                               the skill surfaces its
+ *                                               anomalies to the human;
+ *                                               repinned at task 119)
  *   ack / nudge / agent-idle / memory /
  *     register / start / permission-request /
- *     wiki-consolidated / trigger CRUD /
+ *     trigger CRUD /
  *     playbook CRUD / headless-completed      → nobody — history
+ *                                               (headless-completed
+ *                                               deliberately: per-attempt
+ *                                               forensics; the run's
+ *                                               summary is
+ *                                               wiki-consolidated)
  *
  * "Everyone involved" is a resolution, not an address: a task created
  * unassigned by the orchestrator resolves to nobody and is history (spec §4).
@@ -44,9 +53,10 @@
  * resolve empty — never to a fallback (a mailbox nobody owns is the orphan
  * class P4 abolishes).
  *
- * THE ADMISSION FLAG (surfaced at A6's composition round, task 102): five
+ * THE ADMISSION FLAG (surfaced at A6's composition round, task 102): six
  * kinds — `send`, `task-reminder`, `agent-probe`, `agent-down`,
- * `worker-status` — became MAIL mid-history; their shapes carry
+ * `worker-status`, and (since task 119) `wiki-consolidated` — became MAIL
+ * mid-history; their shapes carry
  * `queued?: true`, the vocabulary's admission flag ("the write site
  * decides, the fold applies"). WITHOUT the flag they resolve to NOBODY:
  * a bookkeeping-era record, or a send handed over synchronously

@@ -355,6 +355,11 @@ export type WikiConsolidatedData = {
   eventsProcessed?: number
   rawFilesProcessed?: number
   anomalies?: string[]
+  /** THE ADMISSION FLAG (task 119 — the kind became MAIL mid-history):
+   *  the consolidation summary routes to the orchestrator, whose skill
+   *  surfaces `anomalies` to the human. Absent on every historical record
+   *  (bookkeeping era) so replay resurrects nothing. */
+  queued?: true
 }
 
 export type PlaybookCreatedData = {

@@ -74,11 +74,11 @@
  *
  * RULED here (the 108 brief asked): NEITHER this module NOR knowledge
  * grows a fold for it. The event is a recorded fact — its shape is the
- * vocabulary's (`WikiConsolidatedData`), its resolution is already
- * declared (history), its consumers read it from the log (the sensei's
- * nudge surfaces anomalies). The write surface is a thin adapter route
- * appending a census shape — E4-HL wires it; a fold with no reader would
- * be shape without a keeper.
+ * vocabulary's (`WikiConsolidatedData`), its resolution is the table's
+ * (MAIL to the orchestrator since task 119, admission-gated — the skill
+ * surfaces its anomalies to the human). The write surface is a thin
+ * adapter route appending a census shape — E4-HL wires it; a fold with
+ * no reader would be shape without a keeper.
  *
  * What the types cannot enforce, and what does: the one-attempt-one-record
  * law, the sentinels, the retry/backoff walk, the probe policy, the

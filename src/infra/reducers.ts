@@ -415,6 +415,9 @@ export type WikiConsolidatedData = {
   /** Free-form messages the librarian wants sensei to look at: stale
    *  references, unclear contradictions, files it couldn't extract, etc. */
   anomalies?: string[]
+  /** Admission flag (task 119) — read by the NEW resolution; this old
+   *  fold ignores it. Dies with this file at H2. */
+  queued?: true
 }
 
 // ── Playbook event data ─────────────────────────────────────────

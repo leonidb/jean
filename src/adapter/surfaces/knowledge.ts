@@ -217,11 +217,13 @@ export function knowledgeRoutes(ctx: SurfaceContext): (req: Request, url: URL) =
   /**
    * The librarian's end-of-run record.
    *
-   * A RECORDED FACT, and nothing more (ruled at A-HL): its shape is the
-   * vocabulary's, its resolution is already declared (history), and its
-   * consumers read it from the log. No module grows a fold for it — a fold
-   * with no reader would be shape without a keeper — so this surface is a
-   * thin append of a census shape, and the numbers on it are the
+   * A RECORDED FACT, and nothing more (ruled at A-HL; routing repinned at
+   * task 119): its shape is the vocabulary's, its resolution is MAIL to
+   * the orchestrator (admission-gated — the flag below), and its consumers
+   * read it from the mailbox and the log. No module grows a fold for it —
+   * a fold with no reader would be shape without a keeper — so this
+   * surface is a thin append of a census shape, and the numbers on it are
+   * the
    * consolidator's own count of what it did.
    */
   async function consolidated(req: Request): Promise<Response> {
@@ -239,6 +241,8 @@ export function knowledgeRoutes(ctx: SurfaceContext): (req: Request, url: URL) =
       ...numeric('eventsProcessed'),
       ...numeric('rawFilesProcessed'),
       ...(Array.isArray(body.anomalies) && { anomalies: body.anomalies.map(String) }),
+      // The admission flag (task 119): the summary mails the orchestrator.
+      queued: true,
     })
     return ctx.json({ ok: true, id: event.id })
   }

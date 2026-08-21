@@ -678,6 +678,12 @@ export async function commitConsolidation(opts: {
     rawFilesProcessed: stats.rawFilesProcessed ?? 0,
     ...(stats.corrections !== undefined && { corrections: stats.corrections }),
     ...(anomalies.length > 0 && { anomalies }),
+    // THE ADMISSION FLAG (task 119): the summary is MAIL to the
+    // orchestrator, whose skill surfaces `anomalies` to the human. Without
+    // this, the record resolves to nobody — the first scheduled night
+    // delivered three anomalies to no mailbox. The old fold ignores the
+    // extra field; the new resolution requires it.
+    queued: true,
   }
   await recordEvent(emitted)
 

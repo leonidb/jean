@@ -80,8 +80,9 @@ function named(value: unknown): readonly (AgentName | undefined)[] {
  *  the same function shape as every other row, returning nobody. */
 const nobody: Resolver = () => []
 
-/** THE ADMISSION GATE (contract, task 102): the five kinds that became mail
- *  mid-history resolve only when their record carries `queued: true` — the
+/** THE ADMISSION GATE (contract, task 102; six kinds since task 119): the
+ *  kinds that became mail mid-history resolve only when their record
+ *  carries `queued: true` — the
  *  vocabulary's admission flag. Without it the record is bookkeeping-era
  *  history (or a synchronous `delivered` handover) and must not mint pairs
  *  on replay. Part of the declared resolution, not a check beside it (P2). */
@@ -156,6 +157,17 @@ const RESOLUTIONS: Record<KnownKind, Resolver> = {
   'task-subscribed': nobody,
   'task-unsubscribed': nobody,
 
+  // The consolidation summary (task 119, reconciling the table with the
+  // operating contract): the orchestrator receives it — its skill surfaces
+  // `anomalies` to the human, and the first scheduled headless night proved
+  // the nobody-routing wrong by delivering three anomalies to no mailbox.
+  // Admission-gated like every kind that became mail mid-history: old logs
+  // hold many consolidation records that must not resurrect on replay.
+  // (`headless-completed` stays history DELIBERATELY, one line: per-attempt
+  // forensics — retries make several per run — and the run's meaningful
+  // summary is this kind, which now mails.)
+  'wiki-consolidated': queuedOnly(orchestratorOnly),
+
   // Supervision and liveness — all admission-gated except `disconnect`
   // (which never grew a flag: it was always mail to the orchestrator).
   'task-reminder': queuedOnly(orchestratorOnly),
@@ -173,7 +185,7 @@ const RESOLUTIONS: Record<KnownKind, Resolver> = {
   register: nobody,
   start: nobody,
   'permission-request': nobody,
-  'wiki-consolidated': nobody,
+
   'trigger-created': nobody,
   'trigger-updated': nobody,
   'trigger-removed': nobody,
