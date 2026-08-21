@@ -97,6 +97,8 @@ export function createAttention(ports: AttentionPorts): Attention {
 
   let notifierState = notifier.initial()
   let supervisorState = supervisor.initial()
+  /** When the supervision tick last ran, for the gap detector below. */
+  let lastSupervisorTickAt: number | undefined
   let running = false
   let timers: ReturnType<typeof setInterval>[] = []
 
@@ -119,8 +121,36 @@ export function createAttention(ports: AttentionPorts): Attention {
     }
   }
 
+  /**
+   * The sleep detector, and it exists because the fields could not be one.
+   *
+   * A laptop that sleeps does not stop its timers so much as skip them: the
+   * process runs in short DarkWake bursts, so every poll counter reads
+   * "attempted seconds ago" while the machine has been effectively off for
+   * three quarters of an hour. On 2026-08-21 that is exactly what happened,
+   * and everyone looking at it — reading `/status`, probing the endpoint by
+   * hand — concluded the remote service was failing, because every instrument
+   * they had was refreshed inside one of those bursts.
+   *
+   * Wall clock is the right measure here rather than the wrong one: the timer
+   * does not fire while asleep, so the gap between two fires IS the sleep. A
+   * tick that lands more than twice its interval late says so, once, in the
+   * one place someone reads afterwards.
+   */
+  function noteClockGap(now: number, interval: number): void {
+    const previous = lastSupervisorTickAt
+    lastSupervisorTickAt = now
+    if (previous === undefined) return
+    const elapsed = now - previous
+    if (elapsed <= interval * 2) return
+    ports.log(
+      `[jean:new] clock jumped ${Math.round(elapsed / 1000)}s (tick interval ${interval}ms) — machine likely slept\n`,
+    )
+  }
+
   function runSupervisor(): void {
     const now = ports.now()
+    noteClockGap(now, ports.config.superviseTickMs)
     const decision = supervisor.decide(supervisorState, ports.supervisionView(now), ports.config.supervisor)
     supervisorState = decision.next
     runSupervision(decision.effects, ports.supervisionExecutor)

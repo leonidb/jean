@@ -19,8 +19,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import type { Bridge, BridgeHost, BridgeOutbound } from '../infra/bridge.ts'
+import type { JeanConfig } from '../infra/config.ts'
 import { loadPeers } from '../infra/peers.ts'
-import { attachPeers } from './hosting.ts'
+import { attachPeers, createHosting } from './hosting.ts'
 import { type AdapterHandle, createAdapterServer } from './server.ts'
 
 const openServers: AdapterHandle[] = []
@@ -253,5 +254,83 @@ describe('the launcher’s ordering', () => {
     const source = await Bun.file(resolve(import.meta.dir, 'server.ts')).text()
     const launcher = source.slice(source.indexOf('if (import.meta.main)'))
     expect(launcher.match(/loadPeers\(/g)?.length).toBe(1)
+  })
+})
+
+/**
+ * Transport health on the bridge's own row (task 121).
+ *
+ * `/status` has carried the full health block since task 006, and it is what
+ * diagnosed the 2026-08-21 outage. What it does not do is put the numbers
+ * where the orchestrator looks: `/agents` is the roster read, and a bridge
+ * lagging nine minutes reads there exactly like a bridge that is fine.
+ */
+describe('the bridge’s row carries its transport', () => {
+  test('health hangs on the bridge and on nobody else, under its own key', async () => {
+    const dir = dojo()
+    const health = {
+      connected: false,
+      lastPollAt: 1_700_000_100_000,
+      lastPollOkAt: 1_700_000_000_000,
+      consecutiveFailures: 6,
+      lastInboundAt: 1_700_000_000_000,
+      lastInboundLagMs: 989_209,
+      maxInboundLagMs: 3_601_144,
+    }
+    const server = await boot(dir, {
+      // The host answers for ONE name — the identity the bridge registered
+      // under. Everyone else gets undefined, which is the whole guard.
+      bridgeTransport: (agent: string) => (agent === 'chat-777' ? health : undefined),
+    })
+    server.attachSurface({ name: 'chat-777', role: 'user', sessionId: 'bridge:telegram', deliver: () => true })
+    server.attachSurface({ name: 'someone-else', role: 'user', sessionId: 'other', deliver: () => true })
+
+    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+      agents: { name: string; connected: boolean; transport?: Record<string, unknown> }[]
+    }
+    const bridgeRow = body.agents.find((a) => a.name === 'chat-777')
+    expect(bridgeRow?.transport).toMatchObject({ lastPollOkAt: 1_700_000_000_000, consecutiveFailures: 6 })
+
+    // NESTED, not spread: the row's own `connected` means the SESSION is live,
+    // and the transport's means the wire is. Both are true facts and they
+    // disagree here — which is precisely the state an operator needs to read.
+    expect(bridgeRow?.connected).toBe(true)
+    expect(bridgeRow?.transport?.connected).toBe(false)
+
+    // AND NOT ON A SECOND user-role surface. Keying on the role instead of the
+    // registered identity would report a Telegram connection's poll counters
+    // against a person, which is the trap the cancelled 007 branch pinned.
+    expect(body.agents.find((a) => a.name === 'someone-else')?.transport).toBeUndefined()
+  })
+})
+
+describe('the host learns which session is the bridge', () => {
+  test('transportFor answers for the attached name and for nothing else — through createHosting itself', async () => {
+    const dir = dojo()
+    const server = await boot(dir)
+    const { bridge } = fakeBridge()
+    const hosting = createHosting(server, {} as JeanConfig, dir, () => {}, bridge)
+
+    // BEFORE THE ATTACH it answers for nobody, including the name it is about
+    // to learn. The identity comes from the transport at register time; there
+    // is nothing to match against until then.
+    expect(hosting.transportFor('chat-777')).toBeUndefined()
+
+    await hosting.start()
+
+    expect(hosting.transportFor('chat-777')).toMatchObject({ connected: true })
+    // The negative is the one that matters: this is the guard standing between
+    // a Telegram connection's poll counters and a human's row.
+    expect(hosting.transportFor('someone-else')).toBeUndefined()
+    expect(hosting.transportFor('orchestrator-o')).toBeUndefined()
+  })
+
+  test('a dojo with no bridge configured answers for nobody at all', async () => {
+    const dir = dojo()
+    const server = await boot(dir)
+    const hosting = createHosting(server, {} as JeanConfig, dir, () => {}, null)
+    await hosting.start()
+    expect(hosting.transportFor('chat-777')).toBeUndefined()
+    expect(hosting.bridgeStatus()).toEqual({ configured: false })
   })
 })

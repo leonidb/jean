@@ -119,6 +119,10 @@ export type AdapterPorts = {
    *  honest answer to "is one configured" comes from the config, not from
    *  whether a session happens to be attached right now. */
   bridgeStatus: () => unknown
+  /** The bridge transport's health for ONE agent — undefined unless that
+   *  agent IS the bridge. Asked per row rather than matched on role here:
+   *  which session is the bridge is the host's knowledge, not the server's. */
+  bridgeTransport: (agent: AgentName) => unknown
 }
 
 export type ServerOptions = {
@@ -309,6 +313,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     peerDescriptionOf: () => undefined,
     logRetrieval: () => {},
     bridgeStatus: () => ({ configured: false }),
+    bridgeTransport: () => undefined,
     runHeadless: async () => {},
     ...options.ports,
   }
@@ -1105,14 +1110,24 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     // R8 IN ONE LINE: `lastActivityAt` is the session's observed act or
     // nothing. The connect time is deliberately not a fallback.
     return json({
-      agents: [...sessions.values()].map((s) => ({
-        name: s.name,
-        role: roleOf(s.name),
-        connected: true,
-        ...(lastActivity.get(s.name) !== undefined && { lastActivityAt: lastActivity.get(s.name) }),
-        openTasks: tasks.openTaskCount(taskState, s.name),
-        pending: mailbox.countsFor(mailState, s.name, viewFacts()).total,
-      })),
+      agents: [...sessions.values()].map((s) => {
+        // SNAPSHOT ONCE. The port reads a live poll counter; calling it twice
+        // to test presence and then to emit lets one row's answer disagree
+        // with itself across the two reads (codex pass, task 121).
+        const transport = ports.bridgeTransport(s.name)
+        return {
+          name: s.name,
+          role: roleOf(s.name),
+          connected: true,
+          ...(lastActivity.get(s.name) !== undefined && { lastActivityAt: lastActivity.get(s.name) }),
+          openTasks: tasks.openTaskCount(taskState, s.name),
+          pending: mailbox.countsFor(mailState, s.name, viewFacts()).total,
+          // NESTED, and the nesting is the point: this row's `connected` is
+          // about the SESSION, and a transport `connected` beside it would be
+          // two different facts under one word. Present only on the bridge.
+          ...(transport !== undefined && { transport }),
+        }
+      }),
     })
   }
 
@@ -1857,6 +1872,7 @@ if (import.meta.main) {
       ports: {
         log: (line) => process.stderr.write(line),
         bridgeStatus: () => hosting?.bridgeStatus() ?? { configured: false },
+        bridgeTransport: (agent) => hosting?.transportFor(agent),
         // THE RECEIVER'S OWN DESCRIPTION of a peer — from this dojo's
         // registry, never from the message, which is the routing contract's
         // enrichment rule in one line.

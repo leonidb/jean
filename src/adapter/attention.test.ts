@@ -640,3 +640,62 @@ describe('a disconnected holder whose claim cannot be dated', () => {
     expect(downs).not.toContain('worker-unseen')
   })
 })
+
+/**
+ * The sleep detector (task 121) — the tell `/status` structurally cannot be.
+ *
+ * A sleeping laptop skips its timers rather than stopping them, so every poll
+ * counter reads "seconds ago" while the machine has been off for most of an
+ * hour. On the night this was written, a remote service was diagnosed as
+ * failing on exactly that evidence.
+ */
+describe('a tick that lands late says so', () => {
+  const attentionAt = (clock: () => number, lines: string[]) =>
+    createAttention({
+      now: clock,
+      log: (line) => lines.push(line),
+      notifyView: (now) => ({ now, agents: [] }),
+      supervisionView: (now) => ({ now, orchestrator: 'orchestrator-o', tasks: [], agents: [] }),
+      notifierExecutor: { deliver: () => true, stamp: () => {}, emit: () => {} },
+      supervisionExecutor: { emit: () => {} },
+      config: FAST,
+    })
+
+  test('a gap larger than two intervals is reported once, in seconds, with the reason', () => {
+    const lines: string[] = []
+    let now = 1_000_000
+    const attention = attentionAt(() => now, lines)
+
+    attention.runSupervisor() // the first tick has nothing to compare against
+    expect(lines).toEqual([])
+
+    now += FAST.superviseTickMs // on time
+    attention.runSupervisor()
+    expect(lines).toEqual([])
+
+    now += 45 * 60_000 // the machine slept
+    attention.runSupervisor()
+    expect(lines.join('')).toContain('clock jumped 2700s')
+    expect(lines.join('')).toContain('machine likely slept')
+
+    // ONCE, not once per tick afterwards. A detector that keeps firing about a
+    // sleep that already ended is noise in the file someone reads to find the
+    // one line that mattered.
+    const after = lines.length
+    now += FAST.superviseTickMs
+    attention.runSupervisor()
+    expect(lines.length).toBe(after)
+  })
+
+  test('an ordinary late tick is NOT a sleep — the bound is two intervals, not any lateness', () => {
+    const lines: string[] = []
+    let now = 1_000_000
+    const attention = attentionAt(() => now, lines)
+    attention.runSupervisor()
+    // Late, but within what a loaded machine does to a timer. Reporting this
+    // would make the line meaningless exactly when it is needed.
+    now += FAST.superviseTickMs * 2
+    attention.runSupervisor()
+    expect(lines).toEqual([])
+  })
+})

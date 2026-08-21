@@ -26,13 +26,17 @@
  */
 
 import {
+  appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -1697,6 +1701,40 @@ function cmdInfraUrl() {
   console.log(`http://127.0.0.1:${port}`)
 }
 
+/** Beyond this, the log is rotated at the next start. One generation is kept:
+ *  enough to survive the restart you perform WHILE diagnosing, which is when
+ *  the previous run's tail is the thing you need. */
+const INFRA_LOG_CAP_BYTES = 5_000_000
+
+/**
+ * Prepare `.jean/infra.log` for a new run and return its path.
+ *
+ * ROTATION HAPPENS HERE, AT START, and nowhere else — deliberately. A running
+ * server that policed its own log size would need to reopen the file under a
+ * writer that is a raw fd shared with a spawned process, and a truncation
+ * racing a write is how log files acquire half-lines. A restart is the natural
+ * seam, and a server up long enough to grow past the cap is a server nobody is
+ * restarting, whose log is the least of it. Stated rather than hidden: between
+ * restarts this file grows without bound.
+ */
+function openInfraLog(dataDir: string): string {
+  const path = resolve(dataDir, 'infra.log')
+  try {
+    if (statSync(path).size > INFRA_LOG_CAP_BYTES) renameSync(path, `${path}.1`)
+  } catch {
+    // No log yet, or an unreadable one — either way the append below creates
+    // what it needs. A rotation failure must never stop infra from starting.
+  }
+  // The boot marker, so a reader can tell one run's lines from the last's —
+  // the file is append-only across restarts and otherwise runs together.
+  try {
+    appendFileSync(path, `\n[jean] ── infra start ${new Date().toISOString()} ──\n`)
+  } catch {
+    /* the spawn's own fd is the real writer; this line is a courtesy */
+  }
+  return path
+}
+
 async function cmdInfraStart() {
   const dataDir = resolve(findDojoRoot(), '.jean')
 
@@ -1713,11 +1751,23 @@ async function cmdInfraStart() {
   }
 
   const serverPath = resolve(cliDir(), '../adapter/server.ts')
+  const logPath = openInfraLog(dataDir)
+  const logFd = openSync(logPath, 'a')
   const child = Bun.spawn(['bun', 'run', serverPath], {
     cwd: dataDir,
     env: { ...process.env, JEAN_DATA_DIR: dataDir },
-    stdio: ['ignore', 'ignore', 'inherit'],
+    // BOTH STREAMS TO THE FILE. Previously stdout was discarded and stderr was
+    // `inherit`, which reads as "the operator will see it" and is only true
+    // while the launching terminal lives: the server detaches, the shell exits,
+    // and the fd leads nowhere. That is not a theoretical loss — on the night
+    // this was written the Telegram bridge failed for 45 minutes and printed
+    // its one transition line, `[jean] telegram poll error: … — retrying`,
+    // into a terminal nobody was reading, so the only record of WHY was gone.
+    stdio: ['ignore', logFd, logFd],
   })
+  // The child holds its own copy; the parent's would otherwise outlive this
+  // command and pin the file.
+  closeSync(logFd)
 
   // Poll the port file: server writes it after successful bind.
   let startedPort: number | null = null
@@ -1735,8 +1785,11 @@ async function cmdInfraStart() {
     console.log(`  PID:  ${child.pid}`)
     console.log(`  Port: ${startedPort}`)
     console.log(`  Data: ${dataDir}`)
+    console.log(`  Log:  ${logPath}`)
   } else {
-    console.error('Infrastructure started but port file not found. Check stderr for errors.')
+    // NAMING THE FILE, not "check stderr": the whole point of the change above
+    // is that there is no stderr to check once this command returns.
+    console.error(`Infrastructure started but port file not found. Check ${logPath} for errors.`)
   }
 
   child.unref()

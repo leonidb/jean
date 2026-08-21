@@ -42,6 +42,19 @@ export type Hosting = {
   /** Live status for `/status`, read at request time — a wedged poll loop
    *  cannot report on itself, so the ages are computed by the reader. */
   bridgeStatus: () => BridgeStatus
+  /**
+   * The transport's health for ONE agent, and only if that agent IS the
+   * bridge — otherwise undefined.
+   *
+   * Keyed on the name the bridge actually registered under, not on
+   * `role === 'user'`. The role is a category and a dojo may hold several
+   * user-role surfaces; hanging poll counters on all of them would report a
+   * Telegram connection's health against a person. The cancelled branch that
+   * first built this surface pinned exactly that ("transport fields must not
+   * leak onto non-bridge agents, including user-role"), and it was the one
+   * piece of it worth salvaging.
+   */
+  transportFor: (agent: string) => BridgeHealth | undefined
   /** Start the bridge, if one is configured. Resolves once connected. */
   start: () => Promise<void>
 }
@@ -122,14 +135,27 @@ export function createHosting(
   config: JeanConfig,
   dataDir: string,
   log: (line: string) => void,
+  /** THE TRANSPORT, INJECTABLE — and only so it can be driven. `selectBridge`
+   *  builds a real Telegram or Slack client from config, which left this whole
+   *  module untestable: the identity-matching below decides whether transport
+   *  counters can land on a person's row, and it had no test because there was
+   *  no way to attach a bridge without a wire (codex pass, task 121).
+   *  Production passes nothing and gets `selectBridge`. */
+  bridgeOverride?: Bridge | null,
 ): Hosting {
-  const bridge: Bridge | null = selectBridge(config)
+  const bridge: Bridge | null = bridgeOverride === undefined ? selectBridge(config) : bridgeOverride
+  /** The name the bridge registered under — learned at attach, because only
+   *  the transport knows it (a Telegram chat's title, else `chat-<id>`). */
+  let attachedAs: string | undefined
 
   return {
     bridgeStatus: () => {
       if (bridge === null) return { configured: false }
       return { configured: true, kind: bridge.kind, target: bridge.target, ...bridge.health() }
     },
+
+    transportFor: (agent) =>
+      bridge !== null && attachedAs !== undefined && agent === attachedAs ? bridge.health() : undefined,
 
     async start() {
       if (bridge === null) return
@@ -153,6 +179,7 @@ export function createHosting(
               })
             },
           })
+          attachedAs = name
           log(`[jean:new] bridge attached: ${name} (${bridge.kind})\n`)
         },
 
