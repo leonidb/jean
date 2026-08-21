@@ -25,6 +25,9 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve as resolvePath } from 'node:path'
 import { type AdapterHandle, createAdapterServer } from './server.ts'
 
 let server: AdapterHandle
@@ -395,6 +398,60 @@ describe('the knowledge surface', () => {
   test('a query with nothing behind it is EMPTY, and empty is the signal it promises to be', async () => {
     const none = (await get('/context/search?q=zzyzx%20quicksilver')).body as unknown as { empty: boolean }
     expect(none.empty).toBe(true)
+  })
+
+  test('an answer with hits carries the reading rule; an EMPTY one does not', async () => {
+    // A REAL PAGE, because the failure this exists for is a description that
+    // reads like the content and is not it. Seeded on its own server so the
+    // page has a frontmatter description that differs from its body — a
+    // memory would not do: for a short memory the description IS the body's
+    // own prefix, so the fixture would prove attachment and nothing about the
+    // failure the comment claims (codex pass, task 120).
+    const dir = mkdtempSync(resolvePath(tmpdir(), 'jean-120-'))
+    mkdirSync(resolvePath(dir, 'context'), { recursive: true })
+    writeFileSync(
+      resolvePath(dir, 'context', 'orzammar-throughput.md'),
+      [
+        '---',
+        'description: Throughput work on the orzammar line — scope, owners, open questions.',
+        '---',
+        '',
+        '# Orzammar throughput',
+        '',
+        'Measured at 47 units/hour on 2026-03-02. Do not report this as unmeasured.',
+        '',
+      ].join('\n'),
+    )
+    const own = await createAdapterServer({ dataDir: dir })
+    const read = async (path: string) =>
+      (await (await fetch(`http://localhost:${own.port}${path}`)).json()) as Record<string, unknown>
+
+    const found = (await read('/context/search?q=orzammar%20throughput&scope=knowledge')) as unknown as {
+      hits: { description?: string; page: string }[]
+      howToRead?: string
+    }
+    expect(found.hits.length).toBeGreaterThan(0)
+    // The fixture's own premise: the description does NOT carry the number,
+    // and the body does. Asserted, so the fixture cannot rot into a page
+    // where reading the description would have been good enough.
+    expect(found.hits[0]?.description).not.toContain('47')
+    expect(found.howToRead).toContain('descriptions are pointers')
+    expect(found.howToRead).toContain('absence claim')
+
+    // AND NOT ON AN EMPTY, which is the half that keeps this honest: `empty`
+    // is itself a licensed absence claim, and telling the caller to go read
+    // bodies that do not exist would undercut the one promise the endpoint
+    // makes. A version that attached the line unconditionally passes the
+    // assertion above and fails here.
+    const none = (await read('/context/search?q=zzyzx%20quicksilver')) as unknown as {
+      empty: boolean
+      howToRead?: string
+    }
+    expect(none.empty).toBe(true)
+    expect(none.howToRead).toBeUndefined()
+
+    own.stop()
+    rmSync(dir, { recursive: true, force: true })
   })
 
   test('`?scope=` is REFUSED — an empty string is a value the caller sent, not an absent one', async () => {

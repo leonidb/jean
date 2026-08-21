@@ -47,6 +47,8 @@ infra GET /context/search?q=<terms>&scope=knowledge    # narrow to one source on
 
 `scope` defaults to `all` — wiki pages + today's unconsolidated memories + task descriptions/comments + the human⇄agent conversation, ranked together (field-boosted BM25 + capped fuzzy). Every hit carries its `source`, the owning `page`/task, that page's description, a snippet centered on the matched line, and `matchedTerms` — which of your query's terms it actually matched. Read `matchedTerms` to reject a weak hit at a glance: a multi-word query can return something that matched only one incidental word.
 
+**A hit's description is never the answer.** It is written to rank and to orient, so it reads like a summary of the page — which is the one thing it is not. And the hit is in front of you *because of the body*: search matched the page's content, so the content is where the match lives and the description is only its label. Read the body of anything you are about to speak from. This cuts hardest against claims of ABSENCE — "the dojo never measured that" is a statement about bodies, and a page whose description does not mention a number is exactly the page whose body may hold it.
+
 **Empty on the default (all-scope) is definitive — stop, don't grep.** When an all-scope search returns `empty: true`, the topic is genuinely nowhere in the dojo's memory (wiki, memories, tasks, or conversation). That is the whole point of this tool: it makes one cheap search authoritative so you don't fall back to grepping the raw event log — a grep after an all-scope empty finds nothing the search didn't.
 
 **The definitive-empty guarantee holds only for `scope=all`.** A *narrow*-scope empty rules out only that one source — `scope=knowledge` empty still leaves tasks and channel unsearched; `scope=tasks` empty still leaves the wiki. So: search the default (all); empty *there* → stop. Reach for a narrow scope only when you deliberately want a single source.
@@ -57,7 +59,7 @@ Browse the index (below) when you want to read a whole page, or when you don't y
 
 Search (above) is how you *find* a fact. Browse the index when you instead want to *read* — orient at session start, read a whole page end-to-end, or when you don't yet have precise query terms:
 
-- `.jean/context/index.md` — master TOC, one line per page (`- [[Page]] — <description>`), organized by category. The description often tells you enough without opening the page. Open the 1–3 pages that bear on your question; follow `[[wiki-links]]` to related pages when relevant. Don't read every file.
+- `.jean/context/index.md` — master TOC, one line per page (`- [[Page]] — <description>`), organized by category. Here the descriptions are doing triage: they tell you WHICH pages to open, and reading the index is often enough to decide that. That is the whole of what they settle — which page, not what it says. A search hit shows you a description that looks identical and is not the same thing (see above): the index description narrows a shelf, a hit's description labels a page whose body already matched your query. Open the 1–3 pages that bear on your question; follow `[[wiki-links]]` to related pages when relevant. Don't read every file.
 - `.jean/context/log.md` — append-only timeline of what changed when.
 
 If the index is missing or empty (fresh dojo), proceed without it — consolidation builds it as memories accumulate.

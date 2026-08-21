@@ -44,6 +44,27 @@ import type { SurfaceContext } from './../context.ts'
 import { consolidatedThrough, wikiDocs } from './../corpus.ts'
 import { renameCorpusRefusal, renameMemoryRefusal, renameScopeRefusal } from './../refusals.ts'
 
+/**
+ * The reading rule, carried on every answer that HAS something to read.
+ *
+ * A description is written to rank and to orient, so it reads like a summary
+ * of the page — and a summary is the one thing it is not. Twice in a week a
+ * sensei took a rich description for the content, and told a human a number
+ * had never been measured while the page's body held the number and a warning
+ * against that exact claim. The hit was ranked first both times: the search
+ * did its job and the reader stopped one level too early.
+ *
+ * NOT ON AN EMPTY RESULT, deliberately. `empty: true` is this endpoint's one
+ * promise — definitively nothing for these terms in this scope, the signal
+ * that kills the grep-the-raw-log reflex — and it IS a licensed absence
+ * claim. Telling a caller that an absence claim needs the bodies of the top
+ * hits, when there are no hits and the emptiness is itself the answer, would
+ * undercut the guarantee with a line meant to protect it.
+ */
+const HOW_TO_READ =
+  'descriptions are pointers, not content — open the page for what it says. ' +
+  'An absence claim is not valid until you have read the bodies of the top hits.'
+
 export function knowledgeRoutes(ctx: SurfaceContext): (req: Request, url: URL) => Promise<Response | undefined> {
   /** Memorize events the librarian has not folded into the wiki yet, so a
    *  fact written this morning is findable now rather than tomorrow. */
@@ -156,7 +177,8 @@ export function knowledgeRoutes(ctx: SurfaceContext): (req: Request, url: URL) =
     } catch {
       // Best-effort, and that is the whole of it.
     }
-    return ctx.json(result)
+    // ON HITS ONLY, and the exception is the point — see HOW_TO_READ.
+    return ctx.json(result.hits.length === 0 ? result : { ...result, howToRead: HOW_TO_READ })
   }
 
   async function memorize(req: Request, url: URL): Promise<Response> {
