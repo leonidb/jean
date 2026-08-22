@@ -8,7 +8,7 @@
     "jean": "./src/cli/jean.ts"
   },
   "scripts": {
-    "infra": "bun run src/infra/server.ts",
+    "infra": "bun run src/adapter/server.ts",
     "board": "bun run src/cli/jean.ts board",
     "status": "bun run src/cli/jean.ts status",
     "test": "bun test src/es src/infra src/channel src/cli scripts",
