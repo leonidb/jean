@@ -95,6 +95,18 @@ function sitterWatching(serverPid: number): number | undefined {
   return undefined
 }
 
+/** Whether the host is on wall power.
+ *
+ *  `-s` is AC-scoped BY DESIGN, so what the kernel reports about it on battery
+ *  is not something this file may assume. It was not measured: the machine this
+ *  was written on was plugged in throughout, and rather than guess whether
+ *  `pmset` still lists an inert assertion, the check below is skipped there —
+ *  loudly, so a run that quietly lost its strongest assertion says so. */
+function onACPower(): boolean {
+  const out = Bun.spawnSync(['pmset', '-g', 'ps'], { stdout: 'pipe', stderr: 'pipe' }).stdout.toString()
+  return out.includes("'AC Power'")
+}
+
 /** What the kernel says that pid is holding. */
 function kernelAssertionsOf(sitterPid: number): string {
   const out = Bun.spawnSync(['pmset', '-g', 'assertions'], { stdout: 'pipe', stderr: 'pipe' }).stdout.toString()
@@ -126,9 +138,14 @@ describe.skipIf(process.platform !== 'darwin')('a live dojo holds the machine aw
     // Past our own argv: what the system actually holds. `PreventSystemSleep`
     // is the AC-scoped one; `PreventUserIdleSystemSleep` (what a bare
     // caffeinate or `-i` takes) would fail this, and it is a distinct string,
-    // not a prefix of it.
-    const held = kernelAssertionsOf(sitter)
-    expect(held).toContain('PreventSystemSleep')
+    // not a prefix of it. On battery the feature is inert on purpose, so this
+    // is the one check that cannot run there — see `onACPower`.
+    if (onACPower()) {
+      const held = kernelAssertionsOf(sitter)
+      expect(held).toContain('PreventSystemSleep')
+    } else {
+      console.warn('[122] on battery — skipped the pmset check; argv and release still asserted')
+    }
 
     // …and the operator is told, because it changes how their machine behaves.
     expect(boot.stdout).toContain('idle sleep prevented while this runs (AC power only')

@@ -1820,9 +1820,18 @@ async function cmdInfraStart() {
   // command and pin the file.
   closeSync(logFd)
 
-  // BEFORE THE POLL, not after: the assertion costs nothing to take early, and
-  // `bun run <file>` execs in place (measured), so `child.pid` is the server's
-  // own pid — the one it writes to `infra.pid` and the one `infra stop` kills.
+  // BEFORE THE POLL, not after — the poll is six seconds and the assertion
+  // costs nothing to take early. `bun run <file>` execs in place (measured), so
+  // `child.pid` IS the server's own pid: the one it writes to `infra.pid`, and
+  // the one `infra stop` kills.
+  //
+  // NOT the server's whole lifetime, and the gap is named rather than papered
+  // over: between the spawn above and caffeinate registering on that pid, the
+  // server is up unasserted. Closing it would mean the wrapper form, whose cost
+  // is the pid divergence described on `keepMachineAwake` — a worse trade for a
+  // window measured in milliseconds, against idle sleep measured in minutes.
+  // The same window is the only place pid reuse could bite, and it would
+  // require this pid to die AND be recycled inside it (codex pass, task 122).
   const awake = keepMachineAwake(child.pid, logPath)
 
   // Poll the port file: server writes it after successful bind.
