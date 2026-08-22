@@ -1735,6 +1735,57 @@ function openInfraLog(dataDir: string): string {
   return path
 }
 
+/**
+ * Hold the machine awake for as long as the server lives — on AC power only.
+ *
+ * ── WHY A DOJO ASSERTS THIS ──
+ *
+ * A laptop hosting live dojos is a server, and a server that idle-sleeps stops
+ * being one. On 2026-08-21 this machine's maintenance-sleep cycles turned the
+ * Telegram bridge's steady poll into hourly batches of messages, which read for
+ * forty-five minutes as a transport outage; the transport was fine and the host
+ * was asleep. Task 121's detector now names that case after the fact. This
+ * removes the most common cause of it.
+ *
+ * ── WHY `-s`, AND WHY A SIDECAR ──
+ *
+ * `-s` is "prevent system sleep, valid only when running on AC power" — which
+ * is exactly the ruling. The kernel calls it `PreventSystemSleep`; `-i` takes a
+ * different one, `PreventUserIdleSystemSleep`, which holds on battery as well,
+ * and a dojo has no business draining a laptop somebody carried away from a
+ * desk. (Both names are measured, not read off the man page — `pmset -g
+ * assertions` reports them, and the test below reads it.) Neither flag touches
+ * lid-close sleep, which stays as it is: shutting the lid still means sleep,
+ * and that is the operator saying so.
+ *
+ * The `-w pid` form takes the assertion and releases it when that pid exits,
+ * so the sidecar dies with the server and there is nothing to clean up —
+ * including on a crash, where no cleanup code of ours would have run. The
+ * alternative, wrapping the spawn as `caffeinate -s bun run server.ts`, would
+ * have made `child.pid` caffeinate's rather than the server's: `infra stop`
+ * reads the pid file the server writes, so the two would diverge, and the PID
+ * this command prints would no longer be the one an operator can kill.
+ */
+function keepMachineAwake(serverPid: number, logPath: string): string | null {
+  // caffeinate is macOS's. Elsewhere there is no facility to report on.
+  if (process.platform !== 'darwin') return null
+  try {
+    const sitter = Bun.spawn(['caffeinate', '-s', '-w', String(serverPid)], {
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    sitter.unref()
+    return `idle sleep prevented while this runs (AC power only, pid ${sitter.pid})`
+  } catch (err) {
+    // A dojo starts without it. The assertion is a courtesy to the host
+    // machine, never a precondition for serving — but it is written down,
+    // because the next hourly-batch diagnosis will want to know it was absent.
+    try {
+      appendFileSync(logPath, `[jean] power assertion NOT taken: ${String(err)}\n`)
+    } catch {}
+    return null
+  }
+}
+
 async function cmdInfraStart() {
   const dataDir = resolve(findDojoRoot(), '.jean')
 
@@ -1769,6 +1820,11 @@ async function cmdInfraStart() {
   // command and pin the file.
   closeSync(logFd)
 
+  // BEFORE THE POLL, not after: the assertion costs nothing to take early, and
+  // `bun run <file>` execs in place (measured), so `child.pid` is the server's
+  // own pid — the one it writes to `infra.pid` and the one `infra stop` kills.
+  const awake = keepMachineAwake(child.pid, logPath)
+
   // Poll the port file: server writes it after successful bind.
   let startedPort: number | null = null
   for (let i = 0; i < 30; i++) {
@@ -1786,6 +1842,8 @@ async function cmdInfraStart() {
     console.log(`  Port: ${startedPort}`)
     console.log(`  Data: ${dataDir}`)
     console.log(`  Log:  ${logPath}`)
+    // Said out loud, because it changes how the operator's machine behaves.
+    if (awake !== null) console.log(`  ${DIM}Sleep: ${awake}${RESET}`)
   } else {
     // NAMING THE FILE, not "check stderr": the whole point of the change above
     // is that there is no stderr to check once this command returns.

@@ -99,6 +99,12 @@ jean infra status                      # show running state
                                        # the server detaches; its output goes
                                        # to .jean/infra.log, which is where to
                                        # look when something went wrong earlier
+                                       #
+                                       # on macOS the start also holds a power
+                                       # assertion for as long as the server
+                                       # lives: no IDLE sleep while on AC. Lid
+                                       # close still sleeps, and on battery the
+                                       # assertion is inert by design
 
 # Start an agent
 jean agent start <name>                # or manually:
