@@ -279,7 +279,9 @@ function provisionLibrarianRole(dojoRoot: string, opts?: { quiet?: boolean }): v
   shipSkill(roleDir, 'consolidate-wiki-draft')
   shipSkill(roleDir, 'consolidate-wiki-review')
 
-  // No Stop/PermissionRequest hooks — one-shot process, nothing to phone home about.
+  // No hooks — and no longer a contrast with anything, since agents stopped
+  // getting them too (see `writeJeanConfig`). A one-shot process had nothing
+  // to phone home about; nothing does now.
   const settingsDir = resolve(roleDir, '.claude')
   const settingsPath = resolve(settingsDir, 'settings.local.json')
   if (!existsSync(settingsPath)) {
@@ -2264,7 +2266,21 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
   // worktree's .jean-agent.json (written above) — no per-agent env, no path baked in.
 
   // settings.local.json → agentDir/.claude/ (Claude Code discovers from cwd)
-  const relJean = relative(agentDir, resolve(dojoRoot, '.jean'))
+  //
+  // NO HOOKS. A new agent used to get two — a Stop hook POSTing to
+  // `/agent-idle` and a PermissionRequest hook POSTing to `/permissions` —
+  // and both intakes were retired by ruling during the rewrite: there is no
+  // `/agent-idle` route at all, and `POST /permissions` is pinned at 404 with
+  // only the GET surviving. The generation code outlived them; 117's brief
+  // scoped it and the deletion caught the other site, not this one. So every
+  // agent created since the switch got two hooks that spawn a process per
+  // turn-end and per permission request to POST at nothing.
+  //
+  // The design lesson they carried is not lost, it is inverted: the supervisor
+  // no longer asks an agent to report its own liveness (task 115's predicate
+  // reads observed activity instead), which is why nothing needs to replace
+  // them. Hooks already written into existing agent dirs stay dojo-local
+  // cleanup — this only stops new ones being made.
   const settingsDir = resolve(agentDir, '.claude')
   const settingsPath = resolve(settingsDir, 'settings.local.json')
   if (!existsSync(settingsPath)) {
@@ -2277,29 +2293,6 @@ function writeJeanConfig(agentDir: string, name: string, role: AgentRole, tags: 
             worktree: agentDir,
             senseiWritePaths: readConfig(resolve(dojoRoot, '.jean')).senseiWritePaths,
           }),
-          hooks: {
-            Stop: [
-              {
-                hooks: [
-                  {
-                    type: 'command',
-                    command: `JEAN_PORT=$(cat ${relJean}/infra.port 2>/dev/null || echo 8700); curl -s -X POST http://127.0.0.1:$JEAN_PORT/agent-idle -H 'content-type: application/json' -d "{\\"agent\\":\\"${name}\\",\\"sessionId\\":\\"$(cat ${relJean}/sessions/${name}.id 2>/dev/null)\\"}"`,
-                  },
-                ],
-              },
-            ],
-            PermissionRequest: [
-              {
-                hooks: [
-                  {
-                    type: 'command',
-                    command: `bun -e 'const{readFileSync:r,existsSync:e}=require("fs");const p=e("${relJean}/infra.port")?r("${relJean}/infra.port","utf8").trim():"8700";const d=JSON.parse(await Bun.stdin.text());fetch("http://127.0.0.1:"+p+"/permissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({agent:"${name}",tool:d.tool_name,input:d.tool_input})})'`,
-                    async: true,
-                  },
-                ],
-              },
-            ],
-          },
         },
         null,
         2,
