@@ -9,9 +9,15 @@
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { agents } from '../domain/agents/index.ts'
+import type { Task } from '../domain/contracts/tasks.ts'
+import { resolution } from '../domain/resolution/index.ts'
+import { tasks } from '../domain/tasks/index.ts'
 import { createStore, jsonlBackend, type StoredEvent } from '../es/index.ts'
-import type { Board, Task } from '../infra/board.ts'
-import { agentFromEvent, boardReducer, migrateBoard } from '../infra/reducers.ts'
+
+/** The projected board, as this command reports it. */
+export type Board = { tasks: readonly Task[] }
+export type { Task }
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -69,10 +75,28 @@ export async function peekDojo(targetPath: string, opts: PeekOpts = {}): Promise
   const all = await store.read()
   const lastEventId = all.at(-1)?.id ?? 0
 
-  // Project the full board from all events. Reducers are cheap and pure; for
-  // dojos with 10k+ events we could load board.snapshot.json and catch up,
-  // but that's premature — measure before optimizing.
-  const board = migrateBoard(all.reduce(boardReducer, { tasks: [] } as Board))
+  // Project the board with the SAME folds the live system runs — this command
+  // reads a foreign dojo's log, and a second implementation of "what these
+  // events mean" is a second answer waiting to disagree with the first. The
+  // folds are cheap and pure; for dojos with 10k+ events we could load
+  // board.snapshot.json and catch up, but that is premature.
+  //
+  // AGENTS FIRST, PER EVENT (composition law 1): the tasks fold asks whether a
+  // queue names a roster member, and the answer comes from the agents state as
+  // of THIS event — a roster built ahead of time would answer for a dojo that
+  // did not exist yet at the events being folded.
+  let agentsState = agents.initial()
+  let tasksState = tasks.initial()
+  for (const event of all) {
+    agentsState = agents.fold(agentsState, event)
+    tasksState = tasks.fold(
+      tasksState,
+      event,
+      (name) => agents.isDojoAgent(agentsState, name),
+      agents.orchestratorOf(agentsState),
+    )
+  }
+  const board: Board = { tasks: tasks.all(tasksState) }
 
   // Event window: if sinceId set, strictly events past it; otherwise tail.
   let windowed: StoredEvent[]
@@ -92,13 +116,13 @@ export async function peekDojo(targetPath: string, opts: PeekOpts = {}): Promise
     identity = typeof cfg.identity === 'string' ? cfg.identity : null
   } catch {}
 
-  // Agent names: union of board.agent + agentFromEvent (canonical). Messaging
+  // Agent names: union of board.agent + the event's own author. Messaging
   // events (send, reply) additionally carry sender/receiver as from/to —
-  // agentFromEvent only covers data.agent, so merge those in for send/reply.
+  // `authorOf` answers who WROTE an event, so merge those in for send/reply.
   const agentSet = new Set<string>()
   for (const t of board.tasks) if (t.agent) agentSet.add(t.agent)
   for (const e of all) {
-    const canonical = agentFromEvent(e)
+    const canonical = resolution.authorOf(e)
     if (canonical) agentSet.add(canonical)
     if (e.type === 'send' || e.type === 'reply' || e.type === 'task-comment') {
       const d = (e.data ?? {}) as Record<string, unknown>

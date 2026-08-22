@@ -36,6 +36,33 @@ describe('peekDojo', () => {
     rmSync(tmp, { recursive: true, force: true })
   })
 
+  test('a log written by an OLDER dojo still projects — legacy status names and retired kinds', async () => {
+    // This command's whole purpose is reading a dojo you are not running, and
+    // the dojos most worth peeking at are the ones that have been up longest.
+    // Their logs hold names this system stopped writing months ago: `inbox`,
+    // `active`, `blocked`, `review`, and the `task-blocked` kind. A fold that
+    // chokes on them reports an empty board for a busy dojo.
+    const events = [
+      ev(1, 'agent-sensei', 'register', { agent: 'sensei', role: 'sensei', idle: false }),
+      ev(2, 'task-001', 'task-created', { title: 'old shapes', description: '', queue: 'worker-a', actor: 'sensei' }),
+      ev(3, 'task-001', 'task-status', { from: 'inbox', to: 'active', actor: 'sensei' }),
+      ev(4, 'task-001', 'task-status', { from: 'active', to: 'blocked', actor: 'worker-a' }),
+      ev(5, 'task-002', 'task-created', { title: 'in review', description: '', queue: 'worker-a', actor: 'sensei' }),
+      ev(6, 'task-002', 'task-status', { from: 'inbox', to: 'review', actor: 'sensei' }),
+      ev(7, 'task-002', 'task-blocked', { blockedOn: 'human', note: 'the retired kind', actor: 'sensei' }),
+    ]
+    const target = makeDojo(tmp, 'ancient', events)
+    const result = await peekDojo(target)
+
+    // Both legacy parked names land on today's `waiting` rather than on
+    // nothing — the migration the fold carries permanently, because a log is
+    // forever and a reader that rejects its own old writing is a migration
+    // nobody asked for.
+    expect(result.board.tasks.map((t) => `${t.id}:${t.status}`).sort()).toEqual(['001:waiting', '002:waiting'])
+    // And the retired kind still sets the blocker it carried.
+    expect(result.board.tasks.find((t) => t.id === '002')?.blockedOn).toBe('human')
+  })
+
   test('projects the board from history events', async () => {
     const events = [
       ev(1, 'task-001', 'task-created', { title: 'First', description: '', queue: 'worker' }),
