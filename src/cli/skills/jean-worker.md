@@ -61,7 +61,7 @@ One ranked pass over wiki pages, recent memories, prior task comments, and the h
 
 If you finish work, hit a blocker, or need to stop for any reason: call `reply` before you stop. No exceptions.
 
-Not calling `reply` = the sensei never knows anything happened. The `agent-idle` signal is diagnostic only — it does NOT wake the sensei. Your stdout does not reach the sensei either. `reply` is the only path.
+Not calling `reply` = the sensei never knows anything happened. Nothing else announces the end of your turn, and your stdout does not reach the sensei. `reply` is the only path.
 
 Acceptable final replies:
 - `reply(text="Done — <result summary>. Details in comment on task <id>.")`

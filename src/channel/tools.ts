@@ -259,6 +259,7 @@ const READONLY_INFRA_DESCRIPTION =
   'Read-only Jean infrastructure HTTP API (GET only) — the escape hatch for lookups without a dedicated tool. ' +
   'Use it for the context of the work you are doing: task comments, the board, related tasks, connected agents. Most useful: ' +
   '`/tasks/<id>?include=comments` returns a task plus the curated comments; add `messages` for the full correspondence too. ' +
+  "For the board, filter with `/tasks?status=&queue=` — `/board` returns every task's full description and truncates. " +
   'Use these when you need "what was discussed/decided about this task". The mailbox has its own tools (`inbox`, `ack`). ' +
   `Responses above ~${INFRA_MAX_BODY_KB}KB are truncated — paginate with \`?last=N\` on history endpoints. ` +
   "State changes are the sensei's job; if you need something written, ask via `reply`."
@@ -281,7 +282,7 @@ export function buildInfraTool(role: AgentRole): Tool {
           type: 'string',
           description: isSensei
             ? 'API path starting with "/" — e.g. "/board" or "/tasks/001/status"'
-            : 'API path starting with "/" — e.g. "/tasks/001?include=comments" or "/board"',
+            : 'API path starting with "/" — e.g. "/tasks/001?include=comments" or "/tasks?status=assigned"',
         },
         ...(isSensei && {
           body: {
@@ -376,7 +377,7 @@ export function buildInstructions(role: AgentRole, agentName: string): string {
     `When you receive any message from Jean, FIRST load the jean-worker skill, then follow its instructions.`,
     `Messages to you land in YOUR MAILBOX on infra; what reaches your session is infra's announcement (a push or the inbox line on a response). When one arrives: read the mailbox with the \`inbox\` tool (\`view: 'fetch'\` returns full payloads with ack codes), act on what it says, then \`ack({pairs: [{id, code}, ...]})\` for what you handled or decided about. Reading is not acking — infra keeps re-announcing while anything sits unacked.`,
     `Use the \`reply\` tool for conversation with the orchestrator (including short acks, questions, "still working"). Use the \`comment\` tool when you have something substantive worth recording on a task — findings, blocker resolved, phase done. Comments are curated; replies are chat.`,
-    `Use the \`infra\` tool (read-only — GET only) to look up context: \`GET /tasks/<id>?include=comments,messages\` for both the curated comments and the full correspondence on a task you're working on, \`GET /board\` for related tasks, \`GET /agents\` to see who else is connected. State changes are the sensei's job — if you need something written, ask via \`reply\`.`,
-    `ALWAYS end a turn with \`reply\` — your stdout is invisible to the sensei, and \`agent-idle\` does not wake it. If you finish, hit a blocker, or need to stop, call \`reply\` before stopping. Not doing so means the sensei never learns anything happened.`,
+    `Use the \`infra\` tool (read-only — GET only) to look up context: \`GET /tasks/<id>?include=comments,messages\` for both the curated comments and the full correspondence on a task you're working on, \`GET /tasks?status=&queue=\` for related tasks, \`GET /agents\` to see who else is connected. Prefer that filtered read over \`GET /board\`, which returns every task's full description and truncates. State changes are the sensei's job — if you need something written, ask via \`reply\`.`,
+    `ALWAYS end a turn with \`reply\` — your stdout is invisible to the sensei, and nothing else announces that your turn ended. If you finish, hit a blocker, or need to stop, call \`reply\` before stopping. Not doing so means the sensei never learns anything happened.`,
   ].join('\n')
 }

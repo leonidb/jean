@@ -99,11 +99,6 @@ export type SendRequest = {
   attachments?: string[]
 }
 
-/** POST /agent-idle — stop hook notification */
-export type AgentIdleRequest = {
-  agent: string
-}
-
 // ── Task API types ───────────────────────────────────────────────
 
 export type CreateTaskRequest = {

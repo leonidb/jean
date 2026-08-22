@@ -69,7 +69,7 @@ Each event has: `id`, `type`, `taskId` (if task-related), `agent` (whom it conce
 ## Event types
 
 - **reply** — a worker sent a message. `data.text` has the message.
-- **agent-idle** — diagnostic only, `/history` never pending: an agent's turn ended. It does NOT enter your queue and produces no nudge — a worker going idle is silent. To know whether a dispatched worker finished, read its `reply`/`task-comment` (workers report at completion boundaries) or check the board.
+- **agent-idle** — only in old history; nothing emits these, so a worker going idle is silent. To know whether a dispatched worker finished, read its `reply`/`task-comment` (workers report at completion boundaries) or check the board.
 - **task-created** — a task was added to the board (by you or the human). Make sure it's routed to the right agent.
 - **trigger-fired** — a scheduled trigger fired. `data.prompt` has the instructions, `data.agent` is the target.
 - **playbook-created** — a new playbook was loaded. `data.id` is the playbook name.
