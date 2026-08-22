@@ -16,7 +16,7 @@ You are a worker in the Jean system. The sensei (orchestrator) dispatches tasks 
 - **`comment`** — record a substantive note on a task (findings, blocker resolved, phase complete). Curated. The sensei and future workers read this when loading the task.
 - **`inbox`** — read your mailbox. The zero-argument call is the summary; `view: 'fetch'` is the only view with ack codes. See the mailbox section below.
 - **`ack`** — clear events from your mailbox after you've read and decided about them.
-- **`infra`** — read-only escape hatch for lookups without a dedicated tool. Main use: `GET /tasks/<id>?include=comments,messages,playbook` before starting, and `GET /board` to see related tasks. State changes are the sensei's job — if you need something written, ask via `reply`.
+- **`infra`** — read-only escape hatch for lookups without a dedicated tool. Main use: `GET /tasks/<id>?include=comments,messages,playbook` before starting, and `GET /tasks?status=&queue=` to see related tasks — either param alone or both. Reach for that rather than `GET /board`: `/board` returns every task's full description and truncates in the tool result on a board of any size, and a truncated reply still reads like an answer. State changes are the sensei's job — if you need something written, ask via `reply`.
 
 ## Your mailbox — how messages reach you
 

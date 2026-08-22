@@ -243,6 +243,33 @@ describe('the tasks surface', () => {
     expect(body).not.toHaveProperty('unavailable')
   })
 
+  test('a filter on /board is REFUSED, not ignored — and the refusal names the endpoint that filters', async () => {
+    // The live specimen, reproduced: `?status=` was inert here, so this exact
+    // call used to return the WHOLE board — every task, every description —
+    // and read as an answer to the question asked (task 018).
+    const filtered = await get('/board?status=in-progress')
+    expect(filtered.status).toBe(400)
+    const refusal = filtered.body as unknown as { error: string; hint: string }
+    expect(refusal.error).toContain('status')
+    // The dead end is what sent people to the snapshot file, so the way out
+    // travels with the refusal rather than living only in a skill.
+    expect(refusal.hint).toContain('/tasks?status=')
+
+    // ANY param, not a list of known-bad ones: /board has no vocabulary of
+    // its own, so there is nothing to be lenient about.
+    expect((await get('/board?queue=builder')).status).toBe(400)
+    expect((await get('/board?fields=id,title')).status).toBe(400)
+
+    // …and the bare read still works, which is the half a refusal can break.
+    const whole = await get('/board')
+    expect(whole.status).toBe(200)
+    const board = whole.body as unknown as { tasks: { id: string; lastEventAt: string }[] }
+    expect(board.tasks.length).toBeGreaterThan(0)
+    // The staleness surfacing is what /board alone computes — proving it
+    // survives is the point of asserting more here than a 200.
+    expect(board.tasks.every((t) => typeof t.lastEventAt === 'string')).toBe(true)
+  })
+
   test('a comment frame lands on the task’s stream and comes back through include=comments', async () => {
     const ws = sockets.get('worker-a')
     if (ws === undefined) throw new Error('fixture: worker-a not connected')

@@ -246,7 +246,35 @@ export function taskRoutes(ctx: SurfaceContext): (req: Request, url: URL) => Pro
     return ctx.json({ ok: true, subscribers: tasks.subscribersOf?.(ctx.tasksState(), id) ?? [] })
   }
 
-  function board(): Response {
+  /**
+   * The whole board, plus the staleness surfacing — and NO parameters.
+   *
+   * `/board` never read `searchParams`, so every filter put on it was inert:
+   * `?status=in-progress` returned the complete board, with no error and no
+   * warning. That is worse than having no filter at all, because the answer
+   * LOOKS like the one asked for. Task 018 recorded a sensei reading six
+   * closed tasks as open off the workaround this pushes people toward; the
+   * writer of this commit walked into the same call the morning it was
+   * written, and the 330KB truncated reply still read as an answer.
+   *
+   * So: any parameter is an unknown parameter here, and unknown is REFUSED —
+   * the rule `GET /tasks/:id?include=` already follows two hundred lines up.
+   * The refusal names the endpoint that does filter, because the dead end is
+   * what sends people to `board.snapshot.json`, which is a projection
+   * checkpoint lagging the live stream by up to 49 events and not a read
+   * surface at all.
+   */
+  function board(url: URL): Response {
+    const params = [...new Set(url.searchParams.keys())]
+    if (params.length > 0) {
+      return ctx.json(
+        {
+          error: `/board takes no query parameters (got: ${params.join(', ')})`,
+          hint: 'GET /tasks?status=&queue= filters the same live projection',
+        },
+        400,
+      )
+    }
     const now = ctx.now()
     // STALENESS IS THE DOMAIN'S ARITHMETIC — the shell supplies the per-task
     // activity fact and the bound, and asks. Surfacing only: nothing here
@@ -270,7 +298,7 @@ export function taskRoutes(ctx: SurfaceContext): (req: Request, url: URL) => Pro
     const path = url.pathname
     if (path === '/tasks' && req.method === 'POST') return create(req, url)
     if (path === '/tasks' && req.method === 'GET') return list(url)
-    if (path === '/board' && req.method === 'GET') return board()
+    if (path === '/board' && req.method === 'GET') return board(url)
 
     const sub = SUB.exec(path)
     if (sub?.[1] !== undefined) {
