@@ -149,7 +149,7 @@ infra(method="POST",  path="/tasks/<id>/revert",
       body={"actor":"sensei"})             // undo — pops the most recent status change (e.g. done → in-progress)
 ```
 
-The forward DAG, exactly (`src/infra/board.ts`) — anything not on this list is a 400:
+The forward DAG, exactly (`src/domain/contracts/tasks.ts`) — anything not on this list is a 400:
 ```
 todo         → assigned | in-progress | cancelled
 assigned     → in-progress | cancelled
@@ -225,7 +225,7 @@ worker blocks on you        →  waiting / blockedOn: sensei     short clock; tr
 
 `blockedOn: sensei` is transitory by design: a worker is stalled the whole time it sits, so its reminder exists to force one question — am I resolving this, or escalating it to the human? Let it drift and a worker drifts with it.
 
-**The API refuses the wrong scope, and the refusal is the signal.** There is no `todo → waiting` edge (`src/infra/board.ts`): reaching `waiting` from `todo` means marking the task `in-progress` first — declaring a worker started work you never dispatched — and there is no `waiting → waiting` edge either (see the snooze below). **If a transition can only be reached by faking earlier states, the API is refusing for a reason — stop.** A 400 on a status change is information, not an obstacle to route around: the next thing to question is your own intent, not the path.
+**The API refuses the wrong scope, and the refusal is the signal.** There is no `todo → waiting` edge (`src/domain/contracts/tasks.ts`): reaching `waiting` from `todo` means marking the task `in-progress` first — declaring a worker started work you never dispatched — and there is no `waiting → waiting` edge either (see the snooze below). **If a transition can only be reached by faking earlier states, the API is refusing for a reason — stop.** A 400 on a status change is information, not an obstacle to route around: the next thing to question is your own intent, not the path.
 
 `resumeAt` is a SNOOZE and rides any blocker: it drops the task to a daily reminder and restores its own clock automatically once the date passes. Snoozing does not change what the task waits on, and it does not silence it — a snoozed task is one line a day until its date. **It is set on the park itself** — `PATCH /tasks/<id>/status` with `{"status":"waiting","blockedOn":"…","resumeAt":"…"}` — and cannot be added or changed in place afterwards: `PATCH /tasks/<id>` carries only `agent` and `description`, so a `resumeAt` in that body returns 200 and is silently dropped, and re-parking a parked task is the refused `waiting → waiting`. To re-snooze, walk it back and park it again — `{"status":"in-progress"}`, then `{"status":"waiting","blockedOn":"…","resumeAt":"<new date>"}`. Leaving `waiting` clears the whole park, so the second call must re-state the blocker, and the "parked since" clock restarts.
 

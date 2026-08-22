@@ -1,7 +1,7 @@
 /**
- * The new adapter — server skeleton, WS lifecycle, and the module surfaces
- * (design §5; tasks E1 and E2). The old `src/infra/server.ts` keeps serving;
- * nothing here touches it.
+ * The adapter — server skeleton, WS lifecycle, and the module surfaces
+ * (design §5). This is the server: it holds the socket, the timers, the files
+ * and the processes, and it decides nothing.
  *
  * ── EVERY HANDLER IS THE SAME FIVE STEPS ──
  *

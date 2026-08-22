@@ -44,7 +44,7 @@ cd jean && bun install
 
 ### Run the infrastructure service
 ```bash
-JEAN_BOARD=/path/to/your/dojo/.jean/board.json bun run src/infra/server.ts
+jean infra start          # from the dojo root; detaches, logs to .jean/infra.log
 ```
 
 ### Connect an agent
@@ -80,9 +80,11 @@ bun run src/cli/jean.ts send scratch "message"  # send to agent
 
 ```bash
 bun install               # install dependencies
-bun test                  # run tests (24 tests)
-bun run src/infra/server.ts   # start the infra service
-bunx tsc --noEmit         # type check
+bun test                  # run every suite
+bun test src/domain       # the domain core: conformance + composed scenarios
+bun test src/adapter      # the shell: transport, wiring, executor laws
+bun run infra             # start the infra service in the foreground
+bun run check             # type check + lint
 ```
 
 ## Design

@@ -11,7 +11,6 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { resolve } from 'node:path'
 import { agents } from '../domain/agents/index.ts'
 import type { Task } from '../domain/contracts/tasks.ts'
-import { resolution } from '../domain/resolution/index.ts'
 import { tasks } from '../domain/tasks/index.ts'
 import { createStore, jsonlBackend, type StoredEvent } from '../es/index.ts'
 
@@ -51,11 +50,31 @@ const SIGNIFICANT_EVENT_TYPES = new Set([
   'agent-idle',
   'trigger-fired',
   'permission-request',
-  // H4 (2026-08-11): a worker going down/stuck/recovered, and the S11 human
-  // report, are exactly what a human peeking at a dojo wants to see.
+  // A worker going down/stuck/recovered, and the report that reaches the
+  // human, are exactly what someone peeking at a dojo wants to see. BOTH
+  // names: `agent-down` is what the system writes now, `agent-unresponsive`
+  // is what the logs of any dojo older than this week still hold, and this
+  // command exists to read those.
   'worker-status',
+  'agent-down',
   'agent-unresponsive',
 ])
+
+/**
+ * Every agent name an event MENTIONS — which is not who wrote it.
+ *
+ * Discovery asks "who does this dojo know about", and the answer includes
+ * agents that only ever registered: a dojo whose workers connected and sat
+ * idle has a roster and no speech. `resolution.authorOf` deliberately answers
+ * `nobody` for `register` (nobody speaks by arriving) and for the reports a
+ * worker is the SUBJECT of rather than the author — correct for routing, and
+ * exactly wrong here. So this reads the fields that carry a name.
+ */
+function namesIn(event: StoredEvent): string[] {
+  const d = (event.data ?? {}) as Record<string, unknown>
+  const named = [d.agent, d.from, d.to, d.subject]
+  return named.filter((n): n is string => typeof n === 'string' && n.length > 0)
+}
 
 // ── Core read ─────────────────────────────────────────────────────
 
@@ -116,20 +135,10 @@ export async function peekDojo(targetPath: string, opts: PeekOpts = {}): Promise
     identity = typeof cfg.identity === 'string' ? cfg.identity : null
   } catch {}
 
-  // Agent names: union of board.agent + the event's own author. Messaging
-  // events (send, reply) additionally carry sender/receiver as from/to —
-  // `authorOf` answers who WROTE an event, so merge those in for send/reply.
+  // Agent names: the board's owners plus every name the log mentions.
   const agentSet = new Set<string>()
   for (const t of board.tasks) if (t.agent) agentSet.add(t.agent)
-  for (const e of all) {
-    const canonical = resolution.authorOf(e)
-    if (canonical) agentSet.add(canonical)
-    if (e.type === 'send' || e.type === 'reply' || e.type === 'task-comment') {
-      const d = (e.data ?? {}) as Record<string, unknown>
-      if (typeof d.from === 'string' && d.from.length > 0) agentSet.add(d.from)
-      if (typeof d.to === 'string' && d.to.length > 0) agentSet.add(d.to)
-    }
-  }
+  for (const e of all) for (const name of namesIn(e)) agentSet.add(name)
 
   return {
     target: { path: realTarget, identity },

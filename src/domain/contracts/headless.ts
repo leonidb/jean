@@ -1,10 +1,11 @@
 /**
  * The headless spawn contract — decisions for a process the domain never
- * runs (task 108, row A-HL; R17's subsystem). EXTRACTION territory (§8):
- * the old run path (`runHeadlessTrigger`, `runHeadlessAttempt`,
- * `runLibrarianMultiPhase` in `src/infra/server.ts`) and the REAL
- * `headless-completed` events both dojos' logs hold are the requirements
- * source.
+ * runs (task 108, row A-HL; R17's subsystem). EXTRACTION territory (§8): the
+ * requirements came from the old run path — `runHeadlessTrigger`,
+ * `runHeadlessAttempt` and `runLibrarianMultiPhase`, which lived in the
+ * server this one replaced and are in git history now — and from the REAL
+ * `headless-completed` events both dojos' logs hold. The events are the
+ * durable half of that evidence: the code is gone, the logs are not.
  *
  * ── THE SPLIT ──
  *

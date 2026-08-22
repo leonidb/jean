@@ -36,6 +36,24 @@ describe('peekDojo', () => {
     rmSync(tmp, { recursive: true, force: true })
   })
 
+  test('agents that only ever REGISTERED are still discovered — a roster is not speech', async () => {
+    // The regression this pins: discovery once asked `authorOf`, which answers
+    // "who wrote this" and deliberately answers nobody for `register`. A
+    // stopped dojo whose workers connected and sat idle then listed no agents
+    // at all — the exact dojo someone peeks at (codex pass, task 117).
+    const events = [
+      ev(1, 'agent-sensei', 'register', { agent: 'sensei', role: 'sensei', idle: false }),
+      ev(2, 'agent-quiet-worker', 'register', { agent: 'quiet-worker', role: 'worker', idle: true }),
+      ev(3, 'system', 'agent-down', { subject: 'quiet-worker', quietMinutes: 240, text: 'down' }),
+    ]
+    const target = makeDojo(tmp, 'idle-roster', events)
+    const result = await peekDojo(target)
+    expect(result.agents.sort()).toEqual(['quiet-worker', 'sensei'])
+    // And the report about it is significant enough to surface by default —
+    // under its current name, which a dojo switched this week now writes.
+    expect(result.events.map((e) => e.type)).toContain('agent-down')
+  })
+
   test('a log written by an OLDER dojo still projects — legacy status names and retired kinds', async () => {
     // This command's whole purpose is reading a dojo you are not running, and
     // the dojos most worth peeking at are the ones that have been up longest.
