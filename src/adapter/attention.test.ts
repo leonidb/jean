@@ -194,7 +194,6 @@ describe('carriage — the two places the agent sees its own inbox', () => {
     // ASCII ONLY — a non-ASCII byte in a header value throws inside the fetch
     // handler and fails the whole request. Measured: an em-dash in this line
     // took down every response to an agent with mail.
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: the point is the byte range
     expect(/^[\x20-\x7e]*$/.test(line ?? '')).toBe(true)
   })
 

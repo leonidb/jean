@@ -18,12 +18,8 @@
 
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
+import { TRIGGERS_STREAM, type TriggerCreatedData, type WikiConsolidatedData } from '../domain/contracts/vocabulary.ts'
 import { createStore, jsonlBackend } from '../es/index.ts'
-import {
-  TRIGGERS_STREAM,
-  type TriggerCreatedData,
-  type WikiConsolidatedData,
-} from '../domain/contracts/vocabulary.ts'
 import type { AgentRole } from './protocol.ts'
 
 export type SpawnHeadlessOpts = {
