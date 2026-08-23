@@ -33,6 +33,86 @@ export type PeersFile = {
 
 export type PeerLiveness = 'online' | 'offline' | 'stale' | 'unknown'
 
+/**
+ * What `/agents` may honestly say about a peer row (task 129).
+ *
+ * ── WHY THIS IS NOT `peerLiveness` ──
+ *
+ * `peerLiveness` probes over HTTP, so it is async and distinguishes `online`
+ * from `stale`. That distinction is knowledge the DELIVERY path does not have
+ * either: `createPeerDeliver` resolves a port and posts, and a peer whose infra
+ * is up but wedged fails asynchronously through `onUndelivered`. A display that
+ * claims to know more than the sender can know is how the two come to disagree,
+ * which is the whole of 129. So this asks exactly the question the deliver
+ * asks, synchronously, off the same files.
+ *
+ * WHAT THAT DOES AND DOES NOT BUY: the two cannot disagree about the same
+ * INSTANT. They are still two reads at two times, so a peer that starts or
+ * stops between a row and a send will have been described correctly by both
+ * and still surprise the reader. That is a snapshot being a snapshot, not the
+ * defect this closes.
+ *
+ * DELIBERATELY NOT STRONGER THAN THE DELIVER. An earlier draft also checked
+ * the peer's pid with `isProcessAlive`, which sounds better and re-creates the
+ * bug: the deliver refuses on `port === null` alone, so a stale port file would
+ * have shown `reachable: false` beside a send that was still attempted. Worse,
+ * had the DELIVER adopted the pid check to match, a recycled or stale pid would
+ * start refusing sends that work — trading a doomed attempt, which the sender
+ * is already told about, for a refused message, which is a new way to lose one.
+ *
+ * ── WHY `unresolved` IS NOT `offline` (task 017 defect 2's lesson) ──
+ *
+ * A configured path with no `.jean` in it is a fact about THIS dojo's config,
+ * not about the other dojo. Rendering it as "they are offline" is how a sensei
+ * comes to report, with justified confidence, that a dojo which was serving
+ * the whole time was down. `reachable: false` is honest either way; the reason
+ * is what stops it being read as a verdict on someone else.
+ */
+export type PeerReach = {
+  /** It is in `peers.json`. Always true for an attached peer. */
+  configured: true
+  /** Would a send be ATTEMPTED right now — the deliver's own predicate. */
+  reachable: boolean
+  /** Present only when not reachable, and phrased as what THIS dojo found. */
+  reason?: 'unresolved' | 'no-infra-running'
+}
+
+/**
+ * The deliver's question, asked without sending anything.
+ *
+ * Reads only the peer's runtime files, so it costs a stat and needs no cache —
+ * the 5s cache on `peerLiveness` exists for its HTTP probe, which this does
+ * not do.
+ */
+/**
+ * A port we could actually post to — the one predicate `peerReach` and
+ * `createPeerDeliver` share, so neither can be laxer than the other.
+ *
+ * NOT `=== null`, which is what both used before. `readRuntimeFiles` returns
+ * `Number(contents.trim())`, and that has two traps rather than one: garbage
+ * gives `NaN`, but an EMPTY file gives `0` — `Number('')` is zero, not NaN, so
+ * a half-written `infra.port` produced a perfectly finite port number. Both
+ * callers waved it through, agreeing with each other and both wrong: the row
+ * claimed `reachable: true` off an unusable number, and the deliver posted to
+ * `http://127.0.0.1:0/send`. Measured while writing this file's own test,
+ * which asserted NaN and got 0.
+ */
+function usablePort(port: number | null): boolean {
+  return port !== null && Number.isInteger(port) && port > 0 && port < 65_536
+}
+
+export function peerReach(peer: Peer): PeerReach {
+  if (peer.origin.type !== 'local-path') return { configured: true, reachable: false, reason: 'unresolved' }
+  const jeanDir = resolve(peer.origin.path, '.jean')
+  // Nothing of theirs at the path we hold: our configuration is what is wrong.
+  if (!existsSync(jeanDir)) return { configured: true, reachable: false, reason: 'unresolved' }
+  const { port } = readRuntimeFiles(jeanDir)
+  // We found them; their infra left no usable port. This one IS about them,
+  // and it is the exact state the deliver refuses on.
+  if (!usablePort(port)) return { configured: true, reachable: false, reason: 'no-infra-running' }
+  return { configured: true, reachable: true }
+}
+
 // ── File I/O ──────────────────────────────────────────────────────
 
 const PEERS_FILENAME = 'peers.json'
@@ -139,7 +219,9 @@ export function createPeerDeliver(args: {
   return (msg) => {
     if (peer.origin.type !== 'local-path') return false
     const { port } = readRuntimeFiles(resolve(peer.origin.path, '.jean'))
-    if (port === null) return false
+    // THE SAME PREDICATE `peerReach` REPORTS — see `usablePort`. `=== null`
+    // let a half-written port file through and posted to port 0.
+    if (!usablePort(port)) return false
     void fetch(`http://127.0.0.1:${port}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

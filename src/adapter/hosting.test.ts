@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import type { Bridge, BridgeHost, BridgeOutbound } from '../infra/bridge.ts'
 import type { JeanConfig } from '../infra/config.ts'
-import { loadPeers } from '../infra/peers.ts'
+import { loadPeers, peerReach as reachOf } from '../infra/peers.ts'
 import { attachPeers, createHosting } from './hosting.ts'
 import { type AdapterHandle, createAdapterServer } from './server.ts'
 
@@ -224,6 +224,130 @@ describe('peers, on the same seam', () => {
     // And the sender is TOLD, which is the honesty rule the routing contract
     // states: a failed adapter delivery must not look like a successful send.
     expect(typeof out.undelivered).toBe('string')
+  })
+
+  /**
+   * THE COHERENCE LAW (task 129).
+   *
+   * `/agents` said `connected: true` about two dojos with no infra running,
+   * while `send` refused them correctly. Both were "right": `connected` was
+   * about the stub session attached at boot from `peers.json`, and delivery
+   * asked whether a port resolves. Two questions, one word, and a sensei
+   * reading the row plans against dojos it cannot reach.
+   *
+   * The fix is not a better question — it is the SAME question. So the test
+   * that matters asserts the two surfaces agree, and it needs both arms: an
+   * all-false test passes against a row hardcoded to unreachable.
+   */
+  test('a peer row and a send to that peer answer the SAME question — both arms', async () => {
+    const dir = dojo()
+
+    // ARM ONE: a real dojo directory, with a .jean, whose infra is not up —
+    // the ordinary case of a registered peer that is not running, and NOT the same as a bad path.
+    const stopped = dojo()
+    mkdirSync(resolve(stopped, '.jean'), { recursive: true })
+
+    // ARM TWO: a peer that is genuinely serving.
+    const live = dojo()
+    mkdirSync(resolve(live, '.jean'), { recursive: true })
+    const stub = Bun.serve({ port: 0, fetch: async () => Response.json({ ok: true }) })
+    openStubs.push({ stop: () => stub.stop(true) })
+    writeFileSync(resolve(live, '.jean', 'infra.port'), String(stub.port))
+
+    // ARM THREE: configured at a path with no dojo in it at all. This one is
+    // about OUR config, never about them — 017 defect 2's whole lesson.
+    const wrongPath = dojo()
+
+    // ARM FOUR: a port file that exists and is USELESS. Written expecting NaN;
+    // it is 0, because `Number('')` is zero — which is finite, so a first
+    // attempt at this guard passed it and the arm caught that too. Both the row
+    // and the deliver waved it through before: `reachable: true` off an
+    // unusable number, and a POST to `http://127.0.0.1:0/send`.
+    const halfWritten = dojo()
+    mkdirSync(resolve(halfWritten, '.jean'), { recursive: true })
+    writeFileSync(resolve(halfWritten, '.jean', 'infra.port'), '')
+
+    // ARM FIVE: the same trap by the other road — garbage really is NaN.
+    const garbled = dojo()
+    mkdirSync(resolve(garbled, '.jean'), { recursive: true })
+    writeFileSync(resolve(garbled, '.jean', 'infra.port'), 'not-a-port\n')
+
+    writeFileSync(
+      resolve(dir, 'peers.json'),
+      JSON.stringify({
+        peers: {
+          stopped: { origin: { type: 'local-path', path: stopped }, description: 'off', addedAt: '2026-08-20' },
+          live: { origin: { type: 'local-path', path: live }, description: 'up', addedAt: '2026-08-20' },
+          misconfigured: { origin: { type: 'local-path', path: wrongPath }, description: '?', addedAt: '2026-08-20' },
+          halfwritten: {
+            origin: { type: 'local-path', path: halfWritten },
+            description: 'mid-boot',
+            addedAt: '2026-08-20',
+          },
+          garbled: { origin: { type: 'local-path', path: garbled }, description: 'corrupt', addedAt: '2026-08-20' },
+        },
+      }),
+    )
+
+    // Wired exactly as the launcher wires it — the point is that the row and
+    // the deliver read the same files.
+    const registry = loadPeers(dir).peers
+    const server = await boot(dir, {
+      peerReach: (name: string) => {
+        const p = registry[name]
+        return p === undefined ? undefined : reachOf(p)
+      },
+    })
+    attachPeers(server, registry, () => {}, 'this-dojo')
+
+    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+      agents: { name: string; connected: boolean; peer?: { reachable: boolean; reason?: string } }[]
+    }
+    const row = (n: string) => body.agents.find((a) => a.name === n)
+
+    const sendTo = async (to: string) =>
+      (await (
+        await fetch(`http://localhost:${server.port}/send`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ from: 'orchestrator-o', to, text: 'ping' }),
+        })
+      ).json()) as { delivered?: boolean }
+
+    // THE LAW, both arms: the row's verdict IS the send's outcome.
+    for (const name of ['stopped', 'live', 'misconfigured', 'halfwritten', 'garbled']) {
+      const reachable = row(name)?.peer?.reachable
+      expect(reachable, `no peer fact on row "${name}"`).toBeDefined()
+      expect((await sendTo(name)).delivered, `row and send disagree about "${name}"`).toBe(reachable)
+    }
+
+    // …and the arms genuinely differ, so the loop above is not three falses.
+    expect(row('live')?.peer?.reachable).toBe(true)
+    expect(row('stopped')?.peer?.reachable).toBe(false)
+
+    // THE TWO UNREACHABLE CASES ARE NOT THE SAME CASE. One is a statement
+    // about them; the other is a statement about this dojo's own config, and
+    // rendering it as a verdict on another dojo is how a sensei came to report
+    // a live dojo as down (task 017 defect 2).
+    expect(row('stopped')?.peer?.reason).toBe('no-infra-running')
+    expect(row('misconfigured')?.peer?.reason).toBe('unresolved')
+
+    // A port file that parses to NaN is no port. Asserted on the ROW because
+    // the loop above only proves the two surfaces agree — and before this they
+    // agreed on `true`, which is the failure mode a coherence test alone
+    // cannot see.
+    expect(row('halfwritten')?.peer?.reachable).toBe(false)
+    expect(row('garbled')?.peer?.reachable).toBe(false)
+
+    // The session fact is untouched and still says what it always said.
+    expect(row('stopped')?.connected).toBe(true)
+
+    // And the fact hangs on peers ONLY — a non-peer session must not grow one.
+    server.attachSurface({ name: 'not-a-peer', role: 'user', sessionId: 'x', deliver: () => true })
+    const after = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+      agents: { name: string; peer?: unknown }[]
+    }
+    expect(after.agents.find((a) => a.name === 'not-a-peer')?.peer).toBeUndefined()
   })
 })
 

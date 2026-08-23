@@ -70,7 +70,7 @@ import { tasks } from '../domain/tasks/index.ts'
 import { triggers } from '../domain/triggers/index.ts'
 import { createStore, jsonlBackend, memoryBackend, type StoredEvent } from '../es/index.ts'
 import { resolveConfig } from '../infra/config.ts'
-import { identityFromConfig, loadPeers } from '../infra/peers.ts'
+import { identityFromConfig, loadPeers, peerReach } from '../infra/peers.ts'
 import { upsertDojo } from '../infra/registry.ts'
 import { INFRA_IDENTITY, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Attention, type AttentionConfig, AttentionConfigError, createAttention } from './attention.ts'
@@ -123,6 +123,12 @@ export type AdapterPorts = {
    *  agent IS the bridge. Asked per row rather than matched on role here:
    *  which session is the bridge is the host's knowledge, not the server's. */
   bridgeTransport: (agent: AgentName) => unknown
+  /** Whether a send to ONE agent would be ATTEMPTED — undefined unless that
+   *  agent IS a peer. Same shape and same reason as `bridgeTransport`: which
+   *  session is a peer, and where that peer lives, is the host's knowledge.
+   *  The answer must be the deliver's own predicate, never a better one
+   *  (task 129). Default: nothing is a peer. */
+  peerReach: (agent: AgentName) => unknown
 }
 
 export type ServerOptions = {
@@ -314,6 +320,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     logRetrieval: () => {},
     bridgeStatus: () => ({ configured: false }),
     bridgeTransport: () => undefined,
+    peerReach: () => undefined,
     runHeadless: async () => {},
     ...options.ports,
   }
@@ -1115,9 +1122,16 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
         // to test presence and then to emit lets one row's answer disagree
         // with itself across the two reads (codex pass, task 121).
         const transport = ports.bridgeTransport(s.name)
+        // THE SAME SNAPSHOT-ONCE RULE, and the same nesting rule below.
+        const peer = ports.peerReach(s.name)
         return {
           name: s.name,
           role: roleOf(s.name),
+          // ABOUT THE SESSION, and for a peer that is a stub attached at boot
+          // from `peers.json` — never a claim that the other dojo is up. It
+          // said exactly that about two dead dojos while `send` refused them
+          // correctly, which is task 129; the `peer` fact below is the answer,
+          // and it is the sender's own predicate rather than a better one.
           connected: true,
           ...(lastActivity.get(s.name) !== undefined && { lastActivityAt: lastActivity.get(s.name) }),
           openTasks: tasks.openTaskCount(taskState, s.name),
@@ -1126,6 +1140,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
           // about the SESSION, and a transport `connected` beside it would be
           // two different facts under one word. Present only on the bridge.
           ...(transport !== undefined && { transport }),
+          ...(peer !== undefined && { peer }),
         }
       }),
     })
@@ -1877,6 +1892,12 @@ if (import.meta.main) {
         // registry, never from the message, which is the routing contract's
         // enrichment rule in one line.
         peerDescriptionOf: (name) => peers[name]?.description,
+        // THE SENDER'S OWN PREDICATE, asked without sending — so a row and a
+        // send cannot answer differently about the same peer (task 129).
+        peerReach: (name) => {
+          const peer = peers[name]
+          return peer === undefined ? undefined : peerReach(peer)
+        },
         // THE SPAWN SUBSYSTEM, and only in production: a run is processes
         // and files, so a suite gets the default no-op and drives the walk
         // against stubs instead.

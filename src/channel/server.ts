@@ -356,6 +356,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         content: [
           {
             type: 'text' as const,
+            // NAMES BOTH POSSIBILITIES ON PURPOSE, and stays that way: the
+            // routing contract refuses to guess which, because from there the
+            // dojo genuinely cannot tell an unknown name from a known one that
+            // is offline. Task 129 asked whether this could be sharpened here —
+            // it cannot, and passing the server's own notice through instead
+            // would swap one vague sentence for the same vague sentence while
+            // losing the guidance below.
             text: `NOT delivered to "${to}" — no agent or peer by that name is registered in this dojo (or it's offline). Nothing was sent. Check the name against \`GET /agents\` / \`jean peer list\` — "${to}" may be an address that doesn't exist.`,
           },
         ],
