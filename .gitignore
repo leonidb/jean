@@ -47,3 +47,4 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # .jean/ holds private, machine-local data (history, wiki, retrieval-log with
 # raw query text). Never commit it.
 .jean/
+*.pre-hook-cleanup.bak
