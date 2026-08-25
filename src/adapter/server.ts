@@ -113,6 +113,15 @@ export type AdapterPorts = {
     trigger: HeadlessTriggerFacts,
     config: HeadlessConfig,
     record: (type: string, stream: string, data: unknown) => Promise<StoredEvent>,
+    /** ABORT, and it is `stop`'s only lever on a run in flight (task 131,
+     *  ruled 2026-08-25: stop may kill it). A boot catch-up
+     *  now runs BEHIND readiness rather than in front of it, so `stop` can be
+     *  called while a spawn is live — and a run that outlives its instance
+     *  calls `record` into a store the caller has already drained, and races
+     *  the next boot's catch-up over the same log. Killing closes both, and
+     *  it is what makes the handle necessary: you cannot kill what you did
+     *  not keep. */
+    signal?: AbortSignal,
   ) => Promise<void>
   /** What `/status` says about the chat surface. A PORT, because the bridge
    *  is a transport this server hosts rather than owns — and because the

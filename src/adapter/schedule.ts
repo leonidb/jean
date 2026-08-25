@@ -68,9 +68,44 @@ export type Scheduler = {
   /** Reconcile the job table with the trigger registry: schedule what should
    *  be running, cancel what should not, fire what is already overdue. */
   sync: () => void
-  /** The startup make-up run for crons that missed a fire while infra was
-   *  down. Sequential on purpose — see the loop. */
+  /**
+   * The startup make-up run for crons that missed a fire while infra was
+   * down. Sequential on purpose — see the loop.
+   *
+   * ── NOBODY AWAITS THIS ON THE BOOT PATH (task 131, ruled 2026-08-25) ──
+   *
+   * It used to be awaited inside `createAdapterServer`, so READINESS —
+   * every runtime file, both attention clocks, the bridge, peer attach, the
+   * registry upsert — waited on a headless run. On 2026-08-24 that was seven
+   * minutes during which the dojo was live, unfindable, unstoppable through
+   * its own CLI, unreachable over the bridge and by peers, and could not
+   * even be given an agent: `jean agent start` refuses on the same missing
+   * files. A live dojo with no door, and its error messages pointed in a
+   * circle — `agent start` said "start infra first", `infra start` said
+   * "already running".
+   *
+   * The ruling: start and stop must run unobstructed and consistently. A
+   * start fires the run and must not wait for it.
+   *
+   * THE RETURNED PROMISE IS STILL HELD, and that is the whole difference
+   * between backgrounding and abandoning. `stop` needs it, and the reason is
+   * not tidiness: a run that outlives its instance calls `record` into a
+   * store the caller has already drained — the write-after-drain class this
+   * codebase fought twice in task 127 — and, because `enforceSingleInstance`
+   * probes the PORT, a stop-then-start frees the port and gives one dojo two
+   * catch-ups writing the same log. You cannot kill what you did not keep.
+   */
   catchUpOnBoot: () => Promise<void>
+  /**
+   * Release everything the scheduler holds — the job table, and now the boot
+   * catch-up if one is still running.
+   *
+   * KILLS RATHER THAN DRAINS (ruled: "on stop, I think you can kill it. It's
+   * okay. Next start it will start again"). Draining would make `jean infra
+   * stop` wait out a consolidation, which is the same hostage-taking at the
+   * other end of the lifecycle — the reported problem is that START and STOP
+   * are obstructed, and only fixing one half would be answering half of it.
+   */
   stop: () => void
 }
 

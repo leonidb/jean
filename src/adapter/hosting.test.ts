@@ -371,6 +371,83 @@ describe('the launcher’s ordering', () => {
     expect(bridgeAt).toBeGreaterThan(portFileAt)
   })
 
+  test('READINESS DOES NOT WAIT ON A SPAWN — the property the pin above states one way (task 131)', async () => {
+    // THE MIRROR NOBODY ASKED FOR. The walk above is named "the readiness
+    // signal must not outrun the truth" and reads the launcher's source
+    // order, because — its own comment — "there is no behavioural handle on
+    // this; the gap is a race". True of the direction it pins. The opposite
+    // direction, the truth outrunning the READINESS SIGNAL, has a handle,
+    // and on 2026-08-24 it had an incident: `catchUpOnBoot` was awaited
+    // inside `createAdapterServer`, so a seven-minute wiki consolidation held
+    // up every runtime file, both attention clocks, the bridge, peer attach
+    // and the registry upsert. The dojo was live and had no door — and its
+    // errors pointed in a circle: `agent start` said "start infra first",
+    // `infra start` said "already running".
+    //
+    // Stated as a PROPERTY rather than as line order, which is the thing
+    // source indices cannot express: nothing between the bind and the
+    // publication of readiness may wait on a process, a spawn, or a network
+    // round trip.
+    //
+    // The handle is a spawn that never finishes. Under the old ordering this
+    // hangs forever; under the ruling it returns at once.
+    const dir = mkdtempSync(resolve(tmpdir(), 'jean-131-'))
+    mkdirSync(resolve(dir, '.jean'), { recursive: true })
+    const longAgo = new Date(Date.now() - 3 * 86_400_000).toISOString()
+    // A cron that last fired three days ago is overdue by any reading, so the
+    // catch-up has something to run.
+    const history = [
+      {
+        id: 1,
+        ts: longAgo,
+        type: 'trigger-created',
+        stream: 'triggers',
+        data: { id: 'nightly', cron: '0 3 * * *', agent: 'librarian', prompt: 'run', actor: 'init', kind: 'headless' },
+      },
+      {
+        id: 2,
+        ts: longAgo,
+        type: 'trigger-fired',
+        stream: 'triggers',
+        data: { triggerId: 'nightly', agent: 'librarian', prompt: 'run', kind: 'headless' },
+      },
+    ]
+    writeFileSync(resolve(dir, '.jean', 'history.jsonl'), `${history.map((e) => JSON.stringify(e)).join('\n')}\n`)
+
+    let spawned = false
+    const server = await Promise.race([
+      createAdapterServer({
+        dataDir: resolve(dir, '.jean'),
+        ports: {
+          // NEVER RESOLVES. A real consolidation is minutes; this is the same
+          // shape with the clock taken out.
+          runHeadless: () => {
+            spawned = true
+            return new Promise<void>(() => {})
+          },
+        },
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('createAdapterServer waited on the catch-up')), 4_000),
+      ),
+    ])
+
+    // IT RETURNED — and the catch-up really did start. Without that second
+    // assertion this passes on a boot that found nothing overdue, which is
+    // the vacuity that makes a "nothing bad happened" walk worthless.
+    expect(server.port).toBeGreaterThan(0)
+    for (let i = 0; i < 100 && !spawned; i++) await Bun.sleep(20)
+    expect(spawned, 'the catch-up never ran, so this proved nothing').toBe(true)
+
+    // AND STOP IS NOT HOSTAGE EITHER — the same problem at the other end of
+    // the lifecycle, and half the reported one. Ruled: kill it.
+    await Promise.race([
+      server.stop(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('stop waited on the run')), 4_000)),
+    ])
+    rmSync(dir, { recursive: true, force: true })
+  }, 20_000)
+
   test('the peer registry is read ONCE — enrichment and delivery cannot disagree', async () => {
     // `jean peer add` requires a stop and start; the registry is static
     // until then. A per-send re-read let the enrichment see a peer that
