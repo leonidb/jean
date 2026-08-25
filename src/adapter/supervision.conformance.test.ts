@@ -120,13 +120,22 @@ const DECLARED: {
   'worker-status': Record<keyof WorkerStatusData, true>
 } = {
   'task-reminder': { taskId: true, to: true, text: true, queued: true },
-  'agent-probe': { agent: true, quietMinutes: true, text: true, queued: true },
+  'agent-probe': { agent: true, quietMinutes: true, text: true, probeKind: true, taskIds: true, queued: true },
   'agent-down': { subject: true, to: true, quietMinutes: true, text: true, queued: true },
   'worker-status': { agent: true, status: true, text: true, queued: true },
 }
 
 const REMIND: SupervisorEffect = { kind: 'remind', taskId: '042', to: ORCH, blockedOn: 'human', ageMs: 3 * 60_000 }
-const PROBE: SupervisorEffect = { kind: 'probe', agent: WORKER, quietMs: 45 * 60_000 }
+/** THE STUCK ASK — mid-work silence, naming the claim it is about (task 132). */
+const PROBE: SupervisorEffect = {
+  kind: 'probe',
+  probeKind: 'stuck',
+  agent: WORKER,
+  quietMs: 45 * 60_000,
+  engagedTaskIds: ['081'],
+}
+/** THE IDLE ASK — nothing held, nothing waiting, nothing to name. */
+const PING: SupervisorEffect = { kind: 'probe', probeKind: 'idle', agent: WORKER, quietMs: 45 * 60_000 }
 const DOWN: SupervisorEffect = {
   kind: 'report',
   to: ORCH,
@@ -181,10 +190,50 @@ describe('the shape of what supervision writes', () => {
     expect(run([STUCK])[0]?.data.status).toBe('up-but-stuck')
   })
 
+  test('THE RECORD CARRIES THE QUESTION (task 132) — a probe says which ask it is, and what it is about', () => {
+    // The bar is the recipient selecting an action, and the record is what
+    // reaches it. Two probes this dojo sent on 2026-08-23, events 7224 and
+    // 7248, were byte-identical apart from id and timestamp and wanted
+    // opposite answers; the reason existed at the decision and died at the
+    // effect boundary. Same argument as `nudge`'s recipient (task 127, law
+    // d): a record that cannot say what it was about leaves the class
+    // diagnosable only at a watched terminal.
+    const stuck = run([PROBE])[0]
+    expect(stuck?.type).toBe('agent-probe')
+    expect(stuck?.data.probeKind).toBe('stuck')
+    expect(stuck?.data.taskIds).toEqual(['081'])
+
+    const idle = run([PING])[0]
+    expect(idle?.data.probeKind).toBe('idle')
+    // NOTHING TO NAME, and it must not invent an empty list either: absent is
+    // the honest shape, and the closed-set walk above would pass either way.
+    expect(idle?.data.taskIds).toBeUndefined()
+  })
+
+  test('...and the two asks do not render as the same sentence', () => {
+    // THE ACTUAL BAR. A recipient selects its action from the TEXT, and the
+    // text is the adapter's — so identical prose for two different questions
+    // is the defect surviving the payload fix. The stuck ask must name the
+    // work; the idle one must not imply any exists.
+    const stuck = run([PROBE])[0]?.data.text as string
+    const idle = run([PING])[0]?.data.text as string
+    expect(stuck).not.toBe(idle)
+    expect(stuck, 'a mid-work probe that does not name its task is the filed defect').toContain('081')
+
+    // AND THE EMPTY STUCK ASK IS ITS OWN SENTENCE. An agent on the stuck clock
+    // for work it does not own has nothing to name — the list is empty by the
+    // owner-only rule — and must not be handed the idle text, which would tell
+    // it nothing is open when the board says otherwise. That inference is the
+    // filed incident's exact wording: "So NOTHING IS WAITING ON ME."
+    const empty = run([{ ...PROBE, engagedTaskIds: [] } as SupervisorEffect])[0]?.data.text as string
+    expect(empty).not.toBe(idle)
+    expect(empty).not.toBe(stuck)
+  })
+
   test('R13: an unmeasurable silence never becomes NaN in a fact', () => {
     // NaN reads LOUD downstream — it fails every comparison, so a consumer
     // finds no bound satisfied and acts on every tick.
-    const emitted = run([{ kind: 'probe', agent: WORKER, quietMs: Number.NaN }])
+    const emitted = run([{ kind: 'probe', probeKind: 'idle', agent: WORKER, quietMs: Number.NaN }])
     expect(Number.isNaN(emitted[0]?.data.quietMinutes)).toBe(false)
     expect(typeof emitted[0]?.data.quietMinutes).toBe('number')
   })
@@ -327,8 +376,31 @@ describe('the supervisor view composes its held-work facts', () => {
     // satisfied it while the live arm was rewired to the wrong field, which
     // is the very break this guard exists for. Measured, not reasoned about.
     expect(body.match(/tasks\.supervisionLoadOf\(/g)?.length).toBe(2)
-    expect(body.match(/engaged: load\.engaged/g)?.length).toBe(2)
-    expect(body.match(/holdsUndone: load\.holdsUndone/g)?.length).toBe(2)
+
+    // AND NOT A HAND-WRITTEN LIST OF FIELDS, which is how this guard rotted
+    // (codex round, task 132). Its second form named `engaged` and
+    // `holdsUndone` explicitly and counted each twice — so when the predicate
+    // grew `engagedTaskIds`, the guard went on passing while covering one
+    // fewer fact than the composer carried. Measured: rewiring the live arm
+    // to `engagedTaskIds: []` left this file at 16 pass / 0 fail. A guard
+    // against unheld claims that had itself become one.
+    //
+    // So: match the SHAPE instead. Every fact the composer takes from the
+    // predicate is written `name: load.name`, and there must be one of each
+    // per arm. A new fact wired into only one arm changes this count and says
+    // so; a new fact wired into both changes it too, which forces the
+    // deliberate update an exhaustive `Record` forces elsewhere in this repo.
+    // The fields NOT counted here are the ones that are not row facts —
+    // `holdsStalling` and `newestStallingClaim` are the disconnected arm's
+    // membership and floor, read once by design.
+    const mirrored = [...body.matchAll(/(\w+): load\.(\w+)/g)].filter(([, key, field]) => key === field)
+    const perField = new Map<string, number>()
+    for (const [, key] of mirrored) perField.set(key as string, (perField.get(key as string) ?? 0) + 1)
+    expect(
+      [...perField.entries()].filter(([, n]) => n !== 2),
+      'a predicate fact reaches one arm and not the other',
+    ).toEqual([])
+    expect(perField.size, 'the composer carries a different number of predicate facts than this guard has seen').toBe(3)
   })
 
   test('the disconnected arm gates on membership and skips when no evidence dates the silence', async () => {

@@ -297,6 +297,64 @@ describe('the supervisor’s composed view — the activity floors (ruled, task 
   })
 })
 
+describe('scenario 7 — the probe says which work it is about, composed (task 132)', () => {
+  test('a worker quiet while holding an in-progress task is probed BY NAME, and the record carries it', () => {
+    // THE FILED INCIDENT, walked against the composed core rather than the
+    // supervisor alone. A `researcher` in a peer dojo finished task 081, left
+    // it in-progress awaiting a verdict, was probed every 31 quiet minutes,
+    // read a probe carrying no task reference and concluded — reasonably and
+    // wrongly — "NOTHING IS WAITING ON ME."
+    //
+    // THE HARNESS CARRIED THE FIELDS AND NOTHING WALKED THEM. `dojo.ts` puts
+    // `probeKind` and `taskIds` on the record; no scenario asked for either,
+    // so the composed path was wired and unexercised — a row that compiles
+    // and is never run, which is this repo's own recurring shape one level up
+    // from where it usually appears.
+    const dojo = dojoOf([
+      { name: SENSEI, role: 'sensei', behaviour: { kind: 'reliable' } },
+      // RELIABLE, and that is the incident's own shape rather than a
+      // convenience: the filed worker had a mailbox at ZERO and one task
+      // open. Row 8 never probes a mail-holder — the notifier's ladder is
+      // already asking the liveness question — so an agent that never acks
+      // is never probed either, and the case only arises for a worker that
+      // has cleared everything and still holds work.
+      { name: 'worker-p', role: 'worker', behaviour: { kind: 'reliable' } },
+    ])
+    dojo.registerAll()
+    dojo.createTask('081', 'the delivered one', 'worker-p', SENSEI)
+    dojo.taskStatus('081', { from: 'assigned', to: 'in-progress', actor: 'worker-p' })
+    dojo.act('worker-p') // it works, then goes quiet — delivered, awaiting a verdict
+    dojo.act(SENSEI)
+
+    dojo.runFor(2 * HOUR)
+
+    const probes = dojo.probes()
+    expect(probes.length, 'a quiet holder of in-progress work is probed').toBeGreaterThan(0)
+    const first = probes[0]?.effect
+    if (first?.kind !== 'probe') throw new Error('unreachable')
+    expect(first.probeKind, 'holding open work is the STUCK ask, not the idle one').toBe('stuck')
+    if (first.probeKind !== 'stuck') throw new Error('unreachable')
+    expect(first.engagedTaskIds, 'the probe must name the work it is asking about').toEqual(['081'])
+
+    // AND IT REACHES THE LOG THAT WAY. The effect knowing is not the fix —
+    // the reason died at the effect boundary before, and a record that cannot
+    // say what it was about leaves the class diagnosable only at a watched
+    // terminal, which is how this one was found.
+    //
+    // READ FROM THE LOG, NOT THE MAILBOX: a reliable worker acks the probe on
+    // its next wake, so by now the mailbox is empty again — which is the
+    // filed worker's own state, and the reason the record is the only lasting
+    // evidence that the question was ever asked.
+    const record = dojo.log.events().find((e) => e.type === 'agent-probe')
+    expect(record, 'the probe is addressed mail and is recorded as such').toBeDefined()
+    const data = record?.data as { probeKind?: string; taskIds?: readonly string[] }
+    expect(data.probeKind).toBe('stuck')
+    expect(data.taskIds).toEqual(['081'])
+
+    assertGroundTruth(dojo)
+  })
+})
+
 describe('scenario 5 — the snooze cycle: demoted, never silenced, resumed automatically', () => {
   test('no reminder while the snooze lives (inside a day); the blocker cadence resumes the instant it passes; the reminder is real mail', () => {
     const dojo = dojoOf([

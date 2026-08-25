@@ -786,7 +786,12 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
       ROSTER,
       ORCH,
     )
-    expect(tasks.supervisionLoadOf(s, 'worker-c')).toEqual({ engaged: false, holdsUndone: true, holdsStalling: false })
+    expect(tasks.supervisionLoadOf(s, 'worker-c')).toEqual({
+      engaged: false,
+      engagedTaskIds: [],
+      holdsUndone: true,
+      holdsStalling: false,
+    })
 
     // AN UNREADABLE STAMP IS NOT EVIDENCE. Logs are permanent and hold
     // whatever past writers wrote, so a claim whose `ts` no clock produced is
@@ -811,7 +816,12 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
       ORCH,
     )
     expect(tasks.taskOf(s, '206')?.status).toBe('assigned') // the claim IS stalling…
-    expect(tasks.supervisionLoadOf(s, 'worker-d')).toEqual({ engaged: false, holdsUndone: true, holdsStalling: true }) // …and floors nothing
+    expect(tasks.supervisionLoadOf(s, 'worker-d')).toEqual({
+      engaged: false,
+      engagedTaskIds: [],
+      holdsUndone: true,
+      holdsStalling: true,
+    }) // …and floors nothing
 
     // worker-b: genuinely engaged.
     s = tasks.fold(
@@ -833,6 +843,121 @@ describe('the supervision load — the pinned held-work predicate (ruled, task 1
     // A stranger to the board: nothing at all — and no floor, so a
     // disconnected stranger is not supervised.
     const emptyLoad = tasks.supervisionLoadOf(s, 'worker-none')
-    expect(emptyLoad).toEqual({ engaged: false, holdsUndone: false, holdsStalling: false })
+    expect(emptyLoad).toEqual({ engaged: false, engagedTaskIds: [], holdsUndone: false, holdsStalling: false })
+  })
+
+  test('`engagedTaskIds` NAMES the in-progress claims this agent OWNS (task 132)', () => {
+    // THE STUCK PROBE'S PAYLOAD COMES FROM HERE. `engaged` alone tells the
+    // recipient it is being asked about work and not which — the 7224/7248
+    // pair, whose two probes were identical and wanted opposite answers.
+    //
+    // OWNER-ONLY, AND THE RELATION TO `engaged` IS ONE-WAY. `engaged` is
+    // computed over `heldBy` — owner OR queue — so ids non-empty ⇒ `engaged`,
+    // never the converse. The first draft of this walk pinned it two-way and
+    // the builder refuted that against the live board before building: naming
+    // a queue-only task would tell its recipient to park work someone else
+    // owns, mid-flight. A wrong instruction is worse than the silent
+    // over-count it came from.
+    //
+    // AND THE GAP IS NARROWER THAN "OWNER OR QUEUE" SUGGESTS — the builder's
+    // sharpening, measured against the fold rather than read off the decision
+    // layer. Q-1 (`tasks/index.ts:216`) makes the queue the owner at start
+    // when the queue is a ROSTER member, so in the ordinary case the two
+    // coincide. The gap opens only when the owner is EXPLICITLY REASSIGNED
+    // AWAY — which is the 127 and 132 shape exactly. So the empty-stuck
+    // sentence fires on reassignment, not on any queued task.
+    //
+    // THIS WALK'S OWN ROSTER, because that is the fact the gap turns on and
+    // the file's module-level one covers `worker-a` alone. The first draft
+    // used off-roster names, so Q-1 never fired, every task folded to
+    // `agent: undefined`, and the walk asked for ids from an agent that owned
+    // nothing. Same defect class as 115's fixture and the same cause: written
+    // from the decision layer's shape without checking what the fold does.
+    const clock = createClock()
+    const log = createLog(clock)
+    const CREW = (name: string) => name === ORCH || name.startsWith('crew-')
+    let s = tasks.initial()
+    const create = (id: string, queue: string) => {
+      s = tasks.fold(
+        s,
+        log.append('task-created', `task-${id}`, { title: id, description: '', queue, actor: ORCH }),
+        CREW,
+        ORCH,
+      )
+    }
+    const move = (id: string, to: 'in-progress' | 'waiting' | 'assigned', actor: string) => {
+      s = tasks.fold(s, log.append('task-status', `task-${id}`, { from: 'todo', to, actor }), CREW, ORCH)
+    }
+
+    // THE ORDINARY CASE: a roster queue, so Q-1 makes the queue the owner and
+    // the two facts coincide. Two claims, so a single-id shortcut cannot pass.
+    create('301', 'crew-e')
+    move('301', 'in-progress', 'crew-e')
+    create('302', 'crew-e')
+    move('302', 'in-progress', 'crew-e')
+    // Neither of these is what the probe asks about.
+    create('303', 'crew-e')
+    move('303', 'waiting', 'crew-e')
+    create('304', 'crew-e')
+    move('304', 'assigned', ORCH)
+
+    const load = tasks.supervisionLoadOf(s, 'crew-e')
+    expect([...load.engagedTaskIds].sort()).toEqual(['301', '302'])
+    expect(load.engaged).toBe(true) // ids non-empty ⇒ engaged
+    expect(load.holdsUndone).toBe(true)
+
+    // No in-progress claim, no ids — the half a wrong implementation is
+    // likelier to get wrong.
+    create('305', 'crew-f')
+    move('305', 'waiting', 'crew-f')
+    expect(tasks.supervisionLoadOf(s, 'crew-f').engagedTaskIds).toEqual([])
+
+    // THE GAP, PINNED, AND IT TAKES A REASSIGNMENT TO OPEN IT. Created in
+    // `crew-g`'s queue, then handed to `crew-h` before it starts — so Q-1
+    // never fires for the queue and the owner is somebody else. `crew-g` is
+    // `engaged` and owns nothing. This dojo's own board carried exactly this
+    // while the contract was being written: task 132, `queue: builder`,
+    // `agent: architect`, in-progress.
+    create('306', 'crew-g')
+    s = tasks.fold(s, log.append('task-updated', 'task-306', { agent: 'crew-h', actor: ORCH }), CREW, ORCH)
+    move('306', 'in-progress', 'crew-h')
+    const queueOnly = tasks.supervisionLoadOf(s, 'crew-g')
+    expect(queueOnly.engaged, 'owner-or-queue is what puts the queue-holder on the clock').toBe(true)
+    expect(queueOnly.engagedTaskIds, 'and owner-only is what stops it being told to park someone else’s work').toEqual(
+      [],
+    )
+    // The owner, meanwhile, is told about exactly the task it owns.
+    expect(tasks.supervisionLoadOf(s, 'crew-h').engagedTaskIds).toEqual(['306'])
+
+    // AND THE SECOND WAY THE GAP OPENS, which this walk's own prose denied
+    // until it was checked. "Only on explicit reassignment" is false: Q-1
+    // also DECLINES TO FIRE when the queue is not yet a dojo agent, and then
+    // `agent` stays undefined with no reassignment anywhere. Ordinary
+    // boot-order — a task dispatched and started for an agent that has not
+    // connected yet — and the name enters the view engaged with nothing to
+    // name the moment it registers.
+    //
+    // Worth the walk because of HOW it was missed: the fixture above was
+    // repaired using exactly this Q-1 fact, and the sentence written
+    // immediately after asserted that Q-1 always closes the gap — without
+    // checking the case where Q-1 does not fire, which had just bitten it.
+    const ORPHAN_QUEUE = (name: string) => name === ORCH // 'crew-z' has never registered
+    let early = tasks.initial()
+    early = tasks.fold(
+      early,
+      log.append('task-created', 'task-401', { title: 'early', description: '', queue: 'crew-z', actor: ORCH }),
+      ORPHAN_QUEUE,
+      ORCH,
+    )
+    early = tasks.fold(
+      early,
+      log.append('task-status', 'task-401', { from: 'todo', to: 'in-progress', actor: ORCH }),
+      ORPHAN_QUEUE,
+      ORCH,
+    )
+    expect(tasks.taskOf(early, '401')?.agent, 'Q-1 declines: the queue was not a dojo agent at start').toBeUndefined()
+    const notYet = tasks.supervisionLoadOf(early, 'crew-z')
+    expect(notYet.engaged).toBe(true)
+    expect(notYet.engagedTaskIds, 'engaged with nothing to name, and nobody reassigned anything').toEqual([])
   })
 })

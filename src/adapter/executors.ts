@@ -143,6 +143,45 @@ const quietMinutes = (ms: number): number => (Number.isFinite(ms) ? Math.round(m
  * and against the real resolver, which is the only reader whose opinion
  * decides whether these events arrive.
  */
+/**
+ * THREE SENTENCES, NOT TWO — and the third is the one a fix is likeliest to
+ * skip (task 132).
+ *
+ * STUCK, NAMING WORK: the recipient holds in-progress claims of its own and
+ * has gone quiet. The acts that answer it are "still working", "blocked on
+ * X", or parking the task on whoever owes the next move — so the text says
+ * which task, because an agent asked about work it must guess at guesses.
+ *
+ * STUCK, NAMING NOTHING: `engaged` is owner-or-queue while the ids are
+ * owner-only, so an agent can be on the stuck clock for a task sitting in its
+ * queue and owned by someone else. It must NOT be handed the idle sentence:
+ * that would tell it nothing is open while the board says otherwise, which is
+ * the filed incident's own wording — "So NOTHING IS WAITING ON ME." The empty
+ * list is a FACT, and the sentence says the fact.
+ *
+ * IDLE: nothing held, nothing waiting. A liveness question and only that; the
+ * act that answers it is an ack.
+ */
+function probeText(effect: Extract<SupervisorEffect, { kind: 'probe' }>): string {
+  const quiet = `You have been quiet for ${quietMinutes(effect.quietMs)} minutes`
+  if (effect.probeKind === 'idle') {
+    return `Still there? ${quiet} and you hold no open work. Acknowledging this resets your liveness clock.`
+  }
+  if (effect.engagedTaskIds.length === 0) {
+    return (
+      `Still there? ${quiet}. You are on the liveness clock for in-progress work you do not own, ` +
+      'so there is nothing here for you to hand off — say so, and acknowledging this resets your liveness clock.'
+    )
+  }
+  const held = effect.engagedTaskIds.join(', ')
+  const plural = effect.engagedTaskIds.length > 1 ? 'tasks' : 'task'
+  return (
+    `Still there? ${quiet} while holding ${plural} ${held} in progress. ` +
+    'If you cannot move it, park it on whoever owes the next action; otherwise say where you are. ' +
+    'Acknowledging this resets your liveness clock.'
+  )
+}
+
 export function runSupervision(effects: readonly SupervisorEffect[], exec: SupervisionExecutor): void {
   for (const effect of effects) {
     switch (effect.kind) {
@@ -158,10 +197,25 @@ export function runSupervision(effects: readonly SupervisorEffect[], exec: Super
         // `agent` IS THE ADDRESS. §4 resolves a probe by reading this field —
         // it is the one event whose entire purpose is to reach the agent it
         // is about, and the only field name here that can fail silently.
+        //
+        // AND THE TEXT IS WHERE THE DEFECT ACTUALLY LIVED (task 132). The
+        // compiler does not point at this file — `emit` takes `unknown` — so
+        // the one place holding the bar is the one place the red does not
+        // reach. The bar: A RECIPIENT SELECTS ITS ACTION FROM THE TEXT.
+        // Carrying `probeKind` faithfully into the record and rendering both
+        // asks as "Still there?" would fix the audit trail and leave the
+        // defect exactly where it was — measured, events 7224 and 7248, two
+        // probes byte-identical apart from id and timestamp that wanted
+        // opposite answers.
         exec.emit('agent-probe', {
           agent: effect.agent,
           quietMinutes: quietMinutes(effect.quietMs),
-          text: 'Still there? Acknowledging this resets your liveness clock.',
+          text: probeText(effect),
+          probeKind: effect.probeKind,
+          // ABSENT on the idle arm rather than empty: that arm has no claims
+          // BY CONSTRUCTION, and an empty list would read as "we looked and
+          // found none" about a question that was never asked.
+          ...(effect.probeKind === 'stuck' && { taskIds: effect.engagedTaskIds }),
           queued: true,
         })
         break

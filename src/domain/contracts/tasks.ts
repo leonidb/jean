@@ -375,7 +375,34 @@ export type TasksContract = {
   supervisionLoadOf: (
     state: TasksState,
     agent: AgentName,
-  ) => { engaged: boolean; holdsUndone: boolean; holdsStalling: boolean; newestStallingClaim?: string }
+  ) => {
+    engaged: boolean
+    /** The in-progress claims this agent OWNS (task 132) — the stuck probe
+     *  names them, which is the consumer this member argued its merits
+     *  against before being added. Order is the board's.
+     *
+     *  OWNER-ONLY, deliberately NOT `heldBy`. `engaged` above is owner-or-
+     *  queue, so the two do not move together: a queue-only in-progress claim
+     *  sets `engaged` and contributes NO id. That is not a mismatch to fix
+     *  here — it is 084's unpropagated ruling showing through, and naming a
+     *  queue-only task in a probe would tell its recipient to park work
+     *  someone else owns. The relation is one-way and the conformance pins
+     *  it: ids non-empty ⇒ `engaged`; never the converse.
+     *
+     *  AND THE GAP IS NARROW, though not as narrow as this said at first.
+     *  Q-1 (`:216`) makes the queue the owner at start for a ROSTER queue, so
+     *  the two coincide in the ordinary case. It opens on EXPLICIT
+     *  REASSIGNMENT, and also when Q-1 DECLINED TO FIRE — the queue was not
+     *  yet a dojo agent when the task was started, so `agent` stayed
+     *  undefined and the name enters the view engaged with nothing to name.
+     *  Both measured against the fold. The second was missed by a sentence
+     *  that had just been corrected using the same Q-1 fact, which is why it
+     *  is spelled out rather than summarised. */
+    engagedTaskIds: readonly string[]
+    holdsUndone: boolean
+    holdsStalling: boolean
+    newestStallingClaim?: string
+  }
   /** Sequential, zero-padded — derived from the board, never random. */
   nextTaskId: (state: TasksState) => string
 

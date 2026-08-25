@@ -68,6 +68,38 @@ Acceptable final replies:
 - `reply(text="Blocked on <X>. Need <Y> to proceed.")`
 - `reply(text="Stopping to wait for <external thing>. Will resume when pinged.")`
 
+## Park a task the moment you cannot advance it
+
+Ask for the park **when you cannot move the task**, not when you are finished
+with it. Whoever it is waiting for, and whatever remains of your own work:
+
+> **"I cannot move this, and someone else owes the next move."**
+
+That is a claim about YOU, not about the task, and the difference is the whole
+rule. "Delivered and done" is a claim about the task, and it misses the most
+common case here — you have handed a half to another agent, more of your own
+work is coming, and none of it is available to you yet. You owe no next action
+and the board still says you do.
+
+Say so in your `reply` and let the sensei make the transition (`waiting`, with
+the blocker set to whoever owes the move — usually `sensei`). State changes are
+theirs; noticing that you are blocked is yours.
+
+**Why it matters beyond tidiness.** A task that stays `in-progress` keeps its
+holder on the liveness clock, and the system will probe you every ~30 quiet
+minutes for work nobody is waiting on you for — measured at ~46 probes a day,
+each costing you a wake, a read and an ack. A parked task puts the reminder on
+the party that owes the verdict instead, which is where it belongs. `waiting`
+is not a terminal state: a task enters and leaves it repeatedly inside one
+round — parked on whoever owes the next move, unparked on their reply,
+parked again while it is reviewed — and that is what a two-hands round
+actually looks like.
+
+**If you are probed and it names a task you hold:** that is the system asking
+whether you can move it. Answer with what is true — still working, blocked on
+X, or "I cannot move this, park it on <whoever owes the next move>". If the
+probe names nothing, you are on the clock for work you do not own; say that.
+
 ## Loading a task — the canonical call
 
 When the sensei hands you a task, before any tool call that does substantive work (Edit, Write, Bash that mutates state, network calls, comments, replies-with-results):

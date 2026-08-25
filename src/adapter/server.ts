@@ -611,6 +611,10 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
         connected: true,
         lastActivityAt: lastActivity.get(session.name) ?? session.connectedAt,
         engaged: load.engaged,
+        // OWNER-ONLY, straight from the predicate (task 132) — this composer
+        // does not re-derive it, and the gap from `engaged` is the predicate's
+        // to explain rather than this file's to reconcile.
+        engagedTaskIds: load.engagedTaskIds,
         holdsUndone: load.holdsUndone,
         hasPendingMail: mailbox.mailboxOf(mailState, session.name).length > 0,
       })
@@ -657,6 +661,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
           // Inert for the down branch (which keys on silence alone), set
           // honestly: this row exists BECAUSE it holds stalling work.
           engaged: load.engaged,
+          engagedTaskIds: load.engagedTaskIds,
           holdsUndone: load.holdsUndone,
           hasPendingMail: mailbox.mailboxOf(mailState, held).length > 0,
         })

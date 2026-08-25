@@ -158,6 +158,30 @@ export type SupervisedAgentFacts = {
    *  board follow-up — probing a live session over work it never started
    *  asks the wrong party. */
   engaged: boolean
+  /** The in-progress claims this agent OWNS (task 132). Carried so the stuck
+   *  probe can name the work it is asking about — the recipient cannot select
+   *  an action for a task it has to guess at, and guessing is what the
+   *  7224/7248 pair measured.
+   *
+   *  OWNER-ONLY, AND THEREFORE NOT `engaged`'S OWN SET. `engaged` is computed
+   *  over `heldBy` — owner OR queue (`tasks/index.ts:499`) — so the relation
+   *  is ONE-WAY: a non-empty list implies `engaged`, and `engaged` does NOT
+   *  imply a non-empty list. The conformance pins both halves, including the
+   *  gap.
+   *
+   *  THE GAP IS 084's UNPROPAGATED RULING, made visible rather than papered
+   *  over. Its first draft here asserted the two-way invariant, and the
+   *  builder refuted it against the live board: a task REASSIGNED away from
+   *  the queue it was created in leaves the queue-holder on the stuck clock
+   *  owning nothing. Q-1 makes queue and owner coincide otherwise, so
+   *  reassignment is the whole of the gap. Under a
+   *  two-way reading the probe would then have named that task and, by the
+   *  ruled worker action, told the worker to park work belonging to someone
+   *  else mid-flight. Owner-only is what stops the payload turning a silent
+   *  over-inclusion into an explicit wrong instruction.
+   *
+   *  Narrowing `engaged` itself is 084/135's business and is not done here. */
+  engagedTaskIds: readonly string[]
   /** Holds ANY undone claim on the board (assigned | in-progress |
    *  waiting). Consumed ONLY to suppress the idle-empty ping — a holder
    *  of parked or queued work is not "idle and empty", and pinging a
@@ -200,9 +224,97 @@ export type SupervisorConfig = {
   stuckAfterMs: number
 }
 
+/**
+ * THE PROBE CARRIES THE QUESTION IT IS ASKING (task 132, ruled 2026-08-24).
+ *
+ * ── THE BAR IS NOT AUDITABILITY ──
+ *
+ * The framing: a probe exists to get the right thing to HAPPEN, not to
+ * detect liveness for its own sake. So the bar is not "a reader could
+ * reconstruct why this fired" — it is THE RECIPIENT CAN SELECT THE CORRECT
+ * ACTION ON RECEIPT. A probe that says only "are you stuck?" cannot produce
+ * the act that would end the situation.
+ *
+ * ── THE MEASUREMENT THAT SETS IT ──
+ *
+ * Two probes this dojo sent the builder on 2026-08-23, events 7224 and 7248,
+ * are byte-identical apart from id and timestamp: same agent, same
+ * `quietMinutes: 31`, same text, same stream. THEY WANTED OPPOSITE
+ * RESPONSES. At 7224 they were mid-implementation and "still working" was
+ * correct; at 7248 they had delivered their half and the correct act was
+ * parking the task on the sensei. No field existed that could have told them
+ * which. That is the whole defect, and it is why this is a payload change
+ * rather than a predicate one.
+ *
+ * ── THE REASON EXISTS ALREADY AND DIES AT THIS BOUNDARY ──
+ *
+ * The decision knows: `probeKind` is recorded on the episode (task 115's
+ * round) precisely so a verdict can only answer the question that was asked.
+ * It simply was not carried out. The two arms are different questions —
+ * "you are mid-work and silent, alive?" and "you have nothing; still
+ * there?" — and a recipient that cannot tell them apart cannot answer
+ * either.
+ *
+ * ── A UNION, NOT AN OPTIONAL FIELD ──
+ *
+ * `engagedTaskIds` is meaningless on the idle arm and REQUIRED on the stuck
+ * one, and the shape says so rather than leaving a reader to find out. The
+ * idle ping is reached only past `if (agent.holdsUndone) continue`, so an
+ * idle-armed probe has no tasks BY CONSTRUCTION; the stuck arm fires only
+ * on `engaged`, so it always has at least one. The non-empty tuple is that
+ * second half stated in the type — this repo's own habit (`Record<AgentRole,
+ * true>` over a hand-written set) applied to a list.
+ */
 export type SupervisorEffect =
   | { kind: 'remind'; taskId: string; to: AgentName; blockedOn: BlockedOn; ageMs: number }
-  | { kind: 'probe'; agent: AgentName; quietMs: number }
+  | {
+      kind: 'probe'
+      /** MID-WORK AND SILENT. The recipient holds in-progress work and has
+       *  gone quiet; the acts that answer it are "still working", "blocked
+       *  on X", or parking the task on whoever owes the next move. */
+      probeKind: 'stuck'
+      agent: AgentName
+      quietMs: number
+      /** The in-progress claims the recipient OWNS. Without them it is asked
+       *  about work it must guess at, which is the 7224/7248 pair verbatim.
+       *
+       *  MAY BE EMPTY, and the first draft of this contract said it could not
+       *  be — a non-empty tuple, on the reasoning that `engaged` reaches this
+       *  arm and `engaged` IS holding one. That is false, and the builder
+       *  found it against the live board before it was built: `engaged` is
+       *  computed over `heldBy` (`tasks/index.ts:499`), which is owner OR
+       *  QUEUE, while this list is owner-only.
+       *
+       *  AND THE GAP IS NARROWER THAN THAT SOUNDS, though not as narrow as
+       *  this contract first claimed. Q-1 (`tasks/index.ts:216`) makes the
+       *  queue the owner at start WHEN THE QUEUE IS A ROSTER MEMBER, so the
+       *  two coincide in the ordinary case. TWO things open the gap, and the
+       *  first draft named only one:
+       *    · the owner is EXPLICITLY REASSIGNED away — the 127 and 132 shape;
+       *    · Q-1 DECLINED TO FIRE, because the queue was not yet a dojo agent
+       *      when the task was started. The task keeps `agent: undefined`,
+       *      and once that name registers it enters the view engaged with
+       *      nothing to name. An ordinary boot-order case: a task dispatched
+       *      and started for an agent that has not connected yet.
+       *  Measured both, against the fold.
+       *
+       *  SO AN EMPTY LIST IS A FACT, not a gap: it says "you are on the stuck
+       *  clock for work you do not own." That is 084's unpropagated
+       *  owner-only ruling, and this payload is the first thing that makes it
+       *  visible in the field rather than as an over-count nobody can see.
+       *  The recipient's correct act on receipt is to say so — which is the
+       *  bar met, not dodged. Narrowing the predicate is 084/135's business
+       *  and deliberately not done here. */
+      engagedTaskIds: readonly string[]
+    }
+  | {
+      kind: 'probe'
+      /** NOTHING HELD, NOTHING WAITING. A liveness question and only that;
+       *  the act that answers it is an ack. */
+      probeKind: 'idle'
+      agent: AgentName
+      quietMs: number
+    }
   | {
       kind: 'report'
       to: AgentName

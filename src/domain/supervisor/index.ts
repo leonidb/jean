@@ -250,7 +250,21 @@ export const supervisor: SupervisorContract = {
           // count — the verdict may only answer the question that was
           // asked). Row 8's actual scope: never probe a mail-holder.
           if (!agent.hasPendingMail && quiet >= config.stuckAfterMs) {
-            effects.push({ kind: 'probe', agent: agent.name, quietMs: quiet })
+            // THE ASK CARRIES ITS OWN QUESTION (task 132). The episode has
+            // recorded `probeKind` since 115's round so a verdict can only
+            // answer what was asked; it simply was not carried OUT, and the
+            // recipient cannot select an action for a question it cannot
+            // identify — measured, events 7224/7248, byte-identical and
+            // wanting opposite answers. The ids may be empty: `engaged` is
+            // owner-or-queue and they are owner-only, and that emptiness is
+            // itself the message.
+            effects.push({
+              kind: 'probe',
+              probeKind: 'stuck',
+              agent: agent.name,
+              quietMs: quiet,
+              engagedTaskIds: agent.engagedTaskIds,
+            })
             agents.set(agent.name, { ...episode, probedAt: view.now, probeKind: 'stuck' })
           }
           continue
@@ -300,7 +314,10 @@ export const supervisor: SupervisorContract = {
       // clock. Edge-triggered, so a worker that never comes back accumulates
       // exactly one. Row 8's guard again: a mail-holder is never pinged.
       if (!agent.hasPendingMail && quiet >= config.idlePingAfterMs && current2.probedAt === undefined) {
-        effects.push({ kind: 'probe', agent: agent.name, quietMs: quiet })
+        // NOTHING HELD, so nothing to name — and the arm carries no ids at
+        // all rather than an empty list, because this branch is reached only
+        // past `holdsUndone` and therefore has none BY CONSTRUCTION.
+        effects.push({ kind: 'probe', probeKind: 'idle', agent: agent.name, quietMs: quiet })
         agents.set(agent.name, { ...current2, probedAt: view.now, probeKind: 'idle' })
       }
     }

@@ -276,6 +276,7 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
             connected: live,
             lastActivityAt: lastActivity.get(a.name) ?? floor,
             engaged: load.engaged,
+            engagedTaskIds: load.engagedTaskIds,
             holdsUndone: load.holdsUndone,
             hasPendingMail: mailbox.mailboxOf(mailboxState, a.name).length > 0,
           },
@@ -294,10 +295,17 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
           queued: true,
         })
       } else if (effect.kind === 'probe') {
+        // THE QUESTION RIDES THE RECORD HERE TOO (task 132). The harness's
+        // text is a stub and stays one — rendering is the adapter's, pinned
+        // in its own suite — but the FIELDS are the record's shape, and a
+        // harness that dropped them would model a shell whose probes cannot
+        // be told apart, which is the defect this task exists to close.
         append('agent-probe', agentStream(effect.agent), {
           agent: effect.agent,
           quietMinutes: Math.round(effect.quietMs / 60_000),
           text: 'alive?',
+          probeKind: effect.probeKind,
+          ...(effect.probeKind === 'stuck' && { taskIds: effect.engagedTaskIds }),
           queued: true,
         })
       } else {

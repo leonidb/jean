@@ -48,7 +48,21 @@ const CONFIG: SupervisorConfig = {
 }
 
 function agent(over: Partial<SupervisedAgentFacts> & { name: string }): SupervisedAgentFacts {
-  return { role: 'worker', connected: true, engaged: false, holdsUndone: false, hasPendingMail: false, ...over }
+  return {
+    role: 'worker',
+    connected: true,
+    engaged: false,
+    engagedTaskIds: [],
+    holdsUndone: false,
+    hasPendingMail: false,
+    ...over,
+  }
+}
+
+/** Engaged AND saying which claims — the pairing the contract's invariant
+ *  requires, so no walk below can accidentally assert one without the other. */
+function engagedOn(name: string, ids: readonly string[], over?: Partial<SupervisedAgentFacts>): SupervisedAgentFacts {
+  return agent({ name, engaged: true, engagedTaskIds: ids, holdsUndone: true, ...over })
 }
 
 function view(now: number, over?: Partial<SupervisorView>): SupervisorView {
@@ -197,6 +211,77 @@ describe('the liveness block — who is probed, and what a probe is for', () => 
     })
     const { collected } = run(supervisor.initial(), T0, T0 + 2 * HOUR, (now) => view(now, { agents: [busy] }))
     expect(collected.flatMap((c) => c.effects).filter((e) => e.kind === 'report')).toEqual([])
+  })
+
+  test('A PROBE CARRIES THE QUESTION IT ASKS (task 132): the stuck arm names the work it is about', () => {
+    // THE BAR IS NOT AUDITABILITY — it is that the recipient can select the
+    // correct action on receipt. Events 7224 and 7248 in this dojo's own log
+    // are byte-identical apart from id and timestamp, and wanted opposite
+    // answers: "still working" at one, park-the-task at the other. Nothing in
+    // the payload could have told them apart.
+    const held = engagedOn(WORKER, ['081'], { lastActivityAt: T0 })
+    const { collected } = run(supervisor.initial(), T0, T0 + 4 * HOUR, (now) => view(now, { agents: [held] }))
+    const probes = collected.flatMap((c) => c.effects).filter((e) => e.kind === 'probe')
+    expect(probes.length).toBeGreaterThan(0)
+    const first = probes[0]
+    if (first?.kind !== 'probe') throw new Error('unreachable')
+    expect(first.probeKind, 'a mid-work probe must say it is the stuck ask').toBe('stuck')
+    if (first.probeKind !== 'stuck') throw new Error('unreachable')
+    // THE CLAIMS, not a boolean. A recipient asked about work it has to guess
+    // at is the incident, and guessing is what produced the wrong answer.
+    expect(first.engagedTaskIds).toEqual(['081'])
+  })
+
+  test('an ENGAGED agent that owns nothing still gets the stuck ask, naming nothing — and that is the fact', () => {
+    // `engaged` is owner-or-queue; the ids are owner-only. So a worker whose
+    // only in-progress claim sits in its QUEUE and belongs to someone else is
+    // on the stuck clock with nothing to be told about. The list is empty and
+    // that emptiness IS the message: "you are being asked about work you do
+    // not own." 084's unpropagated ruling, visible in the field for the first
+    // time rather than as an over-count nobody can see.
+    //
+    // The alternative — naming the queue-only task — would have the recipient
+    // park work belonging to someone else, mid-flight, under the ruled worker
+    // action. That is why this walk exists and why the ids are not `heldBy`'s.
+    const queueOnly = agent({ name: WORKER, engaged: true, engagedTaskIds: [], holdsUndone: true, lastActivityAt: T0 })
+    const { collected } = run(supervisor.initial(), T0, T0 + 4 * HOUR, (now) => view(now, { agents: [queueOnly] }))
+    const probe = collected.flatMap((c) => c.effects).find((e) => e.kind === 'probe')
+    if (probe?.kind !== 'probe') throw new Error('unreachable')
+    expect(probe.probeKind).toBe('stuck')
+    if (probe.probeKind !== 'stuck') throw new Error('unreachable')
+    expect(probe.engagedTaskIds).toEqual([])
+  })
+
+  test('...and the idle arm says so, and has nothing to name', () => {
+    // Reached only past `holdsUndone`, so an idle-armed probe has no claims BY
+    // CONSTRUCTION — which is why the effect's shape refuses to carry any.
+    const empty = agent({ name: WORKER, lastActivityAt: T0 })
+    const { collected } = run(supervisor.initial(), T0, T0 + 2 * DAY, (now) => view(now, { agents: [empty] }))
+    const probes = collected.flatMap((c) => c.effects).filter((e) => e.kind === 'probe')
+    expect(probes.length).toBe(1)
+    const only = probes[0]
+    if (only?.kind !== 'probe') throw new Error('unreachable')
+    expect(only.probeKind, 'a nothing-held probe must say it is the idle ask').toBe('idle')
+  })
+
+  test('the two arms are DISTINGUISHABLE — the same agent, the same silence, different questions', () => {
+    // The 7224/7248 pair, reduced to its mechanism: hold the silence and the
+    // recipient fixed and vary only what the board says. Two probes come out,
+    // and they must not be the same value. This is the walk that fails if the
+    // reason is dropped again anywhere between the decision and the effect.
+    const mid = run(supervisor.initial(), T0, T0 + 4 * HOUR, (now) =>
+      view(now, { agents: [engagedOn(WORKER, ['081'], { lastActivityAt: T0 })] }),
+    )
+    const idle = run(supervisor.initial(), T0, T0 + 2 * DAY, (now) =>
+      view(now, { agents: [agent({ name: WORKER, lastActivityAt: T0 })] }),
+    )
+    const kindOf = (r: typeof mid) => {
+      const p = r.collected.flatMap((c) => c.effects).find((e) => e.kind === 'probe')
+      return p?.kind === 'probe' ? p.probeKind : undefined
+    }
+    expect(kindOf(mid)).toBe('stuck')
+    expect(kindOf(idle)).toBe('idle')
+    expect(kindOf(mid)).not.toBe(kindOf(idle))
   })
 
   test('§0: the orchestrator is NEVER probed and never the subject of a report, however silent', () => {

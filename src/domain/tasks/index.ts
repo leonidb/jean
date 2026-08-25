@@ -667,12 +667,24 @@ export const tasks: TasksContract = {
     let engaged = false
     let holdsUndone = false
     let holdsStalling = false
+    const engagedTaskIds: string[] = []
     let newest: { at: string; ms: number } | undefined
     for (const { task } of board(state).values()) {
       if (!heldBy(task, agent)) continue
       if (!UNDONE.has(task.status)) continue
       holdsUndone = true
-      if (task.status === 'in-progress') engaged = true
+      if (task.status === 'in-progress') {
+        engaged = true
+        // OWNER-ONLY, and the gap from `engaged` is deliberate (task 132).
+        // `heldBy` above is owner-OR-QUEUE, so a task sitting in this agent's
+        // queue and owned by someone else reaches this line — it sets the
+        // clock and contributes NO id. The relation is one-way: ids non-empty
+        // implies `engaged`, never the converse. Naming a queue-only claim in
+        // a probe would tell its recipient to park work someone else owns,
+        // mid-flight, which is a wrong instruction where the over-count it
+        // came from was only noise. Narrowing `engaged` is 084/135's.
+        if (task.agent === agent) engagedTaskIds.push(task.id)
+      }
       if (!STALLING.has(task.status)) continue
       // INDEPENDENT OF THE STAMP: whether the agent holds stalling work is a
       // board fact, and a claim it cannot date is still a claim.
@@ -690,8 +702,8 @@ export const tasks: TasksContract = {
     // ABSENT, not undefined-valued: a key carrying undefined reads as a floor
     // to anyone spreading this into facts.
     return claim === undefined
-      ? { engaged, holdsUndone, holdsStalling }
-      : { engaged, holdsUndone, holdsStalling, newestStallingClaim: claim }
+      ? { engaged, engagedTaskIds, holdsUndone, holdsStalling }
+      : { engaged, engagedTaskIds, holdsUndone, holdsStalling, newestStallingClaim: claim }
   },
 
   nextTaskId: (state) => {

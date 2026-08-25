@@ -268,6 +268,17 @@ export type AgentProbeData = {
   agent: AgentName
   quietMinutes: number
   text: string
+  /** WHICH QUESTION (task 132). The two probes are different asks — mid-work
+   *  silence, and nothing-held silence — and a recipient that cannot tell
+   *  them apart cannot answer either. Optional in the type because the log is
+   *  permanent: every probe written before 2026-08-25 lacks it, and a reader
+   *  must not have to pretend otherwise. New records always carry it. */
+  probeKind?: 'stuck' | 'idle'
+  /** The in-progress claims a STUCK probe is about; absent on an idle one,
+   *  which has none by construction. Same reason as `nudge`'s recipient
+   *  (task 127, law d): a record that cannot say what it was about leaves
+   *  the class diagnosable only at a watched terminal. */
+  taskIds?: readonly string[]
   queued?: true
 }
 
