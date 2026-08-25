@@ -794,4 +794,47 @@ describe('a restart starts a fresh quiet clock (ruled, task 140)', () => {
     }
     expect(log.events.filter((e) => e.type === 'greet').length).toBe(1)
   })
+
+  test('…and through the surface door: a re-attached surface is told by its own register (codex, task 140)', async () => {
+    // THE SECOND DOOR. `attachSurface` has its own register code, so the walk
+    // above pins nothing about it — this one does: same shape, no socket,
+    // and the same two bounds (long quiet clock, timer off) so the only
+    // thing that can announce is the register's own arrival hook.
+    const server = await boot({
+      attention: {
+        ...FAST,
+        notifier: { nudgeIntervalMs: 600_000, backoffMs: [600_000] },
+        notifyTickMs: 10_000_000,
+      },
+    })
+    const delivered: Record<string, unknown>[] = []
+    const attach = () =>
+      server.attachSurface({
+        name: 'bridge-b',
+        role: 'worker',
+        deliver: (payload) => {
+          delivered.push(payload as Record<string, unknown>)
+          return true
+        },
+      })
+    const detach = attach()
+
+    // THE SURFACE ACTS — an inbound message is its own voice.
+    await server.postInbound('bridge-b', 'hello')
+    expect((await rowOf(server, 'bridge-b'))?.lastActivityAt).toBeDefined()
+
+    // …and leaves. Machine mail arrives while it is away; nothing reaches a
+    // detached surface, and the inherited clock is not due for ten minutes.
+    detach()
+    await post(server, '/send', { from: 'orchestrator-o', to: 'bridge-b', text: 'while away' })
+    expect(delivered.filter((p) => p.type === 'deliver').length).toBe(0)
+
+    // RE-ATTACH: told at once, by the register's own observe.
+    attach()
+    const wake = await until(() => delivered.find((p) => p.type === 'deliver' && p.from === 'infra'))
+    expect(wake).toBeDefined()
+    expect(String(wake?.text)).toContain('event')
+    // R8 for the returning surface: no act on file until THIS session acts.
+    expect((await rowOf(server, 'bridge-b'))?.lastActivityAt).toBeUndefined()
+  })
 })
