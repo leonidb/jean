@@ -84,12 +84,20 @@ describe('scenario 1 — the echo loop: one message crosses the whole system and
       .filter((e) => e.type === 'reply' && (e.data as ReplyData).text === 'ping-1 — heard')
     expect(echoed.length).toBe(1)
 
-    // Conservation: exactly two pairs ever existed (the send to the worker,
-    // the reply to the orchestrator) and both cleared — nothing leaked,
-    // nothing was consumed by anyone else.
+    // Conservation: exactly THREE pairs ever existed — the send to the
+    // worker, the reply to the orchestrator, and the SENSEI'S GREET, minted
+    // when it registered into an empty dojo (task 133). The two message
+    // pairs cleared; the greet did not, because nothing acked it.
+    //
+    // AND THE GREET IS CARRIED BY THE SAME MACHINERY, which is the claim
+    // the design rests on: it is minted, announced, and CLEARED BY AN ACK
+    // exactly like the two message pairs — this sensei is `reliable`, so it
+    // acks what it is told. That the count moved from two to three is the
+    // whole of the greet's footprint: one more piece of ordinary mail, not
+    // a second push path with a lifecycle of its own.
     const truth = assertGroundTruth(dojo)
-    expect(truth.pairsCreated).toBe(2)
-    expect(truth.pairsCleared).toBe(2)
+    expect(truth.pairsCreated).toBe(3)
+    expect(truth.pairsCleared).toBe(3)
     expect(dojo.pendingPairs()).toEqual([])
 
     // The loud direction, composed: TWO announcements moved the whole loop —

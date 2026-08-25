@@ -319,6 +319,21 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
     }
   }
 
+  /** THE GREET, MINTED AS THE SHELL MINTS IT (task 133). Mirrors the adapter:
+   *  AFTER the register append, so the mailbox read sees the world the
+   *  registration created, and through the domain's own decision rather than
+   *  a local copy of the role rule. Without this the composed harness models
+   *  a system we do not run, which is the one thing it exists to prevent. */
+  function mintGreet(name: AgentName, role: AgentRole): void {
+    const greet = notifier.greetOnRegistration({
+      name,
+      role,
+      pendingIds: mailbox.mailboxOf(mailboxState, name).map((e) => e.id),
+    })
+    if (greet === undefined) return
+    append('greet', agentStream(greet.to), { agent: greet.to, queued: true })
+  }
+
   return {
     clock,
     log,
@@ -330,6 +345,7 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
       append('register', agentStream(name), { agent: name, role, idle: false })
       connected.set(name, true)
       connectedAt.set(name, clock.now())
+      mintGreet(name, role)
     },
     disconnect(name: AgentName): void {
       append('disconnect', agentStream(name), { agent: name })
@@ -341,6 +357,7 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
         append('register', agentStream(a.name), { agent: a.name, role: a.role, idle: false })
         connected.set(a.name, true)
         connectedAt.set(a.name, clock.now())
+        mintGreet(a.name, a.role)
       }
     },
 
