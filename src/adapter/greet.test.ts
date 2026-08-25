@@ -64,6 +64,19 @@ const greetsFor = async (server: AdapterHandle, agent: string): Promise<StoredEv
   return res.events.filter((e) => e.type === 'greet')
 }
 
+/** Read the agent's live mailbox — ids and ack codes, as the agent sees it. */
+const mailboxOf = async (server: AdapterHandle, agent: string) =>
+  (await (await fetch(`http://localhost:${server.port}/events?agent=${agent}`)).json()) as {
+    events: { id: number; code: string; type: string }[]
+  }
+
+const ack = (server: AdapterHandle, agent: string, pairs: { id: number; code: string }[]) =>
+  fetch(`http://localhost:${server.port}/events/ack`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-jean-agent': agent },
+    body: JSON.stringify({ pairs }),
+  })
+
 const send = (server: AdapterHandle, to: string, text: string) =>
   fetch(`http://localhost:${server.port}/send`, {
     method: 'POST',
@@ -124,11 +137,25 @@ describe('the greet — the zero case of the announcement', () => {
     // The whole shape. The greet cannot race the mail because it is minted
     // only in the mail's absence, which is why there is no timer here and
     // nothing to reconcile.
+    // THE GREET MUST BE ACKED FIRST, and that is the whole difference between
+    // this walk and the self-limiting one below (codex round). A first draft
+    // sent mail on top of an UNACKED greet — so the mailbox was already
+    // non-empty for the greet's own sake, and this walk was indistinguishable
+    // from the next one: both were "a greet is waiting", neither was
+    // "ORDINARY MAIL is waiting". A bug that greeted over a send but not over
+    // a greet would have passed both.
     const server = await boot()
-    // Register once so the name is a dojo agent routing will queue for, then
-    // leave, take mail, and come back to a non-empty mailbox.
     const first = await connect(server, 'sensei', 'sensei')
     await settle(() => greetsFor(server, 'sensei'), 1)
+
+    // Clear it, so what follows is a genuinely empty mailbox that then takes
+    // ordinary mail — the state this walk is named for.
+    const box = await mailboxOf(server, 'sensei')
+    const greet = box.events.find((e) => e.type === 'greet')
+    expect(greet, 'no greet to ack — the fixture never reached the state under test').toBeDefined()
+    await ack(server, 'sensei', [{ id: greet?.id as number, code: greet?.code as string }])
+    expect((await mailboxOf(server, 'sensei')).events, 'the ack did not clear it').toHaveLength(0)
+
     first.close()
     await Bun.sleep(50)
     await send(server, 'sensei', 'this was waiting')
@@ -136,7 +163,7 @@ describe('the greet — the zero case of the announcement', () => {
 
     await connect(server, 'sensei', 'sensei')
     await Bun.sleep(300)
-    expect(await greetsFor(server, 'sensei'), 'a second greet was minted on top of waiting mail').toHaveLength(1)
+    expect(await greetsFor(server, 'sensei'), 'a greet was minted on top of waiting mail').toHaveLength(1)
   }, 20_000)
 
   test('SELF-LIMITING: an unacked greet is mail, so a reconnect mints nothing', async () => {

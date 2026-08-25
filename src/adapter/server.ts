@@ -1153,7 +1153,19 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
    * was a raw `deliver` with no mailbox entry — told and unrecorded, which is
    * the shape task 053 exists to catch.
    */
-  function mintGreet(agent: AgentName, role: AgentRole): void {
+  function mintGreet(agent: AgentName, role: AgentRole, session: Session): void {
+    // ONLY THE SESSION THAT STILL HOLDS THE SEAT MINTS. A `replace` leaves the
+    // evicted socket's `.then()` still queued, so without this both
+    // registrations reach the mint and each can read the mailbox before the
+    // other's greet has folded — two greets for one seat. Raised by the codex
+    // round; I could NOT reproduce it in six attempts of two concurrent
+    // same-session registrations (two registers, one greet, every time), so
+    // the window is either very small or closed by the store's write
+    // serialization. The guard goes in anyway: it is the identity check this
+    // file already makes at its message and close paths two hundred lines
+    // below, it costs one comparison, and "I could not make it happen" is a
+    // weaker statement than the guard it would be replacing.
+    if (sessions.get(agent) !== session) return
     const greet = notifier.greetOnRegistration({
       name: agent,
       role,
@@ -1607,7 +1619,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
             idle: true,
           }).then(() => {
             ws.send(JSON.stringify({ type: 'registered', agent: msg.agent }))
-            mintGreet(msg.agent as AgentName, role as AgentRole)
+            mintGreet(msg.agent as AgentName, role as AgentRole, session)
           })
           return
         }
