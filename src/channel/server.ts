@@ -670,6 +670,16 @@ function scheduleReconnect() {
 let infraConnectStarted = false
 
 function startInfraConnection(reason: 'ready' | 'timeout'): void {
+  // READINESS OBSERVED IS RECORDED EVEN WHEN IT ARRIVES TOO LATE TO ACT ON
+  // (codex round). The timeout can fire while there is no infra port yet —
+  // `connectToInfra` returns early and schedules a 2s retry — and the signal
+  // can then arrive before that retry opens a socket. The `already started`
+  // guard below correctly suppresses the second start, and without this line
+  // the eventual registration would still report "registered WITHOUT the
+  // client readiness signal" about a client that had signalled. A false
+  // degraded report is worse than none: it is the one message here whose
+  // entire purpose is to be believed.
+  if (reason === 'ready') degradedConnect = false
   if (infraConnectStarted) return
   infraConnectStarted = true
   if (readinessTimer !== null) {
@@ -722,12 +732,23 @@ let readinessTimer: ReturnType<typeof setTimeout> | null = null
  *  the register path, which is the only place that can tell anyone. */
 let degradedConnect = false
 
-await mcp.connect(new StdioServerTransport())
-
-// THE HOOK IS SINGLE-ASSIGNMENT, not an emitter — checked, nothing else in
-// this file assigns it.
+// THE HOOK IS ARMED BEFORE THE TRANSPORT, and the order is the point (codex
+// round). `mcp.connect()` calls `transport.start()`, which begins reading
+// stdin — so a client whose `initialize` and `initialized` are already sitting
+// in the pipe can have both processed while `connect` is still awaiting. Arm
+// afterwards and `oninitialized` is unset at the moment it would fire: the
+// signal is lost, nothing calls `startInfraConnection('ready')`, and the
+// give-up timer becomes the only path — a thirty-second startup, reported as
+// degraded, on a client that did nothing wrong.
+//
+// `infraConnectStarted` cannot help there: it guards against running twice,
+// not against never running. Arming first costs nothing and removes the
+// question. The hook is single-assignment, not an emitter — checked, nothing
+// else in this file assigns it.
 mcp.oninitialized = () => startInfraConnection('ready')
 readinessTimer = setTimeout(() => startInfraConnection('timeout'), READINESS_TIMEOUT_MS)
+
+await mcp.connect(new StdioServerTransport())
 
 // THE RECONNECT PATH IS UNAFFECTED, and the reasoning is worth keeping
 // because the question is the first one a reader will have. `connectToInfra`

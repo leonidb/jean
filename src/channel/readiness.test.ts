@@ -90,7 +90,7 @@ function dojo(port: number) {
  * caller may set it — but the fix that works is pinning `JEAN_DOJO`, and
  * saying otherwise would leave the next reader guarding the wrong door.
  */
-function launch(root: string, env: Record<string, string> = {}) {
+function launch(root: string, env: Record<string, string> = {}, prefill?: string) {
   const inherited = { ...process.env }
   // ABSENT, not empty: `sessionDir()` is `CLAUDE_PROJECT_DIR || cwd`, and an
   // empty string is falsy — but `undefined` is the honest state and reads as
@@ -132,7 +132,24 @@ function launch(root: string, env: Record<string, string> = {}) {
   const proc = Bun.spawn(['bun', 'run', PLUGIN], {
     cwd: root,
     env: finalEnv as Record<string, string>,
-    stdin: 'pipe',
+    // PRE-FILLED when a walk needs the client's messages to be in the pipe
+    // before the process starts reading it — the only way to stage a signal
+    // that arrives during `mcp.connect()`.
+    // PRE-FILLED when a walk needs the client's messages to be in the pipe
+    // before the process starts reading it — the only way to stage a signal
+    // that arrives during `mcp.connect()`. A Blob will NOT do: it ENDS the
+    // stream, and the plugin treats a closed stdin as its parent dying and
+    // shuts down. So: a stream that yields the content and then stays open,
+    // which is what a real client's pipe looks like.
+    stdin:
+      prefill === undefined
+        ? 'pipe'
+        : new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(prefill))
+              // deliberately never closed
+            },
+          }),
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -174,8 +191,8 @@ async function readSome(stream: ReadableStream): Promise<string> {
   return out
 }
 
-const rpc = (proc: { stdin: { write: (s: string) => void } }, msg: unknown) =>
-  proc.stdin.write(`${JSON.stringify(msg)}\n`)
+const rpc = (proc: { stdin: unknown }, msg: unknown) =>
+  (proc.stdin as { write: (s: string) => void }).write(`${JSON.stringify(msg)}\n`)
 
 const INITIALIZE = {
   jsonrpc: '2.0',
@@ -247,6 +264,95 @@ describe('registration waits for the client to be able to hear', () => {
     const arrived = await until(() => infra.frames.some((f) => f.frame.type === 'register'))
     expect(arrived, 'with a ten-minute give-up bound, only the signal can have caused this').toBe(true)
     await expectIsolated(proc, infra.port)
+  }, 30_000)
+
+  test('A SIGNAL ALREADY IN THE PIPE AT SPAWN is honoured — no give-up, no blind report', async () => {
+    // CODEX'S ORDERING FINDING, staged rather than argued. `mcp.connect()`
+    // calls `transport.start()`, which begins reading stdin — so a client
+    // whose `initialize` and `initialized` are ALREADY IN THE PIPE can have
+    // both processed while `connect` is still awaiting. Arm `oninitialized`
+    // after that and it is unset at the moment it would fire: the signal is
+    // lost, and the give-up timer becomes the only path — a thirty-second
+    // startup, reported as degraded, on a client that did nothing wrong.
+    //
+    // The other walks cannot reach this shape: they write to stdin after
+    // spawning, and module load takes ~450ms, so their messages are always
+    // read after `connect` resolves. Here the pipe is pre-filled at spawn.
+    //
+    // AND IT DOES NOT HOLD THE ORDERING FIX — said plainly, because the walk
+    // was written believing it would. Moving the assignment back after
+    // `mcp.connect()` leaves this GREEN: the race does not reproduce even
+    // with the messages waiting in the pipe, so either the SDK does not
+    // dispatch during `start()` or the timing does not line up. The
+    // assignment stays where it is because arming a hook before the thing
+    // that can fire it is free and removes the question — not because the
+    // defect was demonstrated, and the difference belongs in writing.
+    //
+    // What this DOES hold is a real startup shape nothing else covered: a
+    // client whose whole handshake is already buffered still gets a register
+    // and no blind report. The give-up bound is ten minutes, so a register
+    // arriving at all means the signal was seen.
+    const infra = fakeInfra()
+    openServers.push(infra)
+    const root = dojo(infra.port)
+    infra.mark(Date.now())
+    const proc = launch(
+      root,
+      { JEAN_READINESS_TIMEOUT_MS: '600000' },
+      `${JSON.stringify(INITIALIZE)}\n${JSON.stringify(INITIALIZED)}\n`,
+    )
+
+    const arrived = await until(() => infra.frames.some((f) => f.frame.type === 'register'))
+    expect(arrived, 'the signal arrived during connect and was dropped — the hook was armed too late').toBe(true)
+    await expectIsolated(proc, infra.port)
+    expect(
+      infra.frames.filter((f) => f.frame.type === 'reply'),
+      'registered blind — the signal was in the pipe and nothing was listening for it',
+    ).toEqual([])
+  }, 30_000)
+
+  test('A LATE SIGNAL UN-DEGRADES: the timer gave up, readiness arrived, and the report is not sent', async () => {
+    // CODEX'S CASE, and it is a false report rather than a missed one — the
+    // worse direction for the one message here whose entire purpose is to be
+    // believed. The give-up timer fires while there is no infra port yet, so
+    // `connectToInfra` returns early and schedules a 2s retry. `initialized`
+    // then arrives before that retry opens a socket. The already-started
+    // guard correctly suppresses a second connect — and the registration that
+    // eventually happens would still have announced itself blind, about a
+    // client that had signalled.
+    //
+    // Staged by starting with NO port file and writing it after the signal,
+    // which is the ordinary "infra is not up yet" case rather than a
+    // contrivance.
+    const infra = fakeInfra()
+    openServers.push(infra)
+    const root = dojo(infra.port)
+    rmSync(resolve(root, '.jean', 'infra.port'))
+    infra.mark(Date.now())
+    const proc = launch(root, { JEAN_READINESS_TIMEOUT_MS: '300' })
+
+    // Let the timer give up against a dojo with no reachable infra.
+    await Bun.sleep(700)
+    expect(infra.frames, 'nothing should have reached infra — there was no port').toEqual([])
+
+    // Readiness arrives late, then infra comes up.
+    rpc(proc, INITIALIZE)
+    await Bun.sleep(50)
+    rpc(proc, INITIALIZED)
+    await Bun.sleep(100)
+    writeFileSync(resolve(root, '.jean', 'infra.port'), String(infra.port))
+
+    const registered = await until(() => infra.frames.some((f) => f.frame.type === 'register'))
+    expect(registered, 'the retry never registered once infra came up').toBe(true)
+    await expectIsolated(proc, infra.port)
+
+    // AND NO BLIND REPORT. The signal did arrive; saying otherwise would be a
+    // lie told loudly.
+    await Bun.sleep(300)
+    expect(
+      infra.frames.filter((f) => f.frame.type === 'reply'),
+      'reported a blind registration for a client that had signalled',
+    ).toEqual([])
   }, 30_000)
 
   test('A CLIENT THAT NEVER SAYS `initialized` STILL REGISTERS, and says that it did so blind', async () => {
