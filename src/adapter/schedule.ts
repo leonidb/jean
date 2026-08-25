@@ -100,11 +100,32 @@ export type Scheduler = {
    * Release everything the scheduler holds — the job table, and now the boot
    * catch-up if one is still running.
    *
-   * KILLS RATHER THAN DRAINS (ruled: "on stop, I think you can kill it. It's
-   * okay. Next start it will start again"). Draining would make `jean infra
-   * stop` wait out a consolidation, which is the same hostage-taking at the
-   * other end of the lifecycle — the reported problem is that START and STOP
-   * are obstructed, and only fixing one half would be answering half of it.
+   * KILLS RATHER THAN DRAINS (ruled). Draining would make `jean infra stop`
+   * wait out a consolidation, which is the same hostage-taking at the other
+   * end of the lifecycle — the reported problem is that START and STOP are
+   * obstructed, and fixing one half would be answering half of it.
+   *
+   * ── A KILLED RUN IS A DEFERRED CONSOLIDATION, NOT A LOST ONE ──
+   *
+   * The ruling's other half — that the next start runs it again — is NOT what
+   * the code does, and the difference was raised, checked and accepted rather
+   * than missed. `lastFiredAt` is stamped from the `trigger-fired` event
+   * (`domain/triggers/index.ts:362`), which is appended when a run STARTS, so
+   * a killed run leaves the trigger looking fired and `shouldCatchUp` skips it
+   * on the next boot. That consolidation waits for the next scheduled instant.
+   *
+   * RULED ACCEPTABLE, and the reason is the part worth keeping: unconsolidated
+   * `memorize` events are ALREADY SEARCHABLE — the knowledge scope includes
+   * them before the librarian runs. So a skipped night costs the wiki's
+   * tidiness for a day, not its content; nothing is lost and nothing becomes
+   * unreachable, and the next run takes both days off the cursor. The manual
+   * escape exists too (`POST /triggers/consolidate-wiki/fire`).
+   *
+   * Written down because the alternative reads like a defect on sight. It was
+   * examined: stamping on COMPLETION was the obvious repair and is a larger
+   * change than it looks — it would make `lastFiredAt` mean *last SUCCESSFUL
+   * fire*, which every existing reader inherits silently. Not a bug to fix
+   * here; a property whose consequence was weighed.
    */
   stop: () => void
 }
