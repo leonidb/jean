@@ -130,7 +130,7 @@ describe('the kill switch (task 131)', () => {
     const { ports, trace } = stub({
       spawn: () => {
         controller.abort()
-        return { kind: 'ran', exitCode: 0, durationMs: 5, timedOut: false }
+        return { kind: 'ran', exitCode: 0, durationMs: 5, timedOut: false, stderr: '' }
       },
     })
     await runHeadless(nightly, CONFIG, ports, controller.signal)
@@ -142,7 +142,9 @@ describe('the kill switch (task 131)', () => {
     // The other half: a run killed mid-walk must not go on performing
     // effects. A retrying run is the one with steps left after its first
     // spawn, so it is the one that shows the difference.
-    const { ports, trace } = stub({ spawn: () => ({ kind: 'ran', exitCode: 1, durationMs: 5, timedOut: false }) })
+    const { ports, trace } = stub({
+      spawn: () => ({ kind: 'ran', exitCode: 1, durationMs: 5, timedOut: false, stderr: '' }),
+    })
     await runHeadless({ ...pipeline, retries: 2 }, CONFIG, ports, AbortSignal.abort())
     expect(trace.did, 'an aborted run took a step').toEqual([])
   })
