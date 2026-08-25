@@ -553,6 +553,29 @@ function connectToInfra() {
     ws.addEventListener('open', () => {
       process.stderr.write(`[jean] connected to infra at ${url} as "${AGENT_NAME}" session=${SESSION_ID}\n`)
       sendToInfra({ type: 'register', agent: AGENT_NAME, role: AGENT_ROLE, sessionId: SESSION_ID, tags: AGENT_TAGS })
+      // AND IF WE GOT HERE WITHOUT THE READINESS SIGNAL, SAY SO WHERE IT WILL
+      // BE SEEN. Ranked, and this is the highest rung reachable from the
+      // plugin alone: a `reply` is an existing frame, it reaches the
+      // orchestrator's mailbox, and it is in the log afterwards. The rung
+      // above — a flag on the register record — is NOT reachable: the server
+      // builds that record's data from named fields (`server.ts:1568`), so an
+      // extra field on the frame is dropped, and adding one is an infra
+      // change this ticket is scoped out of. The rung below is stderr, which
+      // in a plugin subprocess is close to invisible.
+      //
+      // The text names the PLUGIN as the speaker on purpose: a `reply` is
+      // attributed to the agent, and this one is its transport talking, not
+      // the session. Sent once, only on the degraded path.
+      if (degradedConnect) {
+        degradedConnect = false
+        sendToInfra({
+          type: 'reply',
+          text:
+            `[jean plugin] registered WITHOUT the client readiness signal — waited ${READINESS_TIMEOUT_MS}ms ` +
+            'for notifications/initialized and it never arrived. This session may not turn announcements into ' +
+            'turns; anything sent to it relies on the announcement ladder to be retried.',
+        })
+      }
     })
 
     ws.addEventListener('message', (event) => {
@@ -610,8 +633,109 @@ function scheduleReconnect() {
 
 // ── Start ──────────────────────────────────────────────────────────
 
+/**
+ * REGISTER ONLY ONCE THE CLIENT CAN HEAR (task 127, ruled 2026-08-25).
+ *
+ * ── THE DEFECT ──
+ *
+ * `connectToInfra()` used to run here, at module scope. Registration then
+ * reached infra ~450ms after spawn, and infra announces at the register
+ * instant — but the client becomes able to PROCESS a notification only after
+ * its own `initialize`/`initialized` handshake. Measured across twelve cold
+ * starts in two dojos, that gap is 5–169ms, and a tell emitted inside it dies
+ * with nothing reporting the loss: the server SDK resolves a notification on
+ * bytes written, before the client has sent `initialize` at all. The agent
+ * then sits dark until the ladder's first rung — minutes, at exactly the
+ * moment a human is watching a terminal come up.
+ *
+ * ── WHY THE FIX IS HERE AND NOT IN INFRA ──
+ *
+ * Four shapes were built or scoped on the infra side and all were
+ * compensations: infra is on the far side of a socket from the process that
+ * knows, so every one of them guessed at a state it structurally cannot
+ * observe. The plugin is the only party that can observe client readiness.
+ * Not speaking until the client can hear removes the window rather than
+ * healing what fell into it.
+ *
+ * ── WHAT THIS DOES NOT CLAIM ──
+ *
+ * `notifications/initialized` attests that the MCP CLIENT finished
+ * initializing. Whether the host's SESSION layer turns a channel notification
+ * into a TURN at that same instant is a different readiness, and MCP does not
+ * expose it. The 5–169ms window's cause was never established, so if it sits
+ * below the handshake this NARROWS the window rather than closing it. P8's
+ * ladder remains underneath either way: this makes the first attempt likely
+ * to land; it is not what makes delivery reliable.
+ */
+let infraConnectStarted = false
+
+function startInfraConnection(reason: 'ready' | 'timeout'): void {
+  if (infraConnectStarted) return
+  infraConnectStarted = true
+  if (readinessTimer !== null) {
+    clearTimeout(readinessTimer)
+    readinessTimer = null
+  }
+  if (reason === 'timeout') {
+    // DEGRADED, AND SAID SO. See READINESS_TIMEOUT_MS.
+    process.stderr.write(
+      `[jean] readiness signal never arrived after ${READINESS_TIMEOUT_MS}ms — connecting anyway, ` +
+        'announcements may be missed until this session takes a turn\n',
+    )
+    degradedConnect = true
+  }
+  connectToInfra()
+}
+
+/**
+ * THE GIVE-UP BOUND, and it is deliberately NOT a tuned number.
+ *
+ * A healthy client sends `initialized` in single-digit milliseconds (measured:
+ * `initialize` +0ms, `notifications/initialized` +8ms). Thirty seconds is
+ * "long enough that a healthy client has certainly finished" and nothing more
+ * — do not read it as calibrated, and do not tighten it without a measurement
+ * that says what a realistic ceiling is.
+ *
+ * WHY A FALLBACK AT ALL, since waiting forever is the version with no guess in
+ * it. Because never registering is not the safe failure it looks like: an
+ * agent that never appears is indistinguishable from an agent nobody started.
+ * That is the fabricated-success shape inverted rather than fixed — a seat
+ * that is alive and looks absent, instead of one that looks alive and cannot
+ * receive. Neither tells anyone anything.
+ *
+ * The objection this survives: a SILENT fallback would be a guess, connecting
+ * at an arbitrary instant while asserting a readiness it never observed. This
+ * one asserts nothing. It says: I waited, the signal never came, I am
+ * connecting anyway, and I am telling you. A loud degradation is the honest
+ * report of a guess rather than the guess itself.
+ */
+const READINESS_TIMEOUT_MS = ((): number => {
+  // INJECTABLE ONLY SO A TEST CAN DRIVE THE DEGRADED PATH without spending
+  // thirty seconds on it. Production never sets this — the bound above is the
+  // ruled one, and a non-finite or non-positive override takes the default
+  // rather than becoming a bound nothing satisfies.
+  const raw = Number(process.env.JEAN_READINESS_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000
+})()
+let readinessTimer: ReturnType<typeof setTimeout> | null = null
+/** Set when the connection was made without ever seeing the signal — read by
+ *  the register path, which is the only place that can tell anyone. */
+let degradedConnect = false
+
 await mcp.connect(new StdioServerTransport())
-connectToInfra()
+
+// THE HOOK IS SINGLE-ASSIGNMENT, not an emitter — checked, nothing else in
+// this file assigns it.
+mcp.oninitialized = () => startInfraConnection('ready')
+readinessTimer = setTimeout(() => startInfraConnection('timeout'), READINESS_TIMEOUT_MS)
+
+// THE RECONNECT PATH IS UNAFFECTED, and the reasoning is worth keeping
+// because the question is the first one a reader will have. `connectToInfra`
+// is reached from two places: this deferred first attempt, and
+// `scheduleReconnect`'s 2s retry. A retry can only be scheduled by a connect
+// that has already been attempted, so deferring the first one cannot let the
+// retry loop run ahead of it — the loop has nothing to re-enter until the
+// hook or the timeout fires.
 
 // Detect parent death: when Claude exits, stdin closes (SDK doesn't handle
 // this — see PR #1613).
