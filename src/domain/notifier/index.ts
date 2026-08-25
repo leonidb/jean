@@ -289,12 +289,17 @@ export const notifier: NotifierContract = {
     // self-limiting: an unacked greet IS mail, so a reconnect sees a
     // non-empty mailbox and mints nothing. No agent can ever hold two.
     if (fact.pendingIds.length > 0) return undefined
-    // SELF-DIRECTED SEATS ONLY. Every other seat's connect feeds somebody —
-    // a worker's register event is the sensei's mail — so only this one can
-    // arrive to silence. And the worker's row is a positive statement, not
-    // an omission: a worker connecting with nothing waiting is supposed to
-    // sit idle, and saying otherwise is the orchestrator's job rather than
-    // infra's.
+    // SENSEI-ONLY IS A DECISION, NOT A DERIVATION (ruled 2026-08-25: a
+    // judgement call — greeting workers was a live option). Greeting workers
+    // is coherent and was rejected, not ruled out. THE REASON: a worker
+    // connecting with nothing waiting is supposed to sit idle, and saying
+    // otherwise is the orchestrator's job rather than infra's.
+    //
+    // The earlier wording here argued from "a worker's register event is the
+    // sensei's mail". That is FALSE on main — `register` resolves to nobody
+    // (task 139) — and it was inherited from a comment describing code the
+    // teardown deleted. The decision survived its support dying; the prose
+    // now records the choice rather than a proof.
     if (fact.role !== 'sensei') return undefined
     // NO PROSE. The text is the adapter's to render, exactly as with an
     // announce effect — the core does not return display strings it does
