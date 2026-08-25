@@ -166,13 +166,27 @@ export type AnnounceEffect = {
 // nothing moving; the sensei connected and sat there until a human
 // intervened).
 //
-// WHY ONLY THE SELF-DIRECTED SEAT. Every other seat's connect feeds
-// somebody: a worker's register event IS the sensei's mail. The sensei's
-// connect feeds nobody. And the worker row is a positive statement rather
-// than an absence (Leonid, 2026-08-25): a worker connecting with nothing
-// waiting is SUPPOSED to sit idle, and if it should be doing something,
-// saying so is the sensei's job, not infra's. That row stays `no` even if
-// the greet were free.
+// SENSEI-ONLY IS A DECISION, NOT A DERIVATION — recorded that way on
+// purpose (ruled 2026-08-25: a judgement call — greeting workers was a
+// live option). Greeting workers is a coherent design. It
+// was considered and rejected; it is not ruled out by anything structural,
+// and a reader who reaches for it has not missed an argument.
+//
+// THE REASON WE CHOSE AGAINST IT: a worker connecting with nothing waiting
+// is SUPPOSED to sit idle, and if it should be doing something, saying so
+// is the ORCHESTRATOR'S job, not infra's. Greeting workers would put infra
+// in the business of telling agents what to do, which is the sensei's
+// whole function. That reason is a judgement about where responsibility
+// sits — revisit the row if that judgement changes, rather than treating
+// it as forced.
+//
+// A NOTE ON WHY THE FORM MATTERS HERE. This rule was first written as a
+// derivation from an asymmetry ("every other seat's connect feeds somebody
+// — a worker's register IS the sensei's mail"). That premise was FALSE on
+// main: `register` resolves to nobody (see resolution's table, and task
+// 139). A rule that reads as forced gets defended; a rule recorded as a
+// choice gets revisited. The choice survived its support dying, which is
+// exactly the fragility derivation-shaped prose hides.
 //
 // THE SHAPE, and it is what makes this one mechanism instead of two: the
 // greet is minted ONLY when no mail waits. One evaluation, one instant,

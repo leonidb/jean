@@ -335,8 +335,12 @@ describe('the greet — minted only for a self-directed seat with an empty mailb
   })
 
   test("a worker is never greeted, empty mailbox or not — that is the sensei's job, not infra's", () => {
-    // Leonid, 2026-08-25: a worker connecting with nothing waiting is
-    // SUPPOSED to sit idle. The row stays `no` even if the greet were free.
+    // A DECISION, not a derivation (ruled 2026-08-25: a judgement call —
+    // greeting workers was a live option). Greeting
+    // workers is coherent; we chose against it because a worker with
+    // nothing waiting is SUPPOSED to sit idle, and telling it otherwise is
+    // the orchestrator's job, not infra's. Change the decision and this
+    // walk changes with it — it pins the choice, not a necessity.
     expect(notifier.greetOnRegistration(reg({ name: WORKER, role: 'worker' }))).toBeUndefined()
     expect(notifier.greetOnRegistration(reg({ name: WORKER, role: 'worker', pendingIds: [7] }))).toBeUndefined()
   })
