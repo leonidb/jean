@@ -263,6 +263,76 @@ describe('scenario 4 — absence and return: being away costs a report, never a 
   })
 })
 
+describe('scenario 4b — a restart starts a fresh quiet clock (ruled, task 140)', () => {
+  test('a seat that acted, vanished and re-registered INSIDE the quiet interval is announced at the first tick, not on its predecessor’s clock', () => {
+    const dojo = dojoOf([
+      { name: SENSEI, role: 'sensei', behaviour: { kind: 'reliable' } },
+      { name: 'worker-x', role: 'worker', behaviour: { kind: 'reliable' } },
+    ])
+    dojo.registerAll()
+    // The seat ACTS — acks its greet — so its clock is real, and its
+    // mailbox is empty (the resting one, task 133, is the greet until acked).
+    dojo.act(SENSEI)
+    expect(dojo.mailboxIds(SENSEI)).toEqual([])
+
+    // It vanishes, and machine mail arrives while it is away.
+    dojo.disconnect(SENSEI)
+    const away = dojo.reply('worker-x', 'half done')
+
+    // A NEW SESSION registers at once — no time has passed since the act,
+    // so the inherited clock would be due a full quiet interval from now.
+    const returnedAt = dojo.clock.now()
+    dojo.register(SENSEI, 'sensei')
+    // Mail waiting → no greet (133): the announcement is the seat's ONLY way
+    // to a turn, which is exactly why inheriting the clock left it with none.
+    // (The seat also holds its own `disconnect` — the orchestrator is told
+    // about every departure, its own included.)
+    expect(dojo.mailboxIds(SENSEI)).toContain(away.id)
+    expect(dojo.mailboxEvents(SENSEI).filter((e) => e.type === 'greet')).toEqual([])
+
+    dojo.runFor(MIN) // one tick — half the quiet interval from the act
+    // Pre-fix: nothing fires here; the next tick that would is at
+    // act + nudgeIntervalMs, on a dead session's clock.
+    const wokeWith = dojo.announcements().filter((a) => a.to === SENSEI && a.accepted && a.ids.includes(away.id))
+    expect(wokeWith.length).toBe(1)
+    expect((wokeWith[0]?.at ?? 0) - returnedAt).toBeLessThanOrEqual(MIN)
+    expect(dojo.mailboxIds(SENSEI)).toEqual([])
+
+    assertGroundTruth(dojo)
+  })
+})
+
+describe('scenario 4c — a seat mid-ladder restarts: the back-off clock starts over', () => {
+  test('a re-registered seat is told at the next tick, not at the rung its predecessor was on', () => {
+    const dojo = dojoOf([
+      // Hears every wake, never acts: its greet is told once and then
+      // repeated up the ladder — the mid-ladder seat, with no act to reset it.
+      { name: SENSEI, role: 'sensei', behaviour: { kind: 'unresponsive' } },
+      { name: 'worker-x', role: 'worker', behaviour: { kind: 'reliable' } },
+    ])
+    dojo.registerAll()
+    dojo.runFor(MIN) // told once, at once (never acted reads absent)
+    const toldAt = dojo.announcements().filter((a) => a.to === SENSEI && a.accepted)
+    expect(toldAt.length).toBe(1)
+    const firstRung = (toldAt[0]?.at ?? 0) + (NOTIFY.backoffMs[0] as number)
+
+    // THE RESTART, one tick after the first telling: well before the rung.
+    dojo.disconnect(SENSEI)
+    dojo.register(SENSEI, 'sensei')
+    // The same greet, still pending — no second one (133); beside it the
+    // seat's own `disconnect`, machine mail that interrupts nothing.
+    expect(dojo.mailboxEvents(SENSEI).filter((e) => e.type === 'greet').length).toBe(1)
+    dojo.runFor(MIN)
+
+    // Told again at the FIRST tick after the restart. Pre-fix the episode
+    // survives the register and the new session waits until `firstRung`.
+    const after = dojo.announcements().filter((a) => a.to === SENSEI && a.accepted)
+    expect(after.length).toBe(2)
+    expect(after[1]?.at ?? 0).toBeLessThan(firstRung)
+    assertGroundTruth(dojo)
+  })
+})
+
 describe('the supervisor’s composed view — the activity floors (ruled, task 107)', () => {
   test('a never-acting connected worker measures from CONNECTION; a disconnected non-holder is not supervised at all', () => {
     const dojo = dojoOf([

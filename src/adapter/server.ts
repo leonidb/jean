@@ -360,11 +360,17 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
   /**
    * Epoch ms of each agent's last OWN act.
    *
-   * Keyed by NAME and outliving the session on purpose: the agents contract
-   * is explicit that the mailbox and its clocks survive an outage, so an
-   * agent that acted, disconnected and came back has a last act — five
-   * minutes ago — not a blank. R8 is untouched by this: an agent that has
-   * never acted still has no entry, which is what `/agents` reports.
+   * Keyed by NAME and outliving the DISCONNECT on purpose: a holder that
+   * acted and then vanished is supervised on that act (the honest-evidence
+   * hierarchy in `supervisionView`), so the entry must survive the socket.
+   * It does NOT outlive the next REGISTER — see `dropActivity`. The earlier
+   * reading ("an agent that came back has a last act — five minutes ago —
+   * not a blank") was exactly the defect of task 140: a session that
+   * inherited its predecessor's clock was neither greeted (mail waiting)
+   * nor announced (quiet clock inherited) until the dead session's clock
+   * expired. R8 is untouched: an agent that has never acted has no entry,
+   * which is what `/agents` reports — and now a fresh session reads the
+   * same way whether or not the seat had a previous one.
    */
   const lastActivity = new Map<AgentName, number>()
   /**
@@ -530,6 +536,32 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     if (Number.isFinite(at)) lastActivity.set(name, at)
   }
 
+  /**
+   * A NEW SESSION STARTS WITH NO ACTIVITY (ruled, task 140).
+   *
+   * Called on every successful register, before the record. The act this
+   * seat has on file belongs to the session that performed it, and that
+   * session is gone; the one registering has done nothing yet. H7 already
+   * says registering is not an act — this is the other half: it must not
+   * INHERIT one either. Not inheriting is not acting. An act moves the
+   * quiet clock to NOW (told after `nudgeIntervalMs`); a register moves it
+   * to ABSENT (maximally quiet — told at once). Opposite directions, and
+   * the notifier contract reads absence exactly that way.
+   *
+   * Observed live (2026-08-25): a sensei that reconnected 31s
+   * after its previous session's last act inherited that clock, and with
+   * mail already waiting the greet did not fire either (task 133's rule,
+   * correct) — so the seat sat with no turn for 89s until a dead session's
+   * clock expired. Both mechanisms deferred to each other.
+   *
+   * Every register drops, `replace` included: the shell cannot know what
+   * the process behind a same-id reconnect still holds, and a wake it did
+   * not need is the noisy, visible, recoverable side (task 098's ruling).
+   */
+  function dropActivity(name: AgentName): void {
+    lastActivity.delete(name)
+  }
+
   // ── The attention view composers (R10: every fact from its owner) ──
 
   /**
@@ -542,10 +574,12 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
    * pass over an empty mailbox and buys a view that does not depend on the
    * order of two maps.
    *
-   * `lastActivityAt` is ABSENT for an agent that has never acted, and that
-   * is the contract's own reading: absence is maximally quiet, so a fresh
-   * session with waiting mail is announced at once. Compare
-   * `supervisionView`, where absence means something the shell must not say.
+   * `lastActivityAt` is ABSENT for an agent whose CURRENT session has not
+   * acted — never at all, or not since it registered (`dropActivity`, task
+   * 140) — and that is the contract's own reading: absence is maximally
+   * quiet, so a fresh session with waiting mail is announced at once, and a
+   * restarted one is a fresh one. Compare `supervisionView`, where absence
+   * means something the shell must not say.
    */
   function notifyView(now: number): NotifierView {
     const names = new Set<AgentName>(sessions.keys())
@@ -1590,6 +1624,11 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
           // halves: hang up here, and let the close handler below delete only
           // an entry it still owns.
           if (verdict.kind === 'replace' && incumbent !== undefined) incumbent.close()
+          // BEFORE the record: the register's arrival hook runs the notifier
+          // over `notifyView`, and that view must already see a seat with no
+          // act, or the first decision of the new session is made on the old
+          // session's clock.
+          dropActivity(msg.agent)
 
           const session: Session = {
             name: msg.agent,
@@ -1785,6 +1824,9 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
         throw new Error(`surface "${surface.name}" refused: ${verdict.kind}`)
       }
       if (verdict.kind === 'replace' && incumbent !== undefined) incumbent.close()
+      // The same door, the same rule: a re-attached surface is a new session
+      // and inherits no act (task 140).
+      dropActivity(surface.name)
 
       const session: Session = {
         name: surface.name,

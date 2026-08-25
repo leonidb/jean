@@ -58,6 +58,19 @@
  * code-only). Absence of evidence reads as maximally quiet, so a fresh
  * session with waiting mail is announced at once.
  *
+ * AND A NEW SESSION STARTS WITH NONE (ruled, task 140: a restarted
+ * session's last activity is not relevant). The act on file
+ * belongs to the session that performed it; the session registering has
+ * performed nothing, so the composer drops the seat's recorded act at every
+ * successful register. This is the other half of "the handshake is not
+ * activity": registering neither earns a quiet interval NOR inherits one.
+ * An act moves the clock to now; a register moves it to absent. Without
+ * this, a seat that restarts within the quiet interval is neither greeted
+ * (mail waiting) nor announced (clock inherited) until a dead session's
+ * clock expires — the two mechanisms defer to each other, and the seat sits
+ * with no turn. The clocks that survive a disconnect are the MAILBOX's and
+ * the supervisor's floor for a vanished holder, not the returning session's.
+ *
  * ── SESSIONS ──
  *
  * Classification is a HINT consumed by judgement; nothing in any delivery

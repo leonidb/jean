@@ -698,3 +698,100 @@ describe('a tick that lands late says so', () => {
     expect(lines).toEqual([])
   })
 })
+
+describe('a restart starts a fresh quiet clock (ruled, task 140)', () => {
+  /** Close and WAIT: the register that follows must see the seat vacated,
+   *  or it is a duplicate, not a new session. */
+  const closed = (ws: WebSocket) =>
+    new Promise<void>((done) => {
+      ws.onclose = () => done()
+      ws.close()
+    })
+  type Row = { name: string; connected: boolean; pending: number; lastActivityAt?: number }
+  const rowOf = async (server: AdapterHandle, name: string): Promise<Row | undefined> => {
+    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as { agents: Row[] }
+    return body.agents.find((a) => a.name === name)
+  }
+  /** `until` over an async read — `/agents` is a round trip, not a lookup. */
+  async function poll<T>(get: () => Promise<T | undefined>, ms = 1500): Promise<T | undefined> {
+    for (let i = 0; i < ms / 25; i++) {
+      const value = await get()
+      if (value !== undefined) return value
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    return undefined
+  }
+
+  test('a seat that acted, vanished and re-registered INSIDE the quiet interval is announced at once — not on its predecessor’s clock', async () => {
+    // THE QUIET CLOCK IS LONG, deliberately. The inherited clock must never
+    // come due inside this test, so the only way the second session hears
+    // anything is the drop on register. Pre-fix this walk goes red at the
+    // final `until`: the live defect (2026-08-25) was a sensei
+    // that reconnected 31s after its predecessor's last act and heard
+    // nothing for 89s — neither greeted (mail waiting, task 133's rule) nor
+    // announced (clock inherited).
+    //
+    // AND THE TICK TIMER IS OFF. Every announcement below can only come from
+    // an arrival hook, so the final one is made by the register's OWN
+    // observe — which pins the order in the register handler: the drop must
+    // land BEFORE the record, or that decision reads the inherited clock and
+    // a build with the order wrong passes only because a timer came by.
+    const server = await boot({
+      attention: {
+        ...FAST,
+        notifier: { nudgeIntervalMs: 600_000, backoffMs: [600_000] },
+        notifyTickMs: 10_000_000,
+      },
+    })
+    const first = connect(server, 'sensei-s', 'sensei')
+    await first.ready
+    // The greet is minted and announced at once — never acted reads absent.
+    expect(await until(() => first.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))).toBeDefined()
+
+    // THE SEAT ACTS, in its own voice, so its clock is now real and recent.
+    first.ws.send(JSON.stringify({ type: 'reply', text: 'on it' }))
+    expect(await poll(() => rowOf(server, 'sensei-s').then((r) => r?.lastActivityAt))).toBeDefined()
+
+    // …and vanishes. The seat outlives the socket; so does its mailbox.
+    // (`/agents` lists sessions and holders, so a vanished seat holding no
+    // task is simply not a row.)
+    await closed(first.ws)
+    expect(
+      await poll(() => rowOf(server, 'sensei-s').then((r) => (r === undefined || !r.connected ? true : undefined))),
+    ).toBe(true)
+
+    // MACHINE MAIL arrives while it is away — a worker's reply resolves to
+    // the seat, and nothing about it interrupts. (Human mail would announce
+    // at once regardless and prove nothing.)
+    const worker = connect(server, 'worker-w')
+    await worker.ready
+    worker.ws.send(JSON.stringify({ type: 'reply', text: 'half done' }))
+    const landed = await poll(async () => {
+      const res = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-worker-w`)).json()) as {
+        events: StoredEvent[]
+      }
+      return res.events.some((e) => e.type === 'reply') ? true : undefined
+    })
+    expect(landed).toBe(true)
+
+    // A NEW SESSION registers, well inside the quiet interval of the act.
+    const second = connect(server, 'sensei-s', 'sensei')
+    await second.ready
+    const row = await rowOf(server, 'sensei-s')
+    // R8 for a returning seat: the row reads quiet until THIS session acts…
+    expect(row?.lastActivityAt).toBeUndefined()
+    // …with its mail still held (the greet, its own disconnect, the reply).
+    expect(row?.pending ?? 0).toBeGreaterThanOrEqual(2)
+    // …and it is TOLD AT ONCE. This is the assertion the fix exists for.
+    const wake = await until(() => second.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))
+    expect(wake).toBeDefined()
+    expect(String(wake?.text)).toContain(`${row?.pending} event`)
+
+    // The 133 invariant held: mail was waiting, so no second greet was
+    // minted — the announcement was the seat's only way to a turn.
+    const log = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-sensei-s`)).json()) as {
+      events: StoredEvent[]
+    }
+    expect(log.events.filter((e) => e.type === 'greet').length).toBe(1)
+  })
+})

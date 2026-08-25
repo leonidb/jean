@@ -35,7 +35,11 @@
  *    returning-but-still-stuck agent an unearned quiet-clock). A returning
  *    agent's waiting mail announces at the FIRST tick after reconnect, and
  *    recovery is EARNED by its first real act, never by the handshake.
- *    Machine writes carry no actor.
+ *    Machine writes carry no actor. AND THE HANDSHAKE INHERITS NOTHING
+ *    (ruled, task 140): a register drops the seat's recorded act, so a
+ *    session that restarts inside the quiet interval is announced at once
+ *    rather than on its predecessor's clock — the harness mirrors the
+ *    shell's `dropActivity` for the same reason it mints the greet.
  *
  * The seeded rng, injected clock and monotonic log make every run replayable
  * from its seed (spec §5).
@@ -342,6 +346,10 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
 
     // ── Sessions ──
     register(name: AgentName, role: AgentRole): void {
+      // A NEW SESSION INHERITS NO ACT (composition law 4, task 140) — before
+      // the append, as the shell does: the register's own observe runs the
+      // notifier over a view that must already read this seat as absent.
+      lastActivity.delete(name)
       append('register', agentStream(name), { agent: name, role, idle: false })
       connected.set(name, true)
       connectedAt.set(name, clock.now())
@@ -354,6 +362,7 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
     /** Register every cast member under its spec role — the usual opening. */
     registerAll(): void {
       for (const a of cast) {
+        lastActivity.delete(a.name)
         append('register', agentStream(a.name), { agent: a.name, role: a.role, idle: false })
         connected.set(a.name, true)
         connectedAt.set(a.name, clock.now())

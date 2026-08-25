@@ -363,3 +363,70 @@ describe('the greet — minted only for a self-directed seat with an empty mailb
     expect(Object.keys(effect ?? {}).sort()).toEqual(['kind', 'to'])
   })
 })
+
+describe('RULED (task 140) — an episode belongs to a session: a register ends it the way an act does', () => {
+  const registerOf = (agent: string, at: number) => ({
+    id: 998,
+    ts: new Date(at).toISOString(),
+    type: 'register',
+    stream: `agent-${agent}`,
+    data: { agent, role: 'worker', idle: true },
+  })
+  const rung = CONFIG.backoffMs[0] as number
+
+  test('a seat mid-ladder that re-registers is told AT ONCE — not at its predecessor’s rung', () => {
+    // The old occupant was told once and never acted; the ladder is on its
+    // first rung, measured from that announcement.
+    const before = announceAll(notifier.initial(), T0, [
+      facts({ name: WORKER, pendingIds: [61], lastActivityAt: T0 - 600_000 }),
+    ])
+    expect(before.effects.length).toBe(1)
+    // A new occupant takes the seat. The composer's fact is now ABSENT — a
+    // new session has no act — and the register event is the one thing that
+    // says "new occupant".
+    const s = notifier.observeEvent(before.state, registerOf(WORKER, T0 + 30_000), undefined)
+    const soon = T0 + 31_000 // long before the rung (T0 + 120_000)
+    expect(tick(s, soon, [facts({ name: WORKER, pendingIds: [61] })]).effects.length).toBe(1)
+  })
+
+  test('the register is the fact, not the absence: a never-acting occupant on its rungs is NOT re-told before the rung', () => {
+    // GUARD against the tempting refactor "absent lastActivityAt + mid-ladder
+    // → immediate": a session that registered on a fresh process and never
+    // acted is legitimately absent AND mid-ladder. Reading absence as
+    // "immediate" here re-fires every tick — D8's 241-an-hour defect.
+    const first = announceAll(notifier.initial(), T0, [facts({ name: WORKER, pendingIds: [62] })])
+    expect(first.effects.length).toBe(1)
+    expect(tick(first.state, T0 + rung / 2, [facts({ name: WORKER, pendingIds: [62] })]).effects).toEqual([])
+    expect(tick(first.state, T0 + rung, [facts({ name: WORKER, pendingIds: [62] })]).effects.length).toBe(1)
+  })
+
+  test('a register for ANOTHER agent touches nothing; one for a name with no episode is a no-op', () => {
+    const before = announceAll(notifier.initial(), T0, [
+      facts({ name: WORKER, pendingIds: [63], lastActivityAt: T0 - 600_000 }),
+    ])
+    const other = notifier.observeEvent(before.state, registerOf(OTHER, T0 + 30_000), undefined)
+    // WORKER's ladder is intact: nothing before its rung, the repeat at it.
+    expect(
+      tick(other, T0 + 31_000, [facts({ name: WORKER, pendingIds: [63], lastActivityAt: T0 - 600_000 })]).effects,
+    ).toEqual([])
+    expect(
+      tick(other, T0 + rung, [facts({ name: WORKER, pendingIds: [63], lastActivityAt: T0 - 600_000 })]).effects.length,
+    ).toBe(1)
+    // And a register for a stranger with no episode returns the same state.
+    expect(notifier.observeEvent(before.state, registerOf('worker-z', T0), undefined)).toBe(before.state)
+  })
+
+  test('what the old occupant was told goes with the episode: blocking mail interrupts the new one at once', () => {
+    // Told about blocking mail [64], on its rungs; a same-tick re-decide
+    // would not re-fire (told-once, task 098's mirror).
+    const told = announceAll(notifier.initial(), T0, [facts({ name: WORKER, pendingIds: [64], hasBlocking: true })])
+    expect(told.effects.length).toBe(1)
+    expect(
+      tick(told.state, T0 + 1_000, [facts({ name: WORKER, pendingIds: [64], hasBlocking: true })]).effects,
+    ).toEqual([])
+    // A new occupant was told nothing — the human is still waiting, and the
+    // interrupt fires for it as if the mail had just arrived.
+    const s = notifier.observeEvent(told.state, registerOf(WORKER, T0 + 2_000), undefined)
+    expect(tick(s, T0 + 3_000, [facts({ name: WORKER, pendingIds: [64], hasBlocking: true })]).effects.length).toBe(1)
+  })
+})

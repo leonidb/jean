@@ -51,6 +51,30 @@
  * quiet clock from the act rather than by a rung measured from an
  * announcement the agent has since acted past.
  *
+ * ── AND SO DOES A NEW OCCUPANT (ruled, task 140) ──
+ *
+ * An episode belongs to a SESSION, not a name. A `register` event ends it
+ * the same way an act does — the whole entry goes — because the process that
+ * was told is gone and the one now listening was told nothing. The two
+ * resets move the clock in OPPOSITE directions, and neither direction is
+ * decided here: after an act the composer's `lastActivityAt` is now, so the
+ * first announcement waits the quiet interval; after a register it is
+ * absent, so it comes at once. Register is still not activity (H7): it does
+ * not earn a quiet interval, it forfeits the inherited one. Without this, a
+ * seat mid-ladder that restarts waits its predecessor's rung — up to the
+ * ladder's cap — with mail it has never heard of (ruled: a restart must
+ * start a new back-off clock).
+ *
+ * WHY THIS IS EVENT-DRIVEN and not a `dueAt` clause — the rejected
+ * alternative, because it looks right: "absent `lastActivityAt` while
+ * mid-ladder → immediate". A session that registered on a fresh process and
+ * has never acted is legitimately absent AND mid-ladder (told at once, now
+ * on its rungs); reading absence as "immediate" there re-fires every tick,
+ * which is the 241-announcements-an-hour defect D8 was built to end.
+ * Absence of activity says nothing about whether THIS occupant was told.
+ * Only the register event carries "new occupant", so the reset lives on the
+ * event. The conformance suite pins the guard as well as the rule.
+ *
  * ── DECIDE DOES NOT SUPPRESS ON AN IN-FLIGHT, AND THAT IS THE CHOICE ──
  *
  * Calling `decide` twice before reporting an outcome emits a second
@@ -89,7 +113,7 @@ import type {
   NotifierView,
   NotifyOutcome,
 } from '../contracts/notifier.ts'
-import type { AgentName, StoredEvent } from '../contracts/vocabulary.ts'
+import type { AgentName, RegisterData, StoredEvent } from '../contracts/vocabulary.ts'
 
 // ── State ────────────────────────────────────────────────────────
 
@@ -262,20 +286,29 @@ export const notifier: NotifierContract = {
     )
   },
 
-  observeEvent(state: NotifierState, _event: StoredEvent, actor: AgentName | undefined): NotifierState {
-    // Only the agent's OWN act resets — machine writes about an agent are not
-    // the agent acting (the agents contract's activity definition, and the
-    // reason this takes the actor rather than reading the event).
-    if (actor === undefined) return state
+  observeEvent(state: NotifierState, event: StoredEvent, actor: AgentName | undefined): NotifierState {
+    // AN EPISODE ENDS TWO WAYS: the occupant acts, or a new occupant takes
+    // the seat. Only the agent's OWN act is the first — machine writes about
+    // an agent are not the agent acting (the agents contract's activity
+    // definition, and the reason this takes the actor rather than reading
+    // the event). The second is the `register` event itself (ruled, task
+    // 140), read through the vocabulary's own shape: it names the seat, and
+    // it is the ONLY fact that says "new occupant" — see the header for why
+    // absence of activity cannot stand in for it.
+    const ended = actor ?? newOccupantOf(event)
+    if (ended === undefined) return state
     const current = episodes(state)
-    if (!current.has(actor)) return state
-    // THE WHOLE EPISODE GOES, not just the clock. The agent acted, so the next
-    // announcement is a FIRST announcement again — governed by the quiet clock
-    // from this act, not by a rung measured from an announcement it has since
-    // acted past. Dropping the entry rather than resetting its fields is the
-    // same thing said in one line, and leaves no field to forget.
+    if (!current.has(ended)) return state
+    // THE WHOLE EPISODE GOES, not just the clock — in both cases, and for the
+    // same reason: whatever was told before was told to someone who is no
+    // longer the one listening. The agent acted past it, or the process that
+    // heard it is gone. The next announcement is a FIRST announcement again;
+    // WHEN it comes is the agents-side fact's to say (the quiet clock from an
+    // act; at once for a session that has none). Dropping the entry rather
+    // than resetting its fields is the same thing said in one line, and
+    // leaves no field to forget.
     const next = new Map(current)
-    next.delete(actor)
+    next.delete(ended)
     return seal(next)
   },
 
@@ -306,4 +339,13 @@ export const notifier: NotifierContract = {
     // not have to.
     return { kind: 'greet', to: fact.name }
   },
+}
+
+/** The seat a `register` event fills, or nothing for any other event — and
+ *  nothing for a register too malformed to name one, which the agents fold
+ *  also folds to nothing. */
+function newOccupantOf(event: StoredEvent): AgentName | undefined {
+  if (event.type !== 'register') return undefined
+  const name = (event.data as Partial<RegisterData> | undefined)?.agent
+  return typeof name === 'string' && name.length > 0 ? name : undefined
 }

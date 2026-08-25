@@ -115,9 +115,14 @@ export type AgentNotifyFacts = {
   /** Does the mailbox hold blocking mail (a human is waiting)? From the
    *  mailbox's classification over the SAME facts the views use. */
   hasBlocking: boolean
-  /** Epoch ms of the agent's last own act; absent = never observed, which
-   *  reads MAXIMALLY QUIET (a fresh session with waiting mail is announced
-   *  at once — the ruled reconnect behaviour). */
+  /** Epoch ms of the agent's last own act IN ITS CURRENT SESSION; absent =
+   *  never observed, which reads MAXIMALLY QUIET (a fresh session with
+   *  waiting mail is announced at once — the ruled reconnect behaviour).
+   *  A NEW SESSION STARTS ABSENT (ruled, task 140): the composer drops the
+   *  seat's recorded act on register rather than handing the new session
+   *  its predecessor's clock. Registering is not an act (H7), and not
+   *  inheriting one is not acting either — an act moves this to NOW, a
+   *  register moves it to absent; the two reset in opposite directions. */
   lastActivityAt?: number
 }
 
@@ -307,7 +312,19 @@ export type NotifierContract = {
   /** An event arrived / an agent acted — the activity reset (P8 clause 3)
    *  and the new-arrival trigger, from the log the shell already appends.
    *  Activity is the agent's OWN act per the agents contract's definition;
-   *  the shell passes the acting agent, or none for machine writes. */
+   *  the shell passes the acting agent, or none for machine writes.
+   *
+   *  AN EPISODE BELONGS TO A SESSION, NOT A NAME (ruled, task 140). It ends
+   *  when the occupant acts — OR when a `register` event seats a new one:
+   *  the process that was told is gone, and the one listening was told
+   *  nothing, so the whole episode (ladder position and what was announced)
+   *  goes, read from the event itself. The direction the clock then moves
+   *  is the composer's fact, not this module's: `lastActivityAt` is now
+   *  after an act (told after the quiet interval) and absent after a
+   *  register (told at once). Register is not activity (H7): it earns no
+   *  quiet interval, it forfeits the inherited one. A register for a name
+   *  with no episode is a no-op; a register for one agent never touches
+   *  another's. */
   observeEvent: (state: NotifierState, event: StoredEvent, actor: AgentName | undefined) => NotifierState
 
   /** Pure. A seat has registered. Mints a greet ONLY for a self-directed
