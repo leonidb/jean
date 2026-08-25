@@ -206,6 +206,27 @@ export type AnnounceEffect = {
 // reconnect — the first greet is STILL PENDING, so mail waits, so nothing
 // is minted and the agent is told about the greet it already had. No agent
 // can ever hold two. This follows from P7 rather than sitting beside it.
+//
+// ── A SENSEI'S RESTING MAILBOX IS ONE, NOT ZERO ──
+//
+// The background invariant this mechanism changes, pinned because things
+// lean on it WITHOUT SAYING SO. A freshly-registered sensei holds its
+// unacked greet, so any code that assumes an empty orchestrator mailbox at
+// rest is now wrong — and will break for a reason unrelated to its own
+// subject. Three such walks were found when the greet landed and NOT ONE
+// was about emptiness: one asserted authorship, two asserted that a status
+// command could parse a shape. Each had encoded `0` incidentally.
+//
+// That is the hazard: the next reader who writes a fourth will not be
+// thinking about greets at all. If a count of the orchestrator's mailbox
+// surprises you, this is why — and the fix is to assert the thing the test
+// is actually about, never to special-case the greet away.
+//
+// The state is CORRECT, not a wart to be tidied. Mail sits until acked
+// (P7); an orchestrator that has not acked its greet has not started yet,
+// which is precisely the fact worth representing. Auto-clearing it would
+// make the greet a push wearing mail's clothes — the second push path this
+// design exists to avoid.
 
 /** The facts one registration decision consumes. `pendingIds` comes from
  *  `mailboxOf` — the ONE membership function (P2) — so "empty" here means
