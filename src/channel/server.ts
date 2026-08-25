@@ -732,14 +732,23 @@ let readinessTimer: ReturnType<typeof setTimeout> | null = null
  *  the register path, which is the only place that can tell anyone. */
 let degradedConnect = false
 
-// THE HOOK IS ARMED BEFORE THE TRANSPORT, and the order is the point (codex
-// round). `mcp.connect()` calls `transport.start()`, which begins reading
-// stdin — so a client whose `initialize` and `initialized` are already sitting
-// in the pipe can have both processed while `connect` is still awaiting. Arm
-// afterwards and `oninitialized` is unset at the moment it would fire: the
-// signal is lost, nothing calls `startInfraConnection('ready')`, and the
-// give-up timer becomes the only path — a thirty-second startup, reported as
-// degraded, on a client that did nothing wrong.
+// THE HOOK IS ARMED BEFORE THE TRANSPORT (codex round), and this ordering is
+// INSURANCE, NOT A FIX FOR A DEMONSTRATED DEFECT — said here and not only in
+// the walk, because this is the file someone opens to understand the order.
+//
+// The reasoning: `mcp.connect()` calls `transport.start()`, which begins
+// reading stdin, so a client whose `initialize` and `initialized` are already
+// in the pipe could in principle have both processed while `connect` is still
+// awaiting. Were that to happen with the hook unset, the signal would be lost,
+// nothing would call `startInfraConnection('ready')`, and the give-up timer
+// would become the only path — a thirty-second startup reported as degraded on
+// a client that did nothing wrong.
+//
+// THE RACE DID NOT REPRODUCE. A walk that pre-fills the child's stdin at spawn
+// stays green with the assignment moved back, and it says so in its own name.
+// The assignment stays first because arming a hook before the thing that can
+// fire it is free and removes the question — not because the failure above was
+// observed. Do not cite this comment as evidence that it was.
 //
 // `infraConnectStarted` cannot help there: it guards against running twice,
 // not against never running. Arming first costs nothing and removes the
