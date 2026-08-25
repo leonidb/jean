@@ -94,6 +94,12 @@ export async function runHeadless(
   trigger: HeadlessTriggerFacts,
   config: HeadlessConfig,
   ports: HeadlessPorts,
+  /** THE BOOT CATCH-UP'S KILL SWITCH (task 131). Carried only by the run
+   *  `stop` may find in flight — readiness no longer waits for the catch-up,
+   *  so a stop can land mid-run, and an orphan that keeps stepping calls
+   *  `record` into a store the caller has already drained. Absent on an
+   *  ordinary cron firing, which `stop` has no claim on. */
+  signal?: AbortSignal,
 ): Promise<void> {
   const planned = headless.planRun(trigger, ports.now(), config)
   if (!planned.ok) {
@@ -107,6 +113,12 @@ export async function runHeadless(
   let effects = [...planned.effects]
 
   const took = async (record: HeadlessCompletedData | undefined): Promise<void> => {
+    // KILLED MEANS SILENT. The abort can land while a spawn is awaited, and
+    // the step that resolves after it must not write — the store its
+    // `record` reaches has been drained by the `stop` that aborted us. That
+    // is the write-after-drain class, and it is the reason the handle exists
+    // at all rather than the run simply being abandoned.
+    if (signal?.aborted === true) return
     if (record !== undefined) await ports.record(record)
   }
 
@@ -115,6 +127,10 @@ export async function runHeadless(
   // but a decision that ever returned its own effect list unchanged would
   // otherwise spin forever inside a process nobody is watching.
   for (let steps = 0; steps < 64 && effects.length > 0; steps++) {
+    // AND THE WALK STOPS AT THE NEXT STEP BOUNDARY. It does not kill a live
+    // subprocess — that is the spawn port's `timeoutMs` — it stops this run
+    // from taking another step on behalf of an instance that is gone.
+    if (signal?.aborted === true) return
     const [head, ...rest] = effects
     if (head === undefined) break
 

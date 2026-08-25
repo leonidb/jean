@@ -1290,7 +1290,7 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
    *  target, the mailbox holds it, the notifier announces it. That is why
    *  there is no second event here and no push: a firing that also pushed
    *  would tell the agent twice and record it once. */
-  async function fireTrigger(trigger: Trigger, opts?: { awaitRun?: boolean }): Promise<void> {
+  async function fireTrigger(trigger: Trigger, opts?: { awaitRun?: boolean; signal?: AbortSignal }): Promise<void> {
     await record('trigger-fired', TRIGGERS_STREAM, triggers.fireData(trigger))
     if (trigger.kind !== 'headless') return
     const run = ports.runHeadless(
@@ -1304,6 +1304,11 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
       },
       headlessConfig,
       record,
+      // ONLY THE BOOT CATCH-UP CARRIES ONE. An ordinary cron firing outlives
+      // nothing in particular and `stop` has no claim on it; the catch-up is
+      // the run that can still be in flight when `stop` is called, because it
+      // is the one readiness stopped waiting for.
+      opts?.signal,
     )
     // THE FIRING IS THE EVENT; THE RUN IS A PROCESS — normally detached,
     // because a consolidation is half an hour and the trigger that started
@@ -1647,7 +1652,27 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
   try {
     await reconcilePlaybooks()
     watchPlaybooks()
-    await scheduler.catchUpOnBoot()
+    // NOT AWAITED — the whole of task 131 (ruled 2026-08-25: readiness must
+    // not wait for the headless run). This line used to be `await`ed, so
+    // READINESS — every runtime file below, both attention clocks, the
+    // bridge, peer attach and the registry upsert — waited on a headless
+    // spawn. On
+    // 2026-08-24 that was seven minutes with the dojo live and doorless, its
+    // own errors pointing in a circle: `agent start` said "start infra
+    // first", `infra start` said "already running".
+    //
+    // The catch-up still runs, still serialized, still fires the whole
+    // overdue backlog. What changed is who waits for it: nobody. Its promise
+    // is held by the scheduler so `stop` can kill it — see `Scheduler.stop`,
+    // and note this is a kill and not a drain, because a stop that waited out
+    // a consolidation is the same hostage-taking at the other end.
+    //
+    // A rejection here would otherwise be an unhandled rejection on a path
+    // nobody awaits, so it is said out loud instead — the loud direction this
+    // file takes everywhere else.
+    void scheduler.catchUpOnBoot().catch((err: unknown) => {
+      ports.log(`[jean:new] boot catch-up failed: ${String(err)}\n`)
+    })
     scheduler.sync()
     if (options.startTimers === true) attention.start()
   } catch (err) {
@@ -1915,7 +1940,7 @@ if (import.meta.main) {
         // THE SPAWN SUBSYSTEM, and only in production: a run is processes
         // and files, so a suite gets the default no-op and drives the walk
         // against stubs instead.
-        runHeadless: (trigger, headlessConfig, record) =>
+        runHeadless: (trigger, headlessConfig, record, signal) =>
           runHeadless(
             trigger,
             headlessConfig,
@@ -1926,6 +1951,7 @@ if (import.meta.main) {
               record: (data) => record('headless-completed', TRIGGERS_STREAM, data),
               recordConsolidated: (data) => record('wiki-consolidated', SYSTEM_STREAM, data),
             }),
+            signal,
           ),
       },
     })

@@ -57,7 +57,10 @@ export type SchedulePorts = {
   /** Append the firing. The delivery half is the ordinary mail path — a
    *  firing resolves to its target and the notifier announces it — so this
    *  writes ONE event and nothing else. */
-  fire: (trigger: Trigger, opts?: { awaitRun?: boolean }) => Promise<void>
+  /** `signal` is the boot catch-up's kill switch, carried through to the
+   *  spawn (task 131). Absent on every other firing path — an ordinary cron
+   *  fire is not the boot backlog and `stop` has no claim on it. */
+  fire: (trigger: Trigger, opts?: { awaitRun?: boolean; signal?: AbortSignal }) => Promise<void>
   /** The job table's implementation. Injectable so a test can drive the
    *  scheduler without waiting for a real cron instant. */
   schedule?: (id: string, spec: { cron: string } | { at: string }, run: () => void) => void
@@ -227,13 +230,28 @@ export function createScheduler(ports: SchedulePorts): Scheduler {
     }
   }
 
+  /** THE HANDLE, and it is the whole difference between backgrounding the
+   *  catch-up and abandoning it (task 131). Nobody awaits `catchUpOnBoot` on
+   *  the boot path any more, so `stop` can be called with a spawn live — and
+   *  a run that outlives its instance calls `record` into a store the caller
+   *  has already drained, and races the next boot's catch-up over the same
+   *  log, because `enforceSingleInstance` probes the PORT and a stop frees
+   *  it. Killing closes both; you cannot kill what you did not keep. */
+  let catchUp: AbortController | undefined
+
   async function catchUpOnBoot(): Promise<void> {
     const now = ports.now()
+    catchUp = new AbortController()
+    const signal = catchUp.signal
     for (const trigger of triggers.all(ports.triggersState())) {
       // ── R9 ── The active-status filter is the CALLER'S, because
       // `shouldCatchUp` deliberately omits it. Delete this line and disabled
       // triggers make up their missed runs on every boot, with nothing
       // failing anywhere.
+      // KILLED MID-BACKLOG STOPS THE BACKLOG. The loop is sequential, so a
+      // stop during trigger three must not go on to fire four and five into
+      // a store that is being drained.
+      if (signal.aborted) return
       if (trigger.status !== 'active') continue
       if (!triggers.shouldCatchUp(trigger, now, previousScheduledRun)) continue
       ports.log(`[jean:new] trigger ${trigger.id} catch-up fire on startup (last fired ${trigger.lastFiredAt})\n`)
@@ -246,7 +264,7 @@ export function createScheduler(ports: SchedulePorts): Scheduler {
         // the normal case after a laptop was shut, and a headless firing
         // detaches a process. Launching them in parallel is a stampede on
         // one machine (codex pass, task 114).
-        await ports.fire(trigger, { awaitRun: true })
+        await ports.fire(trigger, { awaitRun: true, signal })
       } finally {
         firing.delete(trigger.id)
       }
@@ -257,6 +275,12 @@ export function createScheduler(ports: SchedulePorts): Scheduler {
     sync,
     catchUpOnBoot,
     stop() {
+      // KILLS, DOES NOT DRAIN (ruled — see the contract). Awaiting the run
+      // here would make `jean infra stop` wait out a consolidation, which is
+      // the reported problem at the other end of the lifecycle: the ruling
+      // names BOTH ends, so answering only start would be answering half.
+      catchUp?.abort()
+      catchUp = undefined
       for (const id of [...scheduled]) unschedule(id)
       scheduled.clear()
       for (const job of jobs.values()) job.stop()
