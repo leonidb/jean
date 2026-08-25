@@ -153,9 +153,21 @@ describe('the kill switch (task 131)', () => {
     //
     // The spawn port is where a signal can actually kill a process, so the
     // spec is what must carry it. Asserted on the spec rather than on a real
-    // process because this suite drives stubs — the production hop is
-    // `hosting.ts` passing `spec.signal` to `spawnHeadless`, which kills on
-    // `abort` beside its own timeout.
+    // process because this suite drives stubs.
+    //
+    // AND THIS WALK COVERS ONE HOP OF THREE — said precisely, because the
+    // sentence that used to stand here did not. It read "the production hop
+    // is `hosting.ts` passing `spec.signal` to `spawnHeadless`", stated as
+    // background, and `hosting.ts` contained no such line: the sentence
+    // surveyed a gap and made it look closed. A comment that describes code
+    // which is not there is worse than no comment, because it stops the next
+    // reader looking.
+    //
+    // The three hops, each held by its own walk now: this one (the spec
+    // carries it), `hosting.test.ts`'s seam walk (the port forwards it to the
+    // spawner), and `librarian.test.ts`'s kill walk (the spawner acts on it).
+    // Only the third touches a process, and the first two are what make the
+    // third reachable.
     const controller = new AbortController()
     const { ports, trace } = stub({})
     await runHeadless(nightly, CONFIG, ports, controller.signal)
