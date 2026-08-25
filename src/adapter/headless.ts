@@ -68,6 +68,8 @@ export type HeadlessPorts = {
     streamSinkPath: string
     timeoutMs: number
     phaseTag?: 'draft' | 'review'
+    /** The caller's kill switch, carried to the subprocess (task 131). */
+    signal?: AbortSignal
   }) => Promise<AttemptOutcome>
   /** The pre-flight reachability check. */
   probe: () => Promise<ProbeOutcome>
@@ -161,6 +163,9 @@ export async function runHeadless(
     if (head.kind === 'spawn') {
       const outcome = await ports.spawn({
         ...head.spec,
+        // CARRIED TO THE PROCESS, not just to this walk. Returning early
+        // after an abort stops the bookkeeping; only this stops the writer.
+        ...(signal !== undefined && { signal }),
         // The phase's own instructions, substituted by tag — see the header.
         prompt: PHASE_PROMPTS[head.spec.phaseTag ?? 'none'] ?? head.spec.prompt,
       })
@@ -179,6 +184,16 @@ export async function runHeadless(
     }
 
     if (head.kind === 'commit') {
+      // CODEX RAISED THIS AS UNGUARDED — it is the one effect that writes
+      // without going through `took`, appending `wiki-consolidated` through
+      // its own port. It does not need a guard, and the compiler is the
+      // proof: adding `if (signal?.aborted === true) return` here is a
+      // comparison TypeScript rejects as impossible, because the loop-top
+      // check has already narrowed `aborted` to false for this iteration.
+      // An abort landing during the PREVIOUS step's await is caught at the
+      // top of THIS one, and there is no await between that check and this
+      // call. An abort landing during `commit` itself is the drain's to
+      // handle, and `stop` aborts before it awaits `drain()`.
       try {
         await ports.commit()
       } catch (err) {

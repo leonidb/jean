@@ -23,6 +23,9 @@ import { createStore, jsonlBackend } from '../es/index.ts'
 import type { AgentRole } from './protocol.ts'
 
 export type SpawnHeadlessOpts = {
+  /** Kill this process when the caller gives up on it (task 131) — distinct
+   *  from `timeoutMs`, which bounds a run nobody is cancelling. */
+  signal?: AbortSignal
   /** The dojo root containing `.jean/`. */
   dojoRoot: string
   /** Which role's permissions/skills directory to use as the working dir. */
@@ -326,12 +329,23 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnHeadl
     proc.kill()
   }, timeoutMs)
 
+  // AND THE CALLER'S KILL SWITCH (task 131). The timeout is a give-up bound
+  // for a run nobody is cancelling; this is for the run whose INSTANCE has
+  // gone. `stop()` frees the port, so a subprocess that outlives it keeps
+  // mutating `.jean/.consolidator` while the next `jean infra start`
+  // succeeds — one dojo, two consolidators, same files. Aborting the walk
+  // without killing the process stops the bookkeeping and not the writer.
+  const onAbort = () => proc.kill()
+  opts.signal?.addEventListener('abort', onAbort, { once: true })
+  if (opts.signal?.aborted === true) proc.kill()
+
   const stdoutP = streaming
     ? teeStreamToFile(proc.stdout, resolve(opts.dojoRoot, opts.streamSinkPath as string))
     : new Response(proc.stdout).text()
 
   const [exitCode, stdout, stderr] = await Promise.all([proc.exited, stdoutP, new Response(proc.stderr).text()])
   clearTimeout(timer)
+  opts.signal?.removeEventListener('abort', onAbort)
 
   let parsed: HeadlessParsed | undefined
   if (exitCode === 0) {

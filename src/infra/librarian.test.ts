@@ -356,13 +356,12 @@ describe('parseHeadlessStreamJson', () => {
   })
 
   test('skips malformed trailing lines and finds the result line above them', () => {
-    const stream =
-      JSON.stringify({
-        type: 'result',
-        subtype: 'success',
-        session_id: 'abc',
-        total_cost_usd: 0.01,
-      }) + '\n{ truncated half-line'
+    const stream = `${JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      session_id: 'abc',
+      total_cost_usd: 0.01,
+    })}\n{ truncated half-line`
     const parsed = parseHeadlessStreamJson(stream)
     expect(parsed?.sessionId).toBe('abc')
     expect(parsed?.costUsd).toBe(0.01)
@@ -426,6 +425,38 @@ describe('spawnHeadless', () => {
     })
     expect(result.timedOut).toBe(true)
     expect(result.durationMs).toBeLessThan(2000)
+  })
+
+  test("an aborted signal kills the process — the caller's switch, not the bound (task 131)", async () => {
+    // TWO DIFFERENT QUESTIONS, and only one of them had an answer here. The
+    // timeout above gives up on a run nobody is cancelling. This ends a run
+    // whose INSTANCE is gone: readiness no longer waits for the boot
+    // catch-up, so `stop()` can land mid-spawn, and it frees the port — the
+    // next `jean infra start` then succeeds while this subprocess is still
+    // mutating `.jean/.consolidator`. One dojo, two consolidators, the same
+    // files.
+    //
+    // Found by codex: the abort reached the WALK and stopped its
+    // bookkeeping, and never reached the process. Killing the accounting is
+    // not killing the writer.
+    const stub = writeScript(resolve(TMP, 'aborter.sh'), 'sleep 10')
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 100)
+    const started = Date.now()
+    const result = await spawnHeadless({
+      dojoRoot: TMP,
+      role: 'librarian',
+      prompt: 'unused',
+      binary: stub,
+      // A bound far beyond the abort, so a pass cannot be the timeout's doing.
+      timeoutMs: 30_000,
+      signal: controller.signal,
+    })
+    expect(Date.now() - started, 'the abort did not kill the process').toBeLessThan(5_000)
+    // NOT `timedOut` — that flag is the bound's, and a kill by the caller is
+    // a different event. Reading it as a timeout would make the log say the
+    // run was slow when it was cancelled.
+    expect(result.timedOut, 'a caller-killed run reported itself as timed out').toBe(false)
   })
 
   test('non-zero exit code is captured', async () => {

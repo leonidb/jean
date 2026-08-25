@@ -28,7 +28,7 @@ const CONFIG: HeadlessConfig = {
 
 type Trace = {
   records: HeadlessCompletedData[]
-  spawns: { role: string; prompt: string; model?: string; timeoutMs: number; phaseTag?: string }[]
+  spawns: { role: string; prompt: string; model?: string; timeoutMs: number; phaseTag?: string; signal?: AbortSignal }[]
   waits: number[]
   did: string[]
 }
@@ -60,6 +60,11 @@ function stub(script: {
           ...(spec.model !== undefined && { model: spec.model }),
           timeoutMs: spec.timeoutMs,
           ...(spec.phaseTag !== undefined && { phaseTag: spec.phaseTag }),
+          // RECORDED, because the kill switch reaching the spec is the only
+          // thing standing between "the walk stopped" and "the process
+          // stopped" — and the stub dropping it silently is how that
+          // distinction stayed unheld (codex round).
+          ...(spec.signal !== undefined && { signal: spec.signal }),
         })
         trace.did.push('spawn')
         return (
@@ -136,6 +141,25 @@ describe('the kill switch (task 131)', () => {
     await runHeadless(nightly, CONFIG, ports, controller.signal)
     expect(trace.did, 'the spawn should still have happened — it was in flight').toEqual(['spawn'])
     expect(trace.records, 'a run aborted mid-spawn recorded anyway').toEqual([])
+  })
+
+  test('THE SIGNAL REACHES THE SUBPROCESS — killing the walk is not killing the run', async () => {
+    // CODEX'S FINDING, and the sharpest of the round: the abort stopped the
+    // bookkeeping and not the writer. `stop()` frees the port, so the next
+    // `jean infra start` succeeds while the old subprocess is still mutating
+    // `.jean/.consolidator` — one dojo, two consolidators, the same files.
+    // That is the exact race the contract cites as the REASON the handle
+    // exists, and the implementation did not close it.
+    //
+    // The spawn port is where a signal can actually kill a process, so the
+    // spec is what must carry it. Asserted on the spec rather than on a real
+    // process because this suite drives stubs — the production hop is
+    // `hosting.ts` passing `spec.signal` to `spawnHeadless`, which kills on
+    // `abort` beside its own timeout.
+    const controller = new AbortController()
+    const { ports, trace } = stub({})
+    await runHeadless(nightly, CONFIG, ports, controller.signal)
+    expect(trace.spawns[0]?.signal, 'the spawn spec did not carry the kill switch').toBe(controller.signal)
   })
 
   test('and it stops STEPPING, not just recording — the walk ends where the abort found it', async () => {
