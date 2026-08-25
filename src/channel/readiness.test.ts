@@ -74,17 +74,21 @@ function dojo(port: number) {
  * SPAWNING THE PLUGIN IS SPAWNING SOMETHING THAT WILL FIND A DOJO ON ITS OWN,
  * and this harness learned that the expensive way (2026-08-25).
  *
- * `sessionDir()` is `process.env.CLAUDE_PROJECT_DIR || process.cwd()`
- * (`server.ts:40`), and `discoverDojoRoot()` walks up from it — so
- * `CLAUDE_PROJECT_DIR` OUTRANKS `cwd`. A first version of this file passed
- * `...process.env` through and set `cwd` to a temp dojo. The inherited
- * `CLAUDE_PROJECT_DIR` pointed at the real worktree, the plugin resolved the
- * REAL dojo, read its real `infra.port`, and registered a phantom agent
- * against LIVE infra four times. The temp dojo was never consulted, nothing
- * errored, and the only signal was a grep of the live event log.
+ * `discoverDojoRoot()` checks `process.env.JEAN_DOJO` FIRST (`server.ts:85`)
+ * and only falls back to walking up from `sessionDir()`. A first version of
+ * this file passed `...process.env` through and set `cwd` to a temp dojo —
+ * and **an agent session exports `JEAN_DOJO` pointing at its own dojo**, so
+ * the inherited value won outright. The plugin resolved the REAL dojo, read
+ * its real `infra.port`, and registered a phantom agent against LIVE infra.
+ * The temp dojo was never consulted, nothing errored, and the only signal was
+ * a grep of the live event log.
  *
- * So: `CLAUDE_PROJECT_DIR` is stripped and `JEAN_DOJO` is pinned. Belt and
- * braces, and neither is the real protection — `expectIsolated` below is.
+ * WORTH THE PRECISION, because the first diagnosis of this was wrong and was
+ * reported confidently: the culprit is `JEAN_DOJO`, not `CLAUDE_PROJECT_DIR`.
+ * That variable is unset in an agent session and never mattered here. It is
+ * still cleared below because `sessionDir()` does consult it and a different
+ * caller may set it — but the fix that works is pinning `JEAN_DOJO`, and
+ * saying otherwise would leave the next reader guarding the wrong door.
  */
 function launch(root: string, env: Record<string, string> = {}) {
   const inherited = { ...process.env }
@@ -92,16 +96,42 @@ function launch(root: string, env: Record<string, string> = {}) {
   // empty string is falsy — but `undefined` is the honest state and reads as
   // one rather than as a value chosen to exploit coercion.
   inherited.CLAUDE_PROJECT_DIR = undefined
+
+  // PRE-FLIGHT, AND THIS IS THE GUARD THAT MATTERS — checked BEFORE the
+  // process exists, because a check afterwards is too late by exactly one
+  // connection.
+  //
+  // `expectIsolated` below reads the plugin's stderr and fails loudly if it
+  // reached the wrong dojo. That is worth having and it is NOT prevention: it
+  // runs after a socket has already opened. Proven the hard way — verifying
+  // that guard meant reintroducing the leak, and the leaked run registered
+  // against LIVE infra three times before the assertion failed. A guard whose
+  // own verification causes the harm it detects is the wrong shape.
+  //
+  // So the env is asserted here, where a bad value costs nothing: no
+  // `CLAUDE_PROJECT_DIR` (it outranks `cwd` in `sessionDir()`), and
+  // `JEAN_DOJO` pinned to this walk's temp root. A leak now fails before any
+  // process is spawned, which is the only place a failure is free.
+  const finalEnv: Record<string, string | undefined> = {
+    ...inherited,
+    JEAN_DOJO: root,
+    JEAN_AGENT: 'worker-p',
+    JEAN_ROLE: 'worker',
+    JEAN_AGENT_DIR: resolve(root, '.jean'),
+    ...env,
+  }
+  expect(
+    finalEnv.JEAN_DOJO,
+    'JEAN_DOJO must pin the temp dojo — an inherited one wins outright and IS how this reached live infra',
+  ).toBe(root)
+  expect(
+    finalEnv.CLAUDE_PROJECT_DIR,
+    'CLAUDE_PROJECT_DIR would reach the child and outrank cwd in sessionDir()',
+  ).toBeUndefined()
+
   const proc = Bun.spawn(['bun', 'run', PLUGIN], {
     cwd: root,
-    env: {
-      ...inherited,
-      JEAN_DOJO: root,
-      JEAN_AGENT: 'worker-p',
-      JEAN_ROLE: 'worker',
-      JEAN_AGENT_DIR: resolve(root, '.jean'),
-      ...env,
-    },
+    env: finalEnv as Record<string, string>,
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
