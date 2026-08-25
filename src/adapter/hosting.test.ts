@@ -448,6 +448,71 @@ describe('the launcher’s ordering', () => {
     rmSync(dir, { recursive: true, force: true })
   }, 20_000)
 
+  test('STOP KILLS THE BACKLOG — the other half of the ruling, which nothing held (task 131)', async () => {
+    // THE WALK ABOVE PASSES WITHOUT ANY ABORT AT ALL, and that is why this
+    // one exists. Its "stop is not hostage either" half asserts that `stop()`
+    // RETURNS — and `stop()` returns promptly whether or not it kills
+    // anything, because nothing awaits the run any more. Measured on the
+    // commit that introduced the abort: removing `catchUp.abort()` from
+    // `Scheduler.stop`, removing the loop's `signal.aborted` check, and
+    // removing the guard before `record` each left the adapter suite at
+    // 156 pass / 0 fail. The ruling is "fire-and-forget on start, KILL on
+    // stop"; only the first half was held.
+    //
+    // The observable that cannot pass vacuously: the catch-up is SEQUENTIAL,
+    // so with two overdue triggers a kill during the first must mean the
+    // second never runs. A stop that merely returns leaves the loop walking.
+    const dir = mkdtempSync(resolve(tmpdir(), 'jean-131-kill-'))
+    mkdirSync(resolve(dir, '.jean'), { recursive: true })
+    const longAgo = new Date(Date.now() - 3 * 86_400_000).toISOString()
+    const cron = (id: string) => [
+      {
+        id: 0,
+        ts: longAgo,
+        type: 'trigger-created',
+        stream: 'triggers',
+        data: { id, cron: '0 3 * * *', agent: 'librarian', prompt: 'run', actor: 'init', kind: 'headless' },
+      },
+      {
+        id: 0,
+        ts: longAgo,
+        type: 'trigger-fired',
+        stream: 'triggers',
+        data: { triggerId: id, agent: 'librarian', prompt: 'run', kind: 'headless' },
+      },
+    ]
+    const history = [...cron('nightly-a'), ...cron('nightly-b')].map((e, i) => ({ ...e, id: i + 1 }))
+    writeFileSync(resolve(dir, '.jean', 'history.jsonl'), `${history.map((e) => JSON.stringify(e)).join('\n')}\n`)
+
+    const started: string[] = []
+    let releaseFirst: (() => void) | undefined
+    const server = await createAdapterServer({
+      dataDir: resolve(dir, '.jean'),
+      ports: {
+        // The first run hangs until this walk lets it go; the second must
+        // never be reached at all.
+        runHeadless: (trigger) => {
+          started.push(trigger.id)
+          return new Promise<void>((done) => {
+            releaseFirst = done
+          })
+        },
+      },
+    })
+
+    for (let i = 0; i < 100 && started.length === 0; i++) await Bun.sleep(20)
+    expect(started.length, 'the catch-up never started, so this would prove nothing').toBe(1)
+
+    await server.stop()
+    releaseFirst?.()
+    // Generous, and one-directional: the failure this catches is the loop
+    // CONTINUING, and continuing takes no longer than not continuing.
+    await Bun.sleep(300)
+
+    expect(started, 'the killed backlog went on to the next overdue trigger').toEqual(['nightly-a'])
+    rmSync(dir, { recursive: true, force: true })
+  }, 20_000)
+
   test('the peer registry is read ONCE — enrichment and delivery cannot disagree', async () => {
     // `jean peer add` requires a stop and start; the registry is static
     // until then. A per-send re-read let the enrichment see a peer that

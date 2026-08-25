@@ -107,6 +107,47 @@ const pipeline = {
   retries: 1,
 }
 
+describe('the kill switch (task 131)', () => {
+  test('AN ABORTED RUN WRITES NOTHING — the guard that stops a write-after-drain', async () => {
+    // WHY IT EXISTS AT ALL. Readiness no longer awaits the boot catch-up, so
+    // `stop()` can land while a spawn is live. An orphan that goes on
+    // stepping calls `record` into a store the caller has already drained —
+    // and `stop` aborts BEFORE it awaits `drain()`, so a record started after
+    // the abort is a write nobody is waiting for into a file nobody is
+    // holding open.
+    //
+    // MEASURED as unheld before this walk: deleting the `signal?.aborted`
+    // guard from `took()` left the whole adapter suite green. The contract
+    // took an `AbortSignal` and nothing honoured it — a signature satisfied
+    // in type and not in behaviour.
+    // ABORTED *DURING* THE SPAWN, which is the only case that reaches the
+    // guard. An already-aborted signal is caught by the step-loop check one
+    // level up and never gets here — my first draft did exactly that and
+    // passed while the guard was deleted. The real scenario is the contract's
+    // own words: "the abort can land while a spawn is awaited", so the step
+    // that resolves afterwards is the one that must decline to write.
+    const controller = new AbortController()
+    const { ports, trace } = stub({
+      spawn: () => {
+        controller.abort()
+        return { kind: 'ran', exitCode: 0, durationMs: 5, timedOut: false }
+      },
+    })
+    await runHeadless(nightly, CONFIG, ports, controller.signal)
+    expect(trace.did, 'the spawn should still have happened — it was in flight').toEqual(['spawn'])
+    expect(trace.records, 'a run aborted mid-spawn recorded anyway').toEqual([])
+  })
+
+  test('and it stops STEPPING, not just recording — the walk ends where the abort found it', async () => {
+    // The other half: a run killed mid-walk must not go on performing
+    // effects. A retrying run is the one with steps left after its first
+    // spawn, so it is the one that shows the difference.
+    const { ports, trace } = stub({ spawn: () => ({ kind: 'ran', exitCode: 1, durationMs: 5, timedOut: false }) })
+    await runHeadless({ ...pipeline, retries: 2 }, CONFIG, ports, AbortSignal.abort())
+    expect(trace.did, 'an aborted run took a step').toEqual([])
+  })
+})
+
 describe('the single-phase run', () => {
   test('one spawn, one record, and the decision’s bound reaches the spawner', async () => {
     const { ports, trace } = stub({})
