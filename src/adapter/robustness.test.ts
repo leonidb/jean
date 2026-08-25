@@ -254,32 +254,104 @@ describe('a surface joins through the same door as a socket', () => {
   })
 })
 
+/**
+ * ── THE PREMISE IS ASSERTED, NOT ASSUMED (task 134) ──
+ *
+ * This walk holds R13's loud-failure property at the adapter: an emission
+ * that cannot be appended is SAID, not swallowed. For eleven days it held it
+ * about half the time, and the other half it asserted the property against a
+ * setup that had never produced an emission to lose.
+ *
+ * The chain it depends on is: tick → decide → announce → `emit` → append →
+ * append fails → the catch says so. It asserted the last link and assumed the
+ * first, and the first is the one that broke. Two races, both fixed here and
+ * both worth naming because they are different mistakes:
+ *
+ * RACE ONE, the cause of ~45% (measured 18/20 on one run of twenty). The
+ * `/send` has ALREADY announced by the time its POST returns — the arrival
+ * hook runs the notifier on every live append, which is the design and not an
+ * accident. So the episode is discharged and the next repeat is due a rung
+ * later; the rung here is 1ms, and `Date.now()` cannot see inside a
+ * millisecond. A `chmod` and a `tick()` on the next two lines land in the
+ * SAME millisecond as that discharge, `decide` correctly withholds, and there
+ * is no emission, no append, no rejection and nothing to log. The poll then
+ * spends its whole budget waiting for an event that was never coming.
+ *
+ * RACE TWO, quieter, ~1 in 20. The arrival hook's own `nudge` append is
+ * fire-and-forget (`void record(...)`), so it can still be in flight when the
+ * `chmod` lands, and which side of the permission change it falls on is
+ * undetermined. Not the cause of the failures above — every one of those
+ * decided nothing at all — but a walk that raced its own fixture would have
+ * kept flaking after the first race was fixed, inside a test everyone had
+ * been told was repaired.
+ *
+ * AND THE BUDGET IS NOT THE FIX, which is the part worth carrying away. It
+ * was raised twice, because the visible symptom was a poll
+ * running out — and a poll that runs out points at the poll. Swept across a
+ * 10x range on the code as it stands, the failure rate does not move: 1s
+ * 10/20, 3s 11/20, 10s 7/20. A 2ms advance with the budget untouched gives
+ * 0/20. Do not raise it a third time.
+ */
 describe('an emission that cannot be appended', () => {
   test('is said out loud rather than lost in silence', async () => {
     const dir = mkdtempSync(resolve(tmpdir(), 'jean-e3-emit-'))
     openDirs.push(dir)
     const lines: string[] = []
+    // COUNTED, because it is the only observation that distinguishes "the
+    // property is broken" from "the setup produced nothing" — and without it
+    // those two produce an identical red, on a walk whose whole subject is a
+    // failure that must not be silent.
+    let announced = 0
     const server = await createAdapterServer({
       dataDir: dir,
       attention: { notifier: { nudgeIntervalMs: 1, backoffMs: [1] }, notifyTickMs: 20, superviseTickMs: 20 },
       ports: { log: (line) => lines.push(line) },
     })
     openServers.push(server)
-    server.attachSurface({ name: 'worker-a', role: 'worker', deliver: () => true })
+    server.attachSurface({
+      name: 'worker-a',
+      role: 'worker',
+      deliver: () => {
+        announced++
+        return true
+      },
+    })
+    const log = resolve(dir, 'history.jsonl')
+    const lineCount = async () => (await Bun.file(log).text()).split('\n').filter(Boolean).length
+
     await post(server, '/send', { from: 'orchestrator-o', to: 'worker-a', text: 'hello' })
 
-    chmodSync(resolve(dir, 'history.jsonl'), 0o444)
+    // RACE TWO CLOSED: wait for the announcement the POST already triggered to
+    // be fully written, so the `chmod` cannot land mid-append. Polled on the
+    // log's own length rather than slept for — the append is asynchronous and
+    // a fixed wait is the race in a different costume.
+    const settled = await lineCount()
+    for (let i = 0; i < 120 && (await lineCount()) === settled; i++) {
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    const before = announced
+
+    chmodSync(log, 0o444)
+
+    // RACE ONE CLOSED: past the 1ms rung, so the tick below has something to
+    // decide. Slept for deliberately, and it is the one shape of sleep this
+    // repo trusts — the property is "the rung has elapsed", and load can only
+    // ever make it MORE true.
+    await new Promise((r) => setTimeout(r, 2))
     server.tick()
+
+    // THE PREMISE, ASSERTED. If this fails the walk below proves nothing, and
+    // it should say which of the two it is rather than making a reader guess.
+    expect(announced, 'no announcement was decided — the premise failed, not the property').toBeGreaterThan(before)
+
     // POLLED, not slept for: the append is asynchronous and its rejection
-    // lands a microtask later, so a fixed wait is a race that passes on a
-    // quiet machine and fails on a loaded one (measured — this test flaked
-    // once at 60ms while another suite was running).
-    // Three seconds, not one: the first budget was 1s and a loaded suite
-    // clipped it at 1028ms. A marginal wait is a flake waiting to happen.
+    // lands a microtask later. Three seconds is generous rather than
+    // marginal — and, per the header, generosity was never what this walk
+    // was short of.
     for (let i = 0; i < 120 && !lines.join('').includes('LOST EMISSION'); i++) {
       await new Promise((r) => setTimeout(r, 25))
     }
-    chmodSync(resolve(dir, 'history.jsonl'), 0o644)
+    chmodSync(log, 0o644)
 
     // Both units advance their state as they DECIDE, so an append that fails
     // here is an emission the unit believes it made. The notifier can be told
