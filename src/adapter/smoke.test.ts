@@ -103,8 +103,15 @@ describe('E1 smoke — the round trip over a real socket', () => {
     expect(typeof fetched.events[0]?.code).toBe('string')
 
     // And nobody else's: the orchestrator authored it, so it is not its mail.
-    const senseiBox = (await get('/events?agent=orchestrator-o')) as unknown as { events: unknown[] }
-    expect(senseiBox.events.length).toBe(0)
+    // ASSERTED ON THE SEND, not on emptiness (task 133): a sensei registering
+    // with an empty mailbox is now greeted, so "the orchestrator's box is
+    // empty" stopped being an incidental truth this walk could lean on. What
+    // it is actually about is that the send it authored did not come back to
+    // it, and that is what it now says.
+    const senseiBox = (await get('/events?agent=orchestrator-o')) as unknown as {
+      events: { type: string }[]
+    }
+    expect(senseiBox.events.filter((e) => e.type === 'send')).toEqual([])
 
     // ACK: the code from the fetch clears the pair, and only that pair.
     const first = fetched.events[0]

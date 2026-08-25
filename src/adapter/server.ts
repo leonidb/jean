@@ -63,6 +63,7 @@ import {
 } from '../domain/contracts/vocabulary.ts'
 import { headless } from '../domain/headless/index.ts'
 import { mailbox } from '../domain/mailbox/index.ts'
+import { notifier } from '../domain/notifier/index.ts'
 import { playbooks } from '../domain/playbooks/index.ts'
 import { resolution } from '../domain/resolution/index.ts'
 import { routing } from '../domain/routing/index.ts'
@@ -1127,6 +1128,41 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     })
   }
 
+  /**
+   * THE GREET, MINTED AT REGISTRATION (task 133).
+   *
+   * ── AFTER THE REGISTER RECORD, NOT BESIDE IT ──
+   *
+   * The mailbox read must see the world the registration created. Minting
+   * before the append would test a mailbox that does not yet know this agent
+   * exists, and the whole mechanism is that one read: mail waiting means no
+   * greet, and an empty mailbox means one.
+   *
+   * ── AND THE DECISION IS THE DOMAIN'S ──
+   *
+   * This composes the fact and performs the effect; which seats qualify and
+   * what an empty mailbox implies are `greetOnRegistration`'s, pinned in its
+   * conformance. The shell must not learn the role table — that is how two
+   * copies of a rule start disagreeing.
+   *
+   * ── ORDINARY MAIL, WHICH IS WHY THERE IS NO PUSH HERE ──
+   *
+   * The greet is recorded and nothing else. The notifier's arrival hook then
+   * announces it, the ladder repeats it, and an ack clears it, exactly as for
+   * anything else in the mailbox. The previous implementation of this idea
+   * was a raw `deliver` with no mailbox entry — told and unrecorded, which is
+   * the shape task 053 exists to catch.
+   */
+  function mintGreet(agent: AgentName, role: AgentRole): void {
+    const greet = notifier.greetOnRegistration({
+      name: agent,
+      role,
+      pendingIds: mailbox.mailboxOf(mailState, agent).map((e) => e.id),
+    })
+    if (greet === undefined) return
+    void record('greet', agentStream(greet.to), { agent: greet.to, queued: true })
+  }
+
   function handleAgents(): Response {
     // R8 IN ONE LINE: `lastActivityAt` is the session's observed act or
     // nothing. The connect time is deliberately not a fallback.
@@ -1569,7 +1605,10 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
             agent: msg.agent,
             role: role as AgentRole,
             idle: true,
-          }).then(() => ws.send(JSON.stringify({ type: 'registered', agent: msg.agent })))
+          }).then(() => {
+            ws.send(JSON.stringify({ type: 'registered', agent: msg.agent }))
+            mintGreet(msg.agent as AgentName, role as AgentRole)
+          })
           return
         }
 

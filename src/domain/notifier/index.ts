@@ -278,4 +278,27 @@ export const notifier: NotifierContract = {
     next.delete(actor)
     return seal(next)
   },
+
+  greetOnRegistration(fact) {
+    // THE EMPTY MAILBOX IS THE WHOLE MECHANISM, not a guard on one. A greet
+    // is minted only in the mail's absence, so the two outcomes are one
+    // evaluation with two arms rather than two things that could both fire —
+    // and everything that used to be handled falls out instead: an agent can
+    // never receive both, there is nothing to race, nothing to time, and no
+    // second push path to reconcile. It is also what makes the greet
+    // self-limiting: an unacked greet IS mail, so a reconnect sees a
+    // non-empty mailbox and mints nothing. No agent can ever hold two.
+    if (fact.pendingIds.length > 0) return undefined
+    // SELF-DIRECTED SEATS ONLY. Every other seat's connect feeds somebody —
+    // a worker's register event is the sensei's mail — so only this one can
+    // arrive to silence. And the worker's row is a positive statement, not
+    // an omission: a worker connecting with nothing waiting is supposed to
+    // sit idle, and saying otherwise is the orchestrator's job rather than
+    // infra's.
+    if (fact.role !== 'sensei') return undefined
+    // NO PROSE. The text is the adapter's to render, exactly as with an
+    // announce effect — the core does not return display strings it does
+    // not have to.
+    return { kind: 'greet', to: fact.name }
+  },
 }

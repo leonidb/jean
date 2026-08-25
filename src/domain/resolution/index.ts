@@ -56,6 +56,7 @@ import type { ResolutionContext, ResolutionContract } from '../contracts/resolut
 import {
   type AgentName,
   type AgentProbeData,
+  type GreetData,
   type KnownKind,
   type ReplyData,
   type SendData,
@@ -172,6 +173,14 @@ const RESOLUTIONS: Record<KnownKind, Resolver> = {
   // (which never grew a flag: it was always mail to the orchestrator).
   'task-reminder': queuedOnly(orchestratorOnly),
   'agent-probe': queuedOnly((event) => named((event.data as AgentProbeData)?.agent)),
+  // THE GREET IS ORDINARY MAIL (task 133) — addressed by `data.agent`, the
+  // same read as every other kind whose whole purpose is to reach the one
+  // seat it names. It is deliberately NOT a second push path: it enters its
+  // recipient's mailbox and is announced, repeated and cleared by the
+  // machinery that carries everything else. The old implementation was a raw
+  // `deliver` with no mailbox entry, which is the defect shape task 053
+  // exists to catch.
+  greet: queuedOnly((event) => named((event.data as GreetData)?.agent)),
   'agent-down': queuedOnly(orchestratorOnly),
   'worker-status': queuedOnly(orchestratorOnly),
   disconnect: orchestratorOnly,

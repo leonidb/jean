@@ -114,17 +114,27 @@ describe('GET /status — the operator’s first command', () => {
     }
     expect(status.agents.map((a) => a.name).sort()).toEqual(['orchestrator-o', 'worker-a'])
     expect(status.sensei.connected).toBe(true)
-    expect(status.pendingEvents).toBe(1)
+    // TWO: the send to worker-a, and the sensei's own greet (task 133) — a
+    // sensei registering into a quiet dojo is greeted, and this walk connects
+    // one. The number is not the subject here; that `cmdStatus` can parse the
+    // shape is. Left as a literal rather than derived, because a count this
+    // walk computes for itself would agree with the server by construction.
+    expect(status.pendingEvents).toBe(2)
     expect(status.activeTriggers).toBe(0)
 
     // …and then `/events` with NO identity at all. E1 answered that 400.
     const observed = (await get(server, '/events')).body as unknown as {
       events: { ts: string; type: string; agent?: string }[]
     }
-    expect(observed.events.length).toBe(1)
-    expect(observed.events[0]?.type).toBe('send')
-    expect(typeof observed.events[0]?.ts).toBe('string')
-    expect(observed.events[0]?.agent).toBe('worker-a') // the display column the CLI prints
+    // TWO NOW — the greet and the send (task 133). What `cmdStatus` parses is
+    // each row's SHAPE, so this asserts the shape of the row it names rather
+    // than the length of the list, which was never its subject and which the
+    // greet changed underneath it.
+    expect(observed.events.length).toBe(2)
+    const send = observed.events.find((e) => e.type === 'send')
+    expect(send, 'the send is not in the recent-events list the CLI prints').toBeDefined()
+    expect(typeof send?.ts).toBe('string')
+    expect(send?.agent).toBe('worker-a') // the display column the CLI prints
   })
 
   test('the observer read stamps NOTHING — a dashboard is not a delivery', async () => {

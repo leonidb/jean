@@ -306,7 +306,6 @@ describe('per-agent independence — one ladder never advances another (§5 non-
   })
 })
 
-
 // ── THE GREET: THE ZERO CASE OF THE ANNOUNCEMENT (task 133) ──────
 //
 // The mechanism is the empty-mailbox test itself, not a guard on it — so
@@ -335,7 +334,7 @@ describe('the greet — minted only for a self-directed seat with an empty mailb
     expect(notifier.greetOnRegistration(reg({ name: SENSEI, pendingIds: [7] }))).toBeUndefined()
   })
 
-  test('a worker is never greeted, empty mailbox or not — that is the sensei\'s job, not infra\'s', () => {
+  test("a worker is never greeted, empty mailbox or not — that is the sensei's job, not infra's", () => {
     // Leonid, 2026-08-25: a worker connecting with nothing waiting is
     // SUPPOSED to sit idle. The row stays `no` even if the greet were free.
     expect(notifier.greetOnRegistration(reg({ name: WORKER, role: 'worker' }))).toBeUndefined()
