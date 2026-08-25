@@ -14,7 +14,7 @@
  * is contacted; both seams are the ones production uses.
  */
 
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, mock, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -510,6 +510,50 @@ describe('the launcher’s ordering', () => {
     await Bun.sleep(300)
 
     expect(started, 'the killed backlog went on to the next overdue trigger').toEqual(['nightly-a'])
+    rmSync(dir, { recursive: true, force: true })
+  }, 20_000)
+
+  test('THE PORT FORWARDS THE KILL SWITCH TO THE SPAWNER — a wiring law, and it was absent (task 131)', async () => {
+    // THE HOP THAT WAS NEVER WRITTEN, and the walk that would have caught it.
+    // `opts.signal` is the ONLY channel into `proc.kill()` for a caller, so a
+    // port that drops it makes the whole abort chain inert: `stop()` aborts,
+    // the walk stops its bookkeeping, and the subprocess keeps writing to
+    // `.jean/.consolidator` after the port is freed and the next
+    // `jean infra start` has succeeded.
+    //
+    // WHY THIS SHAPE. The alternatives considered were making `signal`
+    // required — eight test call sites forced to write `signal: undefined` —
+    // or reading `hosting.ts`'s source, which couples a test to formatting.
+    // Neither was needed: this is a wiring law, which is what adapter tests
+    // are for, and it reads no source, inspects no formatting, and is
+    // red-without/green-with by construction.
+    const seen: { signal?: AbortSignal }[] = []
+    mock.module('../infra/librarian.ts', () => ({
+      spawnHeadless: async (opts: { signal?: AbortSignal }) => {
+        seen.push(opts)
+        return { exitCode: 0, durationMs: 1, timedOut: false, stdout: '', stderr: '' }
+      },
+    }))
+    const { headlessPorts: freshPorts } = await import('./hosting.ts')
+
+    const dir = mkdtempSync(resolve(tmpdir(), 'jean-131-hop-'))
+    const controller = new AbortController()
+    const ports = freshPorts({
+      dataDir: resolve(dir, '.jean'),
+      now: () => Date.now(),
+      log: () => {},
+      record: async () => undefined,
+      recordConsolidated: async () => undefined,
+    })
+    await ports.spawn({
+      role: 'librarian',
+      prompt: 'unused',
+      streamSinkPath: 'sink.jsonl',
+      timeoutMs: 30_000,
+      signal: controller.signal,
+    })
+    expect(seen.length, 'the port never reached the spawner').toBe(1)
+    expect(seen[0]?.signal, 'the port dropped the kill switch on the floor').toBe(controller.signal)
     rmSync(dir, { recursive: true, force: true })
   }, 20_000)
 

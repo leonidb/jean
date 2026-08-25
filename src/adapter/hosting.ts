@@ -237,6 +237,13 @@ export function headlessPorts(args: {
           // THE DECISION'S BOUND, enforced here. The old path had the port
           // choose an ambient number nobody declared.
           timeoutMs: spec.timeoutMs,
+          // AND THE CALLER'S KILL SWITCH, which is a different question from
+          // the bound: the bound gives up on a slow run, this ends a run
+          // whose instance is gone (task 131). It is the ONLY channel into
+          // `proc.kill()` for a caller — without this line the abort reaches
+          // the walk, stops its bookkeeping, and leaves the subprocess
+          // writing to `.jean/.consolidator` after `stop()` freed the port.
+          ...(spec.signal !== undefined && { signal: spec.signal }),
         })
         return {
           kind: 'ran',
