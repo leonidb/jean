@@ -264,6 +264,16 @@ export type TaskReminderData = {
   queued?: true
 }
 
+export type GreetData = {
+  /** THE RECIPIENT, named in the record. A greet is ordinary mail (task
+   *  133), so the event must say who it is for — the same reason
+   *  `agent-probe` names its subject: a record that cannot say what it was
+   *  about leaves the class diagnosable only at a watched terminal. */
+  agent: AgentName
+  /** Queued like any other mail; never a direct push. */
+  queued?: boolean
+}
+
 export type AgentProbeData = {
   agent: AgentName
   quietMinutes: number
@@ -415,6 +425,7 @@ export type KindDataMap = {
   disconnect: DisconnectData
   'agent-idle': AgentIdleData
   'agent-probe': AgentProbeData
+  greet: GreetData
   'agent-down': AgentDownData
   'worker-status': WorkerStatusData
   ack: AckData

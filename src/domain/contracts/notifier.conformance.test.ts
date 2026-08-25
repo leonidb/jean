@@ -11,7 +11,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { counted } from '../fixture/index.ts'
-import type { AgentNotifyFacts, NotifierConfig, NotifierContract, NotifierState } from './notifier.ts'
+import type { AgentNotifyFacts, NotifierConfig, NotifierContract, NotifierState, RegistrationFact } from './notifier.ts'
 
 const IMPL_PATH: string = '../notifier/index.ts'
 const notifier: NotifierContract = await import(IMPL_PATH)
@@ -303,5 +303,60 @@ describe('per-agent independence — one ladder never advances another (§5 non-
     // structural no-op — never a crash, never cross-agent discharge.
     const stray = notifier.applyOutcome(s, { kind: 'carried', agent: 'never-seen', ids: [999], via: 'fetch' })
     expect(tick(stray, otherDue, both).effects.map((e) => e.to)).toEqual([OTHER])
+  })
+})
+
+
+// ── THE GREET: THE ZERO CASE OF THE ANNOUNCEMENT (task 133) ──────
+//
+// The mechanism is the empty-mailbox test itself, not a guard on it — so
+// these walks flip exactly that and nothing else. A positive control runs
+// beside them, because "no greet" is also what a mechanism that stopped
+// running altogether prints: this ticket's own history has three walks
+// that asserted no-greet through a door that never minted, and stayed
+// green at 13 passing with the table flipped.
+
+const SENSEI = 'sensei'
+
+function reg(over: Partial<RegistrationFact> & { name: string }): RegistrationFact {
+  return { role: 'sensei', pendingIds: [], ...over } as RegistrationFact
+}
+
+describe('the greet — minted only for a self-directed seat with an empty mailbox', () => {
+  test('POSITIVE CONTROL: a sensei registering with an empty mailbox IS greeted', () => {
+    // Without this, every assertion below passes for a mechanism that does
+    // nothing at all.
+    expect(notifier.greetOnRegistration(reg({ name: SENSEI }))).toEqual({ kind: 'greet', to: SENSEI })
+  })
+
+  test('mail waiting means NO greet — one evaluation, one outcome, never both', () => {
+    // The whole shape: the greet cannot race the mail because it is only
+    // minted in the mail's absence.
+    expect(notifier.greetOnRegistration(reg({ name: SENSEI, pendingIds: [7] }))).toBeUndefined()
+  })
+
+  test('a worker is never greeted, empty mailbox or not — that is the sensei\'s job, not infra\'s', () => {
+    // Leonid, 2026-08-25: a worker connecting with nothing waiting is
+    // SUPPOSED to sit idle. The row stays `no` even if the greet were free.
+    expect(notifier.greetOnRegistration(reg({ name: WORKER, role: 'worker' }))).toBeUndefined()
+    expect(notifier.greetOnRegistration(reg({ name: WORKER, role: 'worker', pendingIds: [7] }))).toBeUndefined()
+  })
+
+  test('SELF-LIMITING: an unacked greet is mail, so a reconnect mints nothing', () => {
+    // greet -> disconnect without acking -> reconnect. The first greet is
+    // still pending, so the mailbox is not empty, so nothing is minted and
+    // the agent is told about the greet it already had. No agent can ever
+    // hold two. Stated because the single-greet-across-many-reconnects
+    // behaviour reads like a bug otherwise.
+    const first = notifier.greetOnRegistration(reg({ name: SENSEI }))
+    expect(first).toEqual({ kind: 'greet', to: SENSEI })
+    const greetId = 42
+    expect(notifier.greetOnRegistration(reg({ name: SENSEI, pendingIds: [greetId] }))).toBeUndefined()
+  })
+
+  test('the effect names its recipient and carries no prose — the adapter renders', () => {
+    const effect = notifier.greetOnRegistration(reg({ name: SENSEI }))
+    expect(effect).toEqual({ kind: 'greet', to: SENSEI })
+    expect(Object.keys(effect ?? {}).sort()).toEqual(['kind', 'to'])
   })
 })

@@ -32,6 +32,18 @@
  *   trigger-fired targeting X                 → X (agent triggers; headless
  *                                               runs spawn, nothing to mail)
  *   agent-probe (idle-liveness ping)          → the pinged worker
+ *   greet (a self-directed seat connected     → data.agent — THE GREET IS
+ *     to a quiet dojo; task 133)                ORDINARY MAIL. It is not a
+ *                                               second push path: it enters
+ *                                               its recipient's mailbox and
+ *                                               is announced, repeated and
+ *                                               cleared by the machinery
+ *                                               that carries everything
+ *                                               else. The old
+ *                                               implementation was a raw
+ *                                               `deliver` with no mailbox
+ *                                               entry — the defect shape
+ *                                               task 053 exists to catch.
  *   agent-down / worker-status / disconnect   → orchestrator
  *   wiki-consolidated                         → orchestrator (queued only —
  *                                               the skill surfaces its

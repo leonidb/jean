@@ -217,6 +217,16 @@ describe('spec §4 — supervision and liveness kinds', () => {
     expect(resolution.resolve(e, ctx)).toEqual([WORKER_B])
   })
 
+  test('greet → the named recipient — the greet is ORDINARY MAIL, not a second push path (task 133)', () => {
+    // If this resolves to nobody, the greet is a direct push with no
+    // mailbox entry: exactly the defect shape task 053 exists to catch,
+    // and exactly what the OLD implementation did (a raw `ports.deliver`).
+    // Resolving here is what makes P7/P8 carry it unchanged.
+    const log = build()
+    const e = log.append('greet', `agent-${ORCH}`, { agent: ORCH, queued: true })
+    expect(resolution.resolve(e, ctx)).toEqual([ORCH])
+  })
+
   test('agent-down / worker-status / disconnect → orchestrator', () => {
     const log = build()
     const down = log.append('agent-down', 'system', {

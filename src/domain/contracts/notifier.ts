@@ -99,7 +99,7 @@
  * activity ever, empty mailboxes, unknown agents in outcomes) are pinned.
  */
 
-import type { AgentName, DeliveredVia, StoredEvent } from './vocabulary.ts'
+import type { AgentName, AgentRole, DeliveredVia, StoredEvent } from './vocabulary.ts'
 
 /** Opaque — episodes per agent: what has been announced through, where on
  *  the ladder the agent stands. Indirectly-visible state by design. */
@@ -147,6 +147,69 @@ export type AnnounceEffect = {
    *  renders (core never returns display strings it doesn't have to). */
   pendingCount: number
   hasBlocking: boolean
+}
+
+// ── THE GREET: THE ZERO CASE OF THE ANNOUNCEMENT (task 133) ──────
+//
+// P8 says an agent with unhandled mail is told, and told again until it
+// acts. It says nothing about an agent with NO mail — and for most seats
+// that silence is correct. For one seat it is a failure to start.
+//
+// THE CONDITION, and it is measured rather than supposed: a seat whose
+// work is SELF-DIRECTED needs a turn in order to start looking, and an
+// empty mailbox gives it none. A freshly-connected sensei on a quiet dojo
+// receives nothing — no announcement, so no turn, so no skill fires,
+// because a skill is instructions for a turn you are already having.
+// Confirmed twice, independently: in a harness (empty dojo, attention
+// clocks running fast, zero frames in ~200 ticks, against a positive
+// control that does see a wake) and in the field (a fresh infra with
+// nothing moving; the sensei connected and sat there until a human
+// intervened).
+//
+// WHY ONLY THE SELF-DIRECTED SEAT. Every other seat's connect feeds
+// somebody: a worker's register event IS the sensei's mail. The sensei's
+// connect feeds nobody. And the worker row is a positive statement rather
+// than an absence (Leonid, 2026-08-25): a worker connecting with nothing
+// waiting is SUPPOSED to sit idle, and if it should be doing something,
+// saying so is the sensei's job, not infra's. That row stays `no` even if
+// the greet were free.
+//
+// THE SHAPE, and it is what makes this one mechanism instead of two: the
+// greet is minted ONLY when no mail waits. One evaluation, one instant,
+// one outcome — so an agent can never receive both a greet and mail, and
+// there is nothing to race, time or reconcile. Every earlier attempt at
+// this treated the greet as a second thing beside the mail; every problem
+// it collected came from that.
+//
+// AND IT IS ORDINARY MAIL. The greet enters the recipient's mailbox and is
+// announced, repeated and cleared by the machinery that carries everything
+// else — P7 and P8 unchanged, no second push path. (The old implementation
+// was a raw `deliver` with no mailbox entry: the exact defect shape task
+// 053 exists to catch, sitting inside the design we were about to restore.)
+//
+// SELF-LIMITING, and stated here rather than left to emerge because the
+// behaviour reads like a bug otherwise: greet, disconnect without acking,
+// reconnect — the first greet is STILL PENDING, so mail waits, so nothing
+// is minted and the agent is told about the greet it already had. No agent
+// can ever hold two. This follows from P7 rather than sitting beside it.
+
+/** The facts one registration decision consumes. `pendingIds` comes from
+ *  `mailboxOf` — the ONE membership function (P2) — so "empty" here means
+ *  exactly what it means everywhere else. */
+export type RegistrationFact = {
+  name: AgentName
+  role: AgentRole
+  /** The registering agent's mailbox, ids in log order. */
+  pendingIds: readonly number[]
+}
+
+/** Mint a greet as ordinary mail for this recipient. The adapter records it;
+ *  the announcement machinery then carries it like anything else. The core
+ *  returns no prose — the text is the adapter's to render, as with
+ *  `AnnounceEffect`. */
+export type GreetEffect = {
+  kind: 'greet'
+  to: AgentName
 }
 
 export type NotifierDecision = {
@@ -211,4 +274,10 @@ export type NotifierContract = {
    *  Activity is the agent's OWN act per the agents contract's definition;
    *  the shell passes the acting agent, or none for machine writes. */
   observeEvent: (state: NotifierState, event: StoredEvent, actor: AgentName | undefined) => NotifierState
+
+  /** Pure. A seat has registered. Mints a greet ONLY for a self-directed
+   *  seat whose mailbox is empty; returns none otherwise. See the greet
+   *  section above for why the empty-mailbox test is the whole mechanism
+   *  rather than a guard on it. */
+  greetOnRegistration: (fact: RegistrationFact) => GreetEffect | undefined
 }
