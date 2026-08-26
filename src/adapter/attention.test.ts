@@ -780,8 +780,10 @@ describe('a restart starts a fresh quiet clock (ruled, task 140)', () => {
     const row = await rowOf(server, 'sensei-s')
     // R8 for a returning seat: the row reads quiet until THIS session acts…
     expect(row?.lastActivityAt).toBeUndefined()
-    // …with its mail still held (the greet, its own disconnect, the reply).
-    expect(row?.pending ?? 0).toBeGreaterThanOrEqual(2)
+    // …with its mail still held: the greet, the worker's register (its
+    // fleet's arrival is its mail, task 139) and the reply — and NOT its own
+    // disconnect, which since 139 is not.
+    expect(row?.pending ?? 0).toBe(3)
     // …and it is TOLD AT ONCE. This is the assertion the fix exists for.
     const wake = await until(() => second.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))
     expect(wake).toBeDefined()
@@ -836,5 +838,135 @@ describe('a restart starts a fresh quiet clock (ruled, task 140)', () => {
     expect(String(wake?.text)).toContain('event')
     // R8 for the returning surface: no act on file until THIS session acts.
     expect((await rowOf(server, 'bridge-b'))?.lastActivityAt).toBeUndefined()
+  })
+})
+
+describe('an agent joining is mail, as its leaving is — over a real socket (task 139)', () => {
+  type Box = { events: { id: number; code: string; type: string; data: Record<string, unknown> }[] }
+  const boxOf = async (server: AdapterHandle, agent: string): Promise<Box['events']> =>
+    ((await (await fetch(`http://localhost:${server.port}/events?agent=${agent}`)).json()) as Box).events
+  const ackAll = async (server: AdapterHandle, agent: string) => {
+    const pairs = (await boxOf(server, agent)).map((e) => ({ id: e.id, code: e.code }))
+    await post(server, '/ack', { pairs }, agent)
+  }
+  const registerWith = (server: AdapterHandle, frame: Record<string, unknown>) =>
+    new Promise<WebSocket>((done, fail) => {
+      const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
+      openSockets.push(ws)
+      const timer = setTimeout(() => fail(new Error('no answer to register')), 4_000)
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'register', ...frame }))
+      ws.onmessage = (ev) => {
+        const answer = JSON.parse(String(ev.data)) as Record<string, unknown>
+        if (answer.type !== 'registered') return
+        clearTimeout(timer)
+        done(ws)
+      }
+      ws.onerror = () => fail(new Error('socket error'))
+    })
+
+  test('a worker’s register lands in the seat’s mailbox flagged and is announced; the seat’s own is not; a same-session reconnect (replace) adds nothing', async () => {
+    const server = await boot()
+    const sensei = connect(server, 'sensei-s', 'sensei')
+    await sensei.ready
+    // THE SEAT'S OWN REGISTER IS NOT ITS MAIL: the resting mailbox is the
+    // greet alone (133) — which is only possible because the row excludes
+    // its subject; the record itself IS flagged (admitted at this door).
+    expect(await until(() => sensei.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))).toBeDefined()
+    expect((await boxOf(server, 'sensei-s')).map((e) => e.type)).toEqual(['greet'])
+    const own = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-sensei-s`)).json()) as {
+      events: StoredEvent[]
+    }
+    const ownRegister = own.events.find((e) => e.type === 'register')
+    expect((ownRegister?.data as { queued?: unknown })?.queued).toBe(true)
+    await ackAll(server, 'sensei-s')
+    sensei.frames.length = 0
+
+    // A WORKER ARRIVES. Its register is the seat's mail — flagged, addressed
+    // by seat, naming the arrival — and the ladder announces it.
+    const worker = await registerWith(server, { agent: 'worker-w', role: 'worker', sessionId: 'S1' })
+    const box = await until(async () => {
+      const b = await boxOf(server, 'sensei-s')
+      return b.length > 0 ? b : undefined
+    })
+    expect(box?.map((e) => e.type)).toEqual(['register'])
+    expect(box?.[0]?.data).toMatchObject({ agent: 'worker-w', role: 'worker', queued: true })
+    const wake = await until(() => sensei.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))
+    expect(wake).toBeDefined()
+    expect(String(wake?.text)).toContain('1 event')
+    // The worker holds nothing: a register mails the seat, not its subject.
+    expect(await boxOf(server, 'worker-w')).toEqual([])
+
+    // THE SAME SESSION RECONNECTS — a `replace`: the seat never changed
+    // hands and no disconnect preceded it, so the record is unflagged and
+    // the mailbox does not move. (Nor does the replaced socket's close
+    // write a disconnect: it no longer owns the seat.)
+    await registerWith(server, { agent: 'worker-w', role: 'worker', sessionId: 'S1' })
+    await until(() => (worker.readyState === WebSocket.CLOSED ? true : undefined))
+    const log = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-worker-w`)).json()) as {
+      events: StoredEvent[]
+    }
+    const registers = log.events.filter((e) => e.type === 'register')
+    expect(registers.length).toBe(2)
+    expect((registers[1]?.data as { queued?: unknown })?.queued).toBeUndefined()
+    expect(log.events.filter((e) => e.type === 'disconnect').length).toBe(0)
+    expect((await boxOf(server, 'sensei-s')).map((e) => e.type)).toEqual(['register'])
+  })
+
+  test('…and through the surface door: a surface attaching is the seat’s mail, flagged at its own register', async () => {
+    const server = await boot()
+    const sensei = connect(server, 'sensei-s', 'sensei')
+    await sensei.ready
+    await until(() => sensei.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))
+    await ackAll(server, 'sensei-s')
+
+    server.attachSurface({ name: 'bridge-b', role: 'user', deliver: () => true })
+    const box = await until(async () => {
+      const b = await boxOf(server, 'sensei-s')
+      return b.length > 0 ? b : undefined
+    })
+    expect(box?.map((e) => e.type)).toEqual(['register'])
+    expect(box?.[0]?.data).toMatchObject({ agent: 'bridge-b', role: 'user', queued: true })
+  })
+
+  test('the pair resolves alike: a worker’s disconnect is the seat’s mail, the seat’s own is not (ruled, task 139)', async () => {
+    const server = await boot()
+    const sensei = connect(server, 'sensei-s', 'sensei')
+    await sensei.ready
+    await until(() => sensei.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))
+    const worker = connect(server, 'worker-w')
+    await worker.ready
+    await until(async () => ((await boxOf(server, 'sensei-s')).length === 2 ? true : undefined))
+    await ackAll(server, 'sensei-s')
+
+    // THE WORKER LEAVES: mail.
+    await new Promise<void>((done) => {
+      worker.ws.onclose = () => done()
+      worker.ws.close()
+    })
+    const box = await until(async () => {
+      const b = await boxOf(server, 'sensei-s')
+      return b.length > 0 ? b : undefined
+    })
+    expect(box?.map((e) => e.type)).toEqual(['disconnect'])
+    expect(box?.[0]?.data).toMatchObject({ agent: 'worker-w' })
+    await ackAll(server, 'sensei-s')
+
+    // THE SEAT LEAVES AND RETURNS: its own disconnect is recorded but is not
+    // its mail, so the next session is GREETED — the resting mailbox is the
+    // greet, not a departure to ack (the noise task 050 flagged).
+    await new Promise<void>((done) => {
+      sensei.ws.onclose = () => done()
+      sensei.ws.close()
+    })
+    const recorded = await until(async () => {
+      const log = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-sensei-s`)).json()) as {
+        events: StoredEvent[]
+      }
+      return log.events.some((e) => e.type === 'disconnect') ? true : undefined
+    })
+    expect(recorded).toBe(true)
+    const second = connect(server, 'sensei-s', 'sensei')
+    await second.ready
+    expect((await boxOf(server, 'sensei-s')).map((e) => e.type)).toEqual(['greet'])
   })
 })

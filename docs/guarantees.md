@@ -207,7 +207,8 @@ be emitted.
 | Task reminder (blocker cadence) | orchestrator |
 | Trigger firing targeting X | X |
 | Idle-liveness ping | the pinged worker |
-| Agent down, worker status (including recovery), worker disconnect | orchestrator |
+| Agent down, worker status (including recovery) | orchestrator |
+| Agent register, agent disconnect — one pair, resolved alike | orchestrator, minus the subject: an agent is never told of its own arrival or its own departure |
 | Acknowledgement, announcement, idle transition, memorize | nobody — history |
 
 The task row is a resolution, not an address: a task created unassigned by the

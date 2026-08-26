@@ -204,10 +204,18 @@ export type AgentIdleData = {
 }
 
 export type RegisterData = {
+  /** THE SUBJECT — who arrived. Neither author (arriving is not acting,
+   *  R15) nor addressee: the record is mail to the orchestrator and about
+   *  this agent, and the resolution row excludes it by name. */
   agent: AgentName
   role: AgentRole
   idle: boolean
   sessionId?: string
+  /** The admission flag (task 139): set by the write site on an ADMITTED
+   *  session, never on a `replace` (a same-session reconnect: the seat
+   *  never changed hands and no disconnect preceded it). Absent on every
+   *  record written before 139 — history, and it stays history on replay. */
+  queued?: true
 }
 
 export type DisconnectData = {

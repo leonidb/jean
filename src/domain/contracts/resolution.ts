@@ -44,13 +44,55 @@
  *                                               `deliver` with no mailbox
  *                                               entry — the defect shape
  *                                               task 053 exists to catch.
- *   agent-down / worker-status / disconnect   → orchestrator
+ *   agent-down / worker-status                → orchestrator
+ *   register (queued only) / disconnect       → orchestrator, MINUS THE
+ *     (task 139; ruled: the two halves of       SUBJECT — an agent is never
+ *     a pair resolve alike)                     told of its own arrival or
+ *                                               its own departure. Both
+ *                                               halves of the pair resolve
+ *                                               alike. The exclusion is the
+ *                                               row's, not `authorOf`'s:
+ *                                               arriving is not acting
+ *                                               (R15), nor is a socket
+ *                                               closing, so neither record
+ *                                               has an author and the
+ *                                               author pass excludes no
+ *                                               one; without the row's own
+ *                                               minus, the orchestrator's
+ *                                               register would be in its
+ *                                               mailbox when the greet is
+ *                                               minted, and no seat would
+ *                                               ever be greeted again — and
+ *                                               its own disconnect would be
+ *                                               its next session's first
+ *                                               ack (the noise task 050
+ *                                               flagged; the greet now
+ *                                               carries the "you restarted"
+ *                                               fact). The subject test is
+ *                                               by SEAT (subject ≠ the
+ *                                               recorded orchestrator), not
+ *                                               by role. The register half
+ *                                               restores the old reducer,
+ *                                               which the D1 transcription
+ *                                               lost (spec §4 had no row
+ *                                               for the kind). The two
+ *                                               lines differ only in the
+ *                                               admission flag, and that is
+ *                                               replay mechanics, not
+ *                                               semantics: register needs
+ *                                               it because dozens of
+ *                                               historical unflagged
+ *                                               registers must not
+ *                                               resurrect; disconnect was
+ *                                               always mail, its history is
+ *                                               already acked, and it never
+ *                                               grew one.
  *   wiki-consolidated                         → orchestrator (queued only —
  *                                               the skill surfaces its
  *                                               anomalies to the human;
  *                                               repinned at task 119)
  *   ack / nudge / agent-idle / memory /
- *     register / start / permission-request /
+ *     start / permission-request /
  *     trigger CRUD /
  *     playbook CRUD / headless-completed      → nobody — history
  *                                               (headless-completed
@@ -65,14 +107,15 @@
  * resolve empty — never to a fallback (a mailbox nobody owns is the orphan
  * class P4 abolishes).
  *
- * THE ADMISSION FLAG (surfaced at A6's composition round, task 102): six
+ * THE ADMISSION FLAG (surfaced at A6's composition round, task 102): seven
  * kinds — `send`, `task-reminder`, `agent-probe`, `agent-down`,
- * `worker-status`, and (since task 119) `wiki-consolidated` — became MAIL
- * mid-history; their shapes carry
+ * `worker-status`, (since task 119) `wiki-consolidated`, and (since task
+ * 139) `register` — became MAIL mid-history; their shapes carry
  * `queued?: true`, the vocabulary's admission flag ("the write site
  * decides, the fold applies"). WITHOUT the flag they resolve to NOBODY:
- * a bookkeeping-era record, or a send handed over synchronously
- * (`delivered`), must not mint pairs on replay — the composed system's
+ * a bookkeeping-era record, a send handed over synchronously
+ * (`delivered`), or a register written before 139 (every real log holds
+ * dozens, all unacked), must not mint pairs on replay — the composed system's
  * first real-log replay would otherwise resurrect months of handled mail
  * as pending. Admission is part of the DECLARED RESOLUTION — the one
  * membership source — never a second check beside it (P2). Kinds that

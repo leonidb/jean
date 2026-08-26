@@ -350,7 +350,9 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
       // the append, as the shell does: the register's own observe runs the
       // notifier over a view that must already read this seat as absent.
       lastActivity.delete(name)
-      append('register', agentStream(name), { agent: name, role, idle: false })
+      // ADMITTED, so flagged (task 139): the harness has no replace path —
+      // every register here is a new session, and mail to the orchestrator.
+      append('register', agentStream(name), { agent: name, role, idle: false, queued: true })
       connected.set(name, true)
       connectedAt.set(name, clock.now())
       mintGreet(name, role)
@@ -363,7 +365,7 @@ export function createDojo(specs: readonly CastSpec[], opts: DojoOptions) {
     registerAll(): void {
       for (const a of cast) {
         lastActivity.delete(a.name)
-        append('register', agentStream(a.name), { agent: a.name, role: a.role, idle: false })
+        append('register', agentStream(a.name), { agent: a.name, role: a.role, idle: false, queued: true })
         connected.set(a.name, true)
         connectedAt.set(a.name, clock.now())
         mintGreet(a.name, a.role)

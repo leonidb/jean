@@ -31,7 +31,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { NotifierConfig } from '../contracts/notifier.ts'
 import type { SupervisorConfig } from '../contracts/supervisor.ts'
-import type { ReplyData, SendData } from '../contracts/vocabulary.ts'
+import type { RegisterData, ReplyData, SendData } from '../contracts/vocabulary.ts'
 import { assertNonCoincident, type CastSpec, counted, echo, type PendingPair, quiet } from '../fixture/index.ts'
 import { createDojo, type Dojo } from './dojo.ts'
 
@@ -84,20 +84,23 @@ describe('scenario 1 — the echo loop: one message crosses the whole system and
       .filter((e) => e.type === 'reply' && (e.data as ReplyData).text === 'ping-1 — heard')
     expect(echoed.length).toBe(1)
 
-    // Conservation: exactly THREE pairs ever existed — the send to the
-    // worker, the reply to the orchestrator, and the SENSEI'S GREET, minted
-    // when it registered into an empty dojo (task 133). The two message
-    // pairs cleared; the greet did not, because nothing acked it.
+    // Conservation: exactly FOUR pairs ever existed — the send to the
+    // worker, the reply to the orchestrator, the SENSEI'S GREET, minted
+    // when it registered into an empty dojo (task 133), and THE WORKER'S
+    // REGISTER, mail to the orchestrator since task 139 (an agent joining
+    // is mail, as its leaving is). The sensei's OWN register is not a pair:
+    // the row excludes its subject, which is what leaves the mailbox empty
+    // for the greet to be minted at all.
     //
-    // AND THE GREET IS CARRIED BY THE SAME MACHINERY, which is the claim
-    // the design rests on: it is minted, announced, and CLEARED BY AN ACK
-    // exactly like the two message pairs — this sensei is `reliable`, so it
-    // acks what it is told. That the count moved from two to three is the
-    // whole of the greet's footprint: one more piece of ordinary mail, not
-    // a second push path with a lifecycle of its own.
+    // AND BOTH ARE CARRIED BY THE SAME MACHINERY, which is the claim the
+    // design rests on: minted, announced, and CLEARED BY AN ACK exactly like
+    // the two message pairs — this sensei is `reliable`, so it acks what it
+    // is told. That the count moved from two to three (the greet) to four
+    // (the register) is the whole of each one's footprint: one more piece
+    // of ordinary mail, not a second push path with a lifecycle of its own.
     const truth = assertGroundTruth(dojo)
-    expect(truth.pairsCreated).toBe(3)
-    expect(truth.pairsCleared).toBe(3)
+    expect(truth.pairsCreated).toBe(4)
+    expect(truth.pairsCleared).toBe(4)
     expect(dojo.pendingPairs()).toEqual([])
 
     // The loud direction, composed: TWO announcements moved the whole loop —
@@ -285,9 +288,10 @@ describe('scenario 4b — a restart starts a fresh quiet clock (ruled, task 140)
     dojo.register(SENSEI, 'sensei')
     // Mail waiting → no greet (133): the announcement is the seat's ONLY way
     // to a turn, which is exactly why inheriting the clock left it with none.
-    // (The seat also holds its own `disconnect` — the orchestrator is told
-    // about every departure, its own included.)
+    // (Its own `disconnect` is NOT beside the reply — an agent is never told
+    // of its own departure, task 139.)
     expect(dojo.mailboxIds(SENSEI)).toContain(away.id)
+    expect(dojo.mailboxEvents(SENSEI).map((e) => e.type)).toEqual(['reply'])
     expect(dojo.mailboxEvents(SENSEI).filter((e) => e.type === 'greet')).toEqual([])
 
     dojo.runFor(MIN) // one tick — half the quiet interval from the act
@@ -319,9 +323,10 @@ describe('scenario 4c — a seat mid-ladder restarts: the back-off clock starts 
     // THE RESTART, one tick after the first telling: well before the rung.
     dojo.disconnect(SENSEI)
     dojo.register(SENSEI, 'sensei')
-    // The same greet, still pending — no second one (133); beside it the
-    // seat's own `disconnect`, machine mail that interrupts nothing.
-    expect(dojo.mailboxEvents(SENSEI).filter((e) => e.type === 'greet').length).toBe(1)
+    // The same greet, still pending — no second one (133); beside it only
+    // worker-x's register (139: its fleet's arrival IS its mail) — never its
+    // own `disconnect`, which is not.
+    expect(dojo.mailboxEvents(SENSEI).map((e) => e.type)).toEqual(['greet', 'register'])
     dojo.runFor(MIN)
 
     // Told again at the FIRST tick after the restart. Pre-fix the episode
@@ -329,6 +334,129 @@ describe('scenario 4c — a seat mid-ladder restarts: the back-off clock starts 
     const after = dojo.announcements().filter((a) => a.to === SENSEI && a.accepted)
     expect(after.length).toBe(2)
     expect(after[1]?.at ?? 0).toBeLessThan(firstRung)
+    assertGroundTruth(dojo)
+  })
+})
+
+describe('scenario 4d — an agent joining is mail, as its leaving is (task 139)', () => {
+  test('the sensei arrives after its fleet: announced with their registers, not greeted', () => {
+    const dojo = dojoOf([
+      { name: SENSEI, role: 'sensei', behaviour: { kind: 'reliable' } },
+      { name: 'worker-x', role: 'worker', behaviour: { kind: 'reliable' } },
+      { name: 'worker-y', role: 'worker', behaviour: { kind: 'reliable' } },
+    ])
+    // The seat exists on record — an earlier session was greeted, acked,
+    // and left. (With no orchestrator ever on record a register is history,
+    // P4: the fleet arriving into a dojo that never had a sensei is a fact,
+    // not misaddressed mail.)
+    dojo.register(SENSEI, 'sensei')
+    dojo.act(SENSEI)
+    expect(dojo.mailboxIds(SENSEI)).toEqual([])
+    dojo.disconnect(SENSEI)
+
+    // THE FLEET ARRIVES while the seat is away. Each register is a pair the
+    // seat holds; nothing announces, because a register is machine mail and
+    // there is no session to tell.
+    dojo.register('worker-x', 'worker')
+    dojo.register('worker-y', 'worker')
+    const registers = dojo.log
+      .events()
+      .filter((e) => e.type === 'register' && (e.data as RegisterData).agent !== SENSEI)
+    expect(registers.length).toBe(2)
+    expect(dojo.mailboxIds(SENSEI)).toEqual(expect.arrayContaining(registers.map((e) => e.id)))
+    // The workers themselves hold nothing: a register mails the seat, not
+    // its subject, and not each other.
+    expect(dojo.mailboxIds('worker-x')).toEqual([])
+    expect(dojo.mailboxIds('worker-y')).toEqual([])
+
+    // THE SENSEI RETURNS to a mailbox holding exactly its fleet's arrivals —
+    // its own disconnect is not there (the pair resolves alike: never told
+    // of its own departure either). Mail waiting → NO greet (133): its way
+    // to a turn is the announcement, which now carries the registers.
+    const returnedAt = dojo.clock.now()
+    dojo.register(SENSEI, 'sensei')
+    expect(dojo.mailboxEvents(SENSEI).filter((e) => e.type === 'greet')).toEqual([])
+    expect(dojo.mailboxEvents(SENSEI).map((e) => e.type)).toEqual(['register', 'register'])
+
+    dojo.runFor(MIN)
+    // ONE announcement moved the whole mailbox (never loud), told at the
+    // first tick — a fresh session, no clock inherited (140).
+    const woke = dojo.announcements().filter((a) => a.to === SENSEI && a.accepted)
+    expect(woke.length).toBe(1)
+    expect(woke[0]?.ids).toEqual(expect.arrayContaining(registers.map((e) => e.id)))
+    expect((woke[0]?.at ?? 0) - returnedAt).toBeLessThanOrEqual(MIN)
+    // …and the reliable seat acked it all: the registers cleared like any
+    // other mail. The greet count over the whole run is exactly the first
+    // session's: one.
+    expect(dojo.mailboxIds(SENSEI)).toEqual([])
+    expect(dojo.log.events().filter((e) => e.type === 'greet').length).toBe(1)
+    assertGroundTruth(dojo)
+  })
+
+  test('the sensei’s own register is not its mail: greeted into an empty dojo, resting mailbox still ONE', () => {
+    // THE GUARD 133 SILENTLY DEPENDS ON. The greet is minted after the
+    // register append and asks whether the mailbox is empty; were the
+    // seat's own register mail to itself, this walk would find a register
+    // beside the greet — and the greet never minted at all.
+    const dojo = dojoOf([
+      { name: SENSEI, role: 'sensei', behaviour: { kind: 'unresponsive' } },
+      { name: 'worker-x', role: 'worker', behaviour: { kind: 'reliable' } },
+    ])
+    dojo.register(SENSEI, 'sensei')
+    // The resting mailbox is ONE, not zero (133) — and that one is the
+    // greet, never the register.
+    expect(dojo.mailboxEvents(SENSEI).map((e) => e.type)).toEqual(['greet'])
+    const ownRegister = dojo.log
+      .events()
+      .find((e) => e.type === 'register' && (e.data as RegisterData).agent === SENSEI)
+    expect((ownRegister?.data as RegisterData).queued).toBe(true) // flagged — admitted — and STILL not its own mail
+    expect(dojo.pendingPairs().some((p) => p.eventId === ownRegister?.id)).toBe(false)
+
+    // A worker arriving IS the seat's mail: the mailbox moves from one to
+    // two, and the second is the worker's register, addressed by seat.
+    dojo.register('worker-x', 'worker')
+    expect(dojo.mailboxEvents(SENSEI).map((e) => e.type)).toEqual(['greet', 'register'])
+    expect((dojo.mailboxEvents(SENSEI)[1]?.data as RegisterData).agent).toBe('worker-x')
+    expect(dojo.mailboxIds('worker-x')).toEqual([])
+    assertGroundTruth(dojo)
+  })
+})
+
+describe('scenario 4e — the pair resolves alike: an agent is never told of its own departure (task 139, ruled)', () => {
+  test('a sensei that acked everything and restarts is greeted; its own disconnect is not its mail; resting mailbox still ONE', () => {
+    // Before this ruling the returning seat found its own `disconnect`
+    // pending → no greet → announced "1 event" about its own departure, and
+    // its first act was acking it (the noise task 050 flagged). Now the
+    // greet carries the "you restarted" fact, and 133's zero case is exactly
+    // "nothing is waiting".
+    const dojo = dojoOf([
+      { name: SENSEI, role: 'sensei', behaviour: { kind: 'reliable' } },
+      { name: 'worker-x', role: 'worker', behaviour: { kind: 'reliable' } },
+    ])
+    dojo.registerAll()
+    dojo.act(SENSEI) // acks the greet and the worker's register
+    expect(dojo.mailboxIds(SENSEI)).toEqual([])
+    const greetsBefore = dojo.log.events().filter((e) => e.type === 'greet').length
+    expect(greetsBefore).toBe(1)
+
+    dojo.disconnect(SENSEI)
+    const ownDisconnect = dojo.log
+      .events()
+      .find((e) => e.type === 'disconnect' && (e.data as { agent: string }).agent === SENSEI)
+    expect(ownDisconnect).toBeDefined()
+    expect(dojo.pendingPairs().some((p) => p.eventId === ownDisconnect?.id)).toBe(false)
+    // …while a WORKER's departure is the seat's mail, unchanged.
+    dojo.disconnect('worker-x')
+    expect(dojo.mailboxEvents(SENSEI).map((e) => e.type)).toEqual(['disconnect'])
+    dojo.act(SENSEI) // and the seat, gone, still clears what it is handed — a harness convenience; the point is an empty mailbox at return
+    expect(dojo.mailboxIds(SENSEI)).toEqual([])
+
+    // THE RESTART into an empty mailbox: greeted — a SECOND greet over the
+    // run, because nothing was waiting — and the resting mailbox is that
+    // one greet, not a disconnect.
+    dojo.register(SENSEI, 'sensei')
+    expect(dojo.mailboxEvents(SENSEI).map((e) => e.type)).toEqual(['greet'])
+    expect(dojo.log.events().filter((e) => e.type === 'greet').length).toBe(2)
     assertGroundTruth(dojo)
   })
 })

@@ -323,7 +323,7 @@ describe('degenerate contexts — empty, never a fallback', () => {
   })
 })
 
-describe('the admission flag — the kinds that became mail mid-history (five at task 102; six with task 119)', () => {
+describe('the admission flag — the kinds that became mail mid-history (five at task 102; six with task 119; seven with task 139)', () => {
   test('without `queued: true` the flagged kinds resolve to NOBODY; the same shapes with it resolve as declared', () => {
     // Every real log holds these WITHOUT the flag: bookkeeping-era records
     // and synchronous `delivered` handovers. Resolving them would resurrect
@@ -377,5 +377,92 @@ describe('the admission flag — the kinds that became mail mid-history (five at
     expect(resolution.resolve(historical, ctx)).toEqual([])
     // And with no orchestrator on record: empty, never a fallback (P4).
     expect(resolution.resolve(flagged, noOrchCtx)).toEqual([])
+  })
+})
+
+describe('the register/disconnect pair — an agent joining is mail, as its leaving is, and neither is told of itself (task 139)', () => {
+  // The seventh admission-gated kind, restored from the old reducer: a
+  // worker's register entered the sensei's pending queue. The unflagged
+  // shape stays in the history walk above — that is the replay pin, and
+  // every register written before 139 must keep resolving to nobody.
+  test('a flagged register of a worker, a user or a peer → the orchestrator, exactly as `disconnect` does', () => {
+    const log = build()
+    const arrivals = [
+      log.append('register', `agent-${WORKER_A}`, { agent: WORKER_A, role: 'worker', idle: true, queued: true }),
+      log.append('register', `agent-${HUMAN}`, { agent: HUMAN, role: 'user', idle: true, queued: true }),
+      log.append('register', 'agent-peer-p', { agent: 'peer-p', role: 'peer', idle: true, queued: true }),
+    ]
+    let checked = 0
+    for (const e of arrivals) {
+      expect(resolution.resolve(e, ctx), `${(e.data as { role: string }).role} register must mail the seat`).toEqual([
+        ORCH,
+      ])
+      checked++
+    }
+    counted('flagged registers resolving to the orchestrator', checked, 3)
+    // The pair resolves alike: the same agent's leaving reaches the same seat.
+    const leaving = log.append('disconnect', `agent-${WORKER_A}`, { agent: WORKER_A })
+    expect(resolution.resolve(leaving, ctx)).toEqual([ORCH])
+  })
+
+  test('the orchestrator is NEVER told of its own arrival — the subject is excluded by the row, not by authorship', () => {
+    // Load-bearing for the greet (task 133): the greet is minted AFTER the
+    // register append and asks whether the mailbox is empty. Were the
+    // seat's own register mail to itself, no orchestrator would ever be
+    // greeted again. And the exclusion must not come from `authorOf`:
+    // arriving is not acting (R15), so a register has no author.
+    const log = build()
+    const own = log.append('register', `agent-${ORCH}`, { agent: ORCH, role: 'sensei', idle: true, queued: true })
+    expect(resolution.resolve(own, ctx)).toEqual([])
+    expect(resolution.authorOf(own)).toBeUndefined()
+  })
+
+  test('the exclusion is by SEAT: a new orchestrator already holding the seat when its register resolves is excluded; a name that is not the seat is not', () => {
+    // A seat handover: the fold reads agents before mail, so the successor
+    // IS `ctx.orchestrator` by the time its own register resolves — the
+    // comparison needs no role table.
+    const log = build()
+    const successor = 'orchestrator-s'
+    const handover = log.append('register', `agent-${successor}`, {
+      agent: successor,
+      role: 'sensei',
+      idle: true,
+      queued: true,
+    })
+    expect(resolution.resolve(handover, { ...ctx, orchestrator: successor })).toEqual([])
+    // The same record read with the OLD seat still on record is mail to it:
+    // the test is the seat, not the role claimed on the frame.
+    expect(resolution.resolve(handover, ctx)).toEqual([ORCH])
+  })
+
+  test('the pair resolves ALIKE: the orchestrator’s own disconnect → nobody; a worker’s → the orchestrator, unchanged', () => {
+    // Retires, deliberately, the old reducer's "the sensei sees its own
+    // disconnect in pending on reconnect": task 050 flagged a seat's first
+    // act being the ack of its own departure as noise, and the greet (133)
+    // now carries the "you restarted" fact. No admission flag on this half
+    // — disconnect was always mail; its history is already acked.
+    const log = build()
+    const own = log.append('disconnect', `agent-${ORCH}`, { agent: ORCH })
+    expect(resolution.resolve(own, ctx)).toEqual([])
+    expect(resolution.authorOf(own)).toBeUndefined()
+    const worker = log.append('disconnect', `agent-${WORKER_A}`, { agent: WORKER_A })
+    expect(resolution.resolve(worker, ctx)).toEqual([ORCH])
+    // Seat-based here too: a departing name that is not the seat is mail.
+    expect(resolution.resolve(own, { ...ctx, orchestrator: 'orchestrator-s' })).toEqual(['orchestrator-s'])
+  })
+
+  test('no orchestrator on record: a flagged register resolves empty — never a fallback (P4)', () => {
+    const log = build()
+    const e = log.append('register', `agent-${WORKER_A}`, { agent: WORKER_A, role: 'worker', idle: true, queued: true })
+    expect(resolution.resolve(e, noOrchCtx)).toEqual([])
+  })
+
+  test('without the flag a register is history — the replay pin, stated on its own beside the history walk', () => {
+    // Every real log holds dozens of these, all unacked since the teardown;
+    // the first restart after 139 must not resurrect them into the
+    // orchestrator's mailbox.
+    const log = build()
+    const historical = log.append('register', `agent-${WORKER_A}`, { agent: WORKER_A, role: 'worker', idle: true })
+    expect(resolution.resolve(historical, ctx)).toEqual([])
   })
 })

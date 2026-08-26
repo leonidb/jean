@@ -114,23 +114,25 @@ describe('GET /status — the operator’s first command', () => {
     }
     expect(status.agents.map((a) => a.name).sort()).toEqual(['orchestrator-o', 'worker-a'])
     expect(status.sensei.connected).toBe(true)
-    // TWO: the send to worker-a, and the sensei's own greet (task 133) — a
+    // THREE: the send to worker-a, the sensei's own greet (task 133) — a
     // sensei registering into a quiet dojo is greeted, and this walk connects
-    // one. The number is not the subject here; that `cmdStatus` can parse the
-    // shape is. Left as a literal rather than derived, because a count this
-    // walk computes for itself would agree with the server by construction.
-    expect(status.pendingEvents).toBe(2)
+    // one — and worker-a's register, the sensei's mail since task 139. The
+    // number is not the subject here; that `cmdStatus` can parse the shape
+    // is. Left as a literal rather than derived, because a count this walk
+    // computes for itself would agree with the server by construction.
+    expect(status.pendingEvents).toBe(3)
     expect(status.activeTriggers).toBe(0)
 
     // …and then `/events` with NO identity at all. E1 answered that 400.
     const observed = (await get(server, '/events')).body as unknown as {
       events: { ts: string; type: string; agent?: string }[]
     }
-    // TWO NOW — the greet and the send (task 133). What `cmdStatus` parses is
-    // each row's SHAPE, so this asserts the shape of the row it names rather
-    // than the length of the list, which was never its subject and which the
-    // greet changed underneath it.
-    expect(observed.events.length).toBe(2)
+    // THREE NOW — the greet, the send (task 133) and worker-a's register
+    // (task 139). What `cmdStatus` parses is each row's SHAPE, so this
+    // asserts the shape of the row it names rather than the length of the
+    // list, which was never its subject and which the greet, then the
+    // register, changed underneath it.
+    expect(observed.events.length).toBe(3)
     const send = observed.events.find((e) => e.type === 'send')
     expect(send, 'the send is not in the recent-events list the CLI prints').toBeDefined()
     expect(typeof send?.ts).toBe('string')

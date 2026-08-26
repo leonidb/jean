@@ -56,3 +56,79 @@ describe('the log is the state — a restart answers from it', () => {
     second.stop()
   })
 })
+
+describe('a register written before task 139 is history on replay; one written after is still mail', () => {
+  test('a log of unflagged registers replays to an empty orchestrator mailbox — the seat is greeted, not handed its fleet’s past', async () => {
+    // Every real log holds dozens of pre-139 registers, all unacked (they
+    // were history when written, and nothing acks history). Without the
+    // admission flag on the row the first restart after 139 would resurrect
+    // every one of them into the orchestrator's mailbox.
+    const dir = `/tmp/jean-139-${Date.now()}`
+    const good = new Date(1_700_000_000_000).toISOString()
+    const lines = [
+      {
+        id: 1,
+        ts: good,
+        type: 'register',
+        stream: 'agent-orchestrator-r',
+        data: { agent: 'orchestrator-r', role: 'sensei', idle: false },
+      },
+      {
+        id: 2,
+        ts: good,
+        type: 'register',
+        stream: 'agent-worker-a',
+        data: { agent: 'worker-a', role: 'worker', idle: false },
+      },
+      {
+        id: 3,
+        ts: good,
+        type: 'register',
+        stream: 'agent-worker-b',
+        data: { agent: 'worker-b', role: 'worker', idle: false },
+      },
+      {
+        id: 4,
+        ts: good,
+        type: 'register',
+        stream: 'agent-bridge-u',
+        data: { agent: 'bridge-u', role: 'user', idle: true },
+      },
+      // …and ONE written by a 139 process before this restart: mail that
+      // survives, because the log is the state.
+      {
+        id: 5,
+        ts: good,
+        type: 'register',
+        stream: 'agent-worker-c',
+        data: { agent: 'worker-c', role: 'worker', idle: true, queued: true },
+      },
+    ]
+    await Bun.write(`${dir}/history.jsonl`, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`)
+
+    const server = await createAdapterServer({ dataDir: dir })
+    const base = `http://localhost:${server.port}`
+    const box = (await (await fetch(`${base}/events?agent=orchestrator-r`)).json()) as {
+      events: { id: number; type: string; data: { agent?: string } }[]
+    }
+    // Exactly the flagged one — three unflagged registers and the sensei's
+    // own resolved to nobody.
+    expect(box.events.map((e) => [e.type, e.data.agent])).toEqual([['register', 'worker-c']])
+
+    // The seat connects: mail waiting (the flagged register) → announced,
+    // not greeted, and its own fresh register is not added to its mailbox.
+    const ws = await new Promise<WebSocket>((done) => {
+      const s = new WebSocket(`ws://localhost:${server.port}/ws`)
+      s.onopen = () => s.send(JSON.stringify({ type: 'register', agent: 'orchestrator-r', role: 'sensei' }))
+      s.onmessage = (ev) => {
+        if ((JSON.parse(String(ev.data)) as { type: string }).type === 'registered') done(s)
+      }
+    })
+    const after = (await (await fetch(`${base}/events?agent=orchestrator-r`)).json()) as {
+      events: { type: string; data: { agent?: string } }[]
+    }
+    expect(after.events.map((e) => [e.type, e.data.agent])).toEqual([['register', 'worker-c']])
+    ws.close()
+    await server.stop()
+  })
+})

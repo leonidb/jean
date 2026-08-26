@@ -56,8 +56,10 @@ import type { ResolutionContext, ResolutionContract } from '../contracts/resolut
 import {
   type AgentName,
   type AgentProbeData,
+  type DisconnectData,
   type GreetData,
   type KnownKind,
+  type RegisterData,
   type ReplyData,
   type SendData,
   type StoredEvent,
@@ -81,9 +83,9 @@ function named(value: unknown): readonly (AgentName | undefined)[] {
  *  the same function shape as every other row, returning nobody. */
 const nobody: Resolver = () => []
 
-/** THE ADMISSION GATE (contract, task 102; six kinds since task 119): the
- *  kinds that became mail mid-history resolve only when their record
- *  carries `queued: true` — the
+/** THE ADMISSION GATE (contract, task 102; six kinds since task 119, seven
+ *  since task 139): the kinds that became mail mid-history resolve only when
+ *  their record carries `queued: true` — the
  *  vocabulary's admission flag. Without it the record is bookkeeping-era
  *  history (or a synchronous `delivered` handover) and must not mint pairs
  *  on replay. Part of the declared resolution, not a check beside it (P2). */
@@ -96,6 +98,28 @@ function queuedOnly(resolver: Resolver): Resolver {
  *  class P4 abolishes, so between-boot events are history, not misaddressed
  *  mail. */
 const orchestratorOnly: Resolver = (_event, ctx) => named(ctx.orchestrator)
+
+/** MINUS THE SUBJECT (task 139) — for the pair of rows whose `data.agent` is
+ *  neither author nor addressee. A register or a disconnect is ABOUT the
+ *  agent named on it, and arriving is not acting (R15) — nor is a socket
+ *  closing — so `authorOf` rightly answers nobody and the author pass in
+ *  `resolve` excludes no one. Left there, the orchestrator's own register
+ *  would be mail to itself — sitting in its mailbox at the instant the
+ *  greet is minted, so no sensei would ever be greeted again — and its own
+ *  disconnect would be the first thing its next session acks (the noise
+ *  task 050 flagged). The exclusion is therefore the ROW's, not
+ *  `authorOf`'s: making the subject the author would turn a register into
+ *  an act.
+ *
+ *  Seat-based, not role-based: the fold reads agents before mail, so on a
+ *  handover the new orchestrator already holds the seat when its own
+ *  register resolves, and the comparison needs no role table. */
+function notTheSubject(resolver: Resolver): Resolver {
+  return (event, ctx) => {
+    const subject = (event.data as Partial<RegisterData | DisconnectData> | undefined)?.agent
+    return resolver(event, ctx).filter((name) => name === undefined || name !== subject)
+  }
+}
 
 /**
  * The task row: "everyone involved with the task, minus the author" —
@@ -183,7 +207,18 @@ const RESOLUTIONS: Record<KnownKind, Resolver> = {
   greet: queuedOnly((event) => named((event.data as GreetData)?.agent)),
   'agent-down': queuedOnly(orchestratorOnly),
   'worker-status': queuedOnly(orchestratorOnly),
-  disconnect: orchestratorOnly,
+  // AN AGENT JOINING IS MAIL, AS ITS LEAVING IS (task 139; ruled: the two
+  // halves of a pair resolve alike) — the register half restored from
+  // the old reducer (a worker's register entered the sensei's pending
+  // queue), and the pair resolves ALIKE: the orchestrator, minus the
+  // subject, because an agent is never told of its own arrival or its own
+  // departure (see `notTheSubject`). The one difference between the two
+  // lines is replay mechanics, not semantics: `register` is admission-
+  // gated because every register before 139 was written as history and
+  // must not resurrect; `disconnect` was always mail, its history is
+  // already acked, and it never grew a flag.
+  disconnect: notTheSubject(orchestratorOnly),
+  register: queuedOnly(notTheSubject(orchestratorOnly)),
   'trigger-fired': triggerFired,
 
   // History — nobody must act on these
@@ -191,7 +226,6 @@ const RESOLUTIONS: Record<KnownKind, Resolver> = {
   nudge: nobody,
   'agent-idle': nobody,
   memory: nobody,
-  register: nobody,
   start: nobody,
   'permission-request': nobody,
 

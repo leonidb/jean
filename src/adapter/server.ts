@@ -1616,14 +1616,6 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
             ws.close()
             return
           }
-          // A REPLACE CLOSES THE OLD ENTRY, it does not merely forget it.
-          // Overwriting the map alone leaves the incumbent's socket open and
-          // unreachable — and worse, its eventual `close` would delete the
-          // map entry belonging to the session that replaced it, so the
-          // NEW session would silently stop receiving anything. Hence both
-          // halves: hang up here, and let the close handler below delete only
-          // an entry it still owns.
-          if (verdict.kind === 'replace' && incumbent !== undefined) incumbent.close()
           // BEFORE the record: the register's arrival hook runs the notifier
           // over `notifyView`, and that view must already see a seat with no
           // act, or the first decision of the new session is made on the old
@@ -1649,6 +1641,25 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
           ws.data.name = msg.agent
           ws.data.session = session
           sessions.set(msg.agent, session)
+          // A REPLACE CLOSES THE OLD ENTRY, it does not merely forget it.
+          // Overwriting the map alone leaves the incumbent's socket open and
+          // unreachable — and worse, its eventual `close` would delete the
+          // map entry belonging to the session that replaced it, so the
+          // NEW session would silently stop receiving anything. Hence both
+          // halves: hang up here, and let the close handler below delete only
+          // an entry it still owns.
+          //
+          // AND AFTER THE SUCCESSOR IS SEATED (task 139). The close handler's
+          // ownership guard is what keeps a replaced socket's close from
+          // writing a `disconnect` — but the runtime fires that close
+          // synchronously inside `close()`, so hung up BEFORE the map was
+          // overwritten the old socket still owned the seat and a departure
+          // was recorded for an agent that never left (measured: register →
+          // disconnect → register on every same-session reconnect). The
+          // seat never changed hands, so the pair must be silent on both
+          // halves: no disconnect here, and no admission flag on the record
+          // below.
+          if (verdict.kind === 'replace' && incumbent !== undefined) incumbent.close()
           // The SAME validated role goes to the log as went into the session —
           // live and persisted must not be able to disagree about what this
           // frame claimed.
@@ -1656,6 +1667,10 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
             agent: msg.agent,
             role: role as AgentRole,
             idle: true,
+            // THE ADMISSION FLAG (task 139): an admitted session is mail to
+            // the orchestrator — its fleet arrived. A `replace` is not: the
+            // seat never changed hands and no disconnect preceded it.
+            ...(verdict.kind === 'admit' && { queued: true }),
           }).then(() => {
             ws.send(JSON.stringify({ type: 'registered', agent: msg.agent }))
             mintGreet(msg.agent as AgentName, role as AgentRole, session)
@@ -1842,7 +1857,13 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
       // The register event is appended so the LOG shows a `user`-role agent —
       // which is what makes the channel corpus find the conversation later,
       // whether or not the bridge is connected at the time.
-      void record('register', agentStream(surface.name), { agent: surface.name, role: surface.role, idle: true })
+      void record('register', agentStream(surface.name), {
+        agent: surface.name,
+        role: surface.role,
+        idle: true,
+        // The same flag at the same door (task 139): admitted → mail.
+        ...(verdict.kind === 'admit' && { queued: true }),
+      })
       return () => {
         if (sessions.get(surface.name) !== session) return // already replaced
         sessions.delete(surface.name)
