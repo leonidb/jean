@@ -882,17 +882,16 @@ describe('an agent joining is mail, as its leaving is — over a real socket (ta
     sensei.frames.length = 0
 
     // A WORKER ARRIVES. Its register is the seat's mail — flagged, addressed
-    // by seat, naming the arrival — and the ladder announces it.
+    // by seat, naming the arrival — and the ladder announces it. The wake is
+    // awaited BEFORE the mailbox is read: a fetch carries, so reading first
+    // would be the seat being told and the push need never come.
     const worker = await registerWith(server, { agent: 'worker-w', role: 'worker', sessionId: 'S1' })
-    const box = await until(async () => {
-      const b = await boxOf(server, 'sensei-s')
-      return b.length > 0 ? b : undefined
-    })
-    expect(box?.map((e) => e.type)).toEqual(['register'])
-    expect(box?.[0]?.data).toMatchObject({ agent: 'worker-w', role: 'worker', queued: true })
     const wake = await until(() => sensei.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))
     expect(wake).toBeDefined()
     expect(String(wake?.text)).toContain('1 event')
+    const box = await boxOf(server, 'sensei-s')
+    expect(box.map((e) => e.type)).toEqual(['register'])
+    expect(box[0]?.data).toMatchObject({ agent: 'worker-w', role: 'worker', queued: true })
     // The worker holds nothing: a register mails the seat, not its subject.
     expect(await boxOf(server, 'worker-w')).toEqual([])
 
@@ -926,6 +925,33 @@ describe('an agent joining is mail, as its leaving is — over a real socket (ta
     })
     expect(box?.map((e) => e.type)).toEqual(['register'])
     expect(box?.[0]?.data).toMatchObject({ agent: 'bridge-b', role: 'user', queued: true })
+  })
+
+  test('…and a SOCKET incumbent replaced through the surface door writes no disconnect either (codex round, task 139)', async () => {
+    // The surface door's `replace` hangs up on a socket whose close handler
+    // fires synchronously; seated after the hang-up, the socket still owned
+    // the seat and a departure was written for an agent that never left —
+    // the same ordering the socket door had. The existing surface-replace
+    // walk (robustness) uses a SURFACE incumbent, whose close cannot write a
+    // disconnect, so it could not see this.
+    const server = await boot()
+    const sensei = connect(server, 'sensei-s', 'sensei')
+    await sensei.ready
+    await until(() => sensei.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))
+    const socket = await registerWith(server, { agent: 'bridge-b', role: 'user', sessionId: 'B1' })
+    await until(async () => ((await boxOf(server, 'sensei-s')).length === 2 ? true : undefined))
+    await ackAll(server, 'sensei-s')
+
+    // THE SAME SESSION RE-ATTACHES AS A SURFACE: a replace.
+    server.attachSurface({ name: 'bridge-b', role: 'user', sessionId: 'B1', deliver: () => true })
+    await until(() => (socket.readyState === WebSocket.CLOSED ? true : undefined))
+    const log = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-bridge-b`)).json()) as {
+      events: StoredEvent[]
+    }
+    expect(log.events.filter((e) => e.type === 'disconnect').length).toBe(0)
+    expect(log.events.filter((e) => e.type === 'register').length).toBe(2)
+    expect((log.events[1]?.data as { queued?: unknown })?.queued).toBeUndefined()
+    expect(await boxOf(server, 'sensei-s')).toEqual([])
   })
 
   test('the pair resolves alike: a worker’s disconnect is the seat’s mail, the seat’s own is not (ruled, task 139)', async () => {

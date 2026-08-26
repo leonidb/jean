@@ -1838,7 +1838,6 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
         // someone is watching it start, not go quiet in production.
         throw new Error(`surface "${surface.name}" refused: ${verdict.kind}`)
       }
-      if (verdict.kind === 'replace' && incumbent !== undefined) incumbent.close()
       // The same door, the same rule: a re-attached surface is a new session
       // and inherits no act (task 140).
       dropActivity(surface.name)
@@ -1854,6 +1853,11 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
         },
       }
       sessions.set(surface.name, session)
+      // SEATED FIRST, THEN HUNG UP — the same order as the socket door (task
+      // 139, codex round): a replaced incumbent may be a SOCKET whose close
+      // handler fires synchronously, and it must find the seat already taken
+      // or it writes a `disconnect` for an agent that never left.
+      if (verdict.kind === 'replace' && incumbent !== undefined) incumbent.close()
       // The register event is appended so the LOG shows a `user`-role agent —
       // which is what makes the channel corpus find the conversation later,
       // whether or not the bridge is connected at the time.

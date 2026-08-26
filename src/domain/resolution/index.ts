@@ -117,7 +117,11 @@ const orchestratorOnly: Resolver = (_event, ctx) => named(ctx.orchestrator)
 function notTheSubject(resolver: Resolver): Resolver {
   return (event, ctx) => {
     const subject = (event.data as Partial<RegisterData | DisconnectData> | undefined)?.agent
-    return resolver(event, ctx).filter((name) => name === undefined || name !== subject)
+    // Guarded like every other field read (header): a record that cannot
+    // say WHO arrived or left is not mail about anyone — empty, never a
+    // fallback to the orchestrator (codex round, task 139).
+    if (typeof subject !== 'string' || subject.length === 0) return []
+    return resolver(event, ctx).filter((name) => name !== subject)
   }
 }
 

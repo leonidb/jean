@@ -451,6 +451,27 @@ describe('the register/disconnect pair — an agent joining is mail, as its leav
     expect(resolution.resolve(own, { ...ctx, orchestrator: 'orchestrator-s' })).toEqual(['orchestrator-s'])
   })
 
+  test('a register or disconnect that cannot name its subject is history — never mail to the orchestrator about nobody (codex round)', () => {
+    // The log is permanent and the store untyped: a record with a missing or
+    // non-string `agent` must resolve empty, as every guarded field read
+    // does — not route to the seat because the exclusion found nothing to
+    // exclude.
+    const log = build()
+    const malformed = [
+      log.appendRaw('register', 'agent-x', { role: 'worker', idle: true, queued: true }),
+      log.appendRaw('register', 'agent-x', { agent: 42, role: 'worker', idle: true, queued: true }),
+      log.appendRaw('register', 'agent-x', { agent: '', role: 'worker', idle: true, queued: true }),
+      log.appendRaw('disconnect', 'agent-x', {}),
+      log.appendRaw('disconnect', 'agent-x', { agent: null }),
+    ]
+    let checked = 0
+    for (const e of malformed) {
+      expect(resolution.resolve(e, ctx), `${e.type} without a subject must be history`).toEqual([])
+      checked++
+    }
+    counted('subject-less records resolving empty', checked, 5)
+  })
+
   test('no orchestrator on record: a flagged register resolves empty — never a fallback (P4)', () => {
     const log = build()
     const e = log.append('register', `agent-${WORKER_A}`, { agent: WORKER_A, role: 'worker', idle: true, queued: true })
