@@ -84,9 +84,13 @@
  *                                               historical unflagged
  *                                               registers must not
  *                                               resurrect; disconnect was
- *                                               always mail, its history is
- *                                               already acked, and it never
- *                                               grew one.
+ *                                               always mail — its historical
+ *                                               pairs are cleared by the
+ *                                               log's own acks, and a seat's
+ *                                               unacked own-disconnects drop
+ *                                               out on replay (pending only
+ *                                               shrinks) — so it never grew
+ *                                               one.
  *   wiki-consolidated                         → orchestrator (queued only —
  *                                               the skill surfaces its
  *                                               anomalies to the human;

@@ -434,21 +434,20 @@ describe('scenario 4e — the pair resolves alike: an agent is never told of its
       { name: 'worker-x', role: 'worker', behaviour: { kind: 'reliable' } },
     ])
     dojo.registerAll()
-    dojo.act(SENSEI) // acks the greet and the worker's register
+    // A WORKER's departure is the seat's mail, unchanged…
+    dojo.disconnect('worker-x')
+    expect(dojo.mailboxEvents(SENSEI).map((e) => e.type)).toEqual(['greet', 'register', 'disconnect'])
+    dojo.act(SENSEI) // acks all three
     expect(dojo.mailboxIds(SENSEI)).toEqual([])
-    const greetsBefore = dojo.log.events().filter((e) => e.type === 'greet').length
-    expect(greetsBefore).toBe(1)
+    expect(dojo.log.events().filter((e) => e.type === 'greet').length).toBe(1)
 
+    // …and the seat's OWN is not.
     dojo.disconnect(SENSEI)
     const ownDisconnect = dojo.log
       .events()
       .find((e) => e.type === 'disconnect' && (e.data as { agent: string }).agent === SENSEI)
     expect(ownDisconnect).toBeDefined()
     expect(dojo.pendingPairs().some((p) => p.eventId === ownDisconnect?.id)).toBe(false)
-    // …while a WORKER's departure is the seat's mail, unchanged.
-    dojo.disconnect('worker-x')
-    expect(dojo.mailboxEvents(SENSEI).map((e) => e.type)).toEqual(['disconnect'])
-    dojo.act(SENSEI) // and the seat, gone, still clears what it is handed — a harness convenience; the point is an empty mailbox at return
     expect(dojo.mailboxIds(SENSEI)).toEqual([])
 
     // THE RESTART into an empty mailbox: greeted — a SECOND greet over the
