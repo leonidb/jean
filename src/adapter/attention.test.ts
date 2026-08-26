@@ -865,7 +865,12 @@ describe('an agent joining is mail, as its leaving is — over a real socket (ta
     })
 
   test('a worker’s register lands in the seat’s mailbox flagged and is announced; the seat’s own is not; a same-session reconnect (replace) adds nothing', async () => {
-    const server = await boot()
+    // TIMERS ON. The seat ACTS (acks) before the register lands, so its
+    // quiet clock is real, and when the register's own arrival hook runs in
+    // the same millisecond as the ack the clock is not yet due — the tick is
+    // what tells it a moment later, as in production. Without the timer this
+    // walk went red one run in six (measured), on nothing but the ms.
+    const server = await boot({ startTimers: true })
     const sensei = connect(server, 'sensei-s', 'sensei')
     await sensei.ready
     // THE SEAT'S OWN REGISTER IS NOT ITS MAIL: the resting mailbox is the
