@@ -82,6 +82,23 @@ Each event has: `id`, `type`, `taskId` (if task-related), `agent` (whom it conce
 - **agent-probe** — you may see one in your queue; it is a liveness question infra asked an agent, not a report about it. Ack and move on. If the agent answers there is no further event; the absence of `agent-down` is the all-clear.
 - **task-reminder** — a parked task has sat past its blocker's reminder window. `data.text` says which task, what it waits on, and whether it is snoozed. Every one is addressed to YOU, whatever the blocker: infra measures, you decide. Act on the task (answer, chase, escalate, snooze) — then ack; acking without acting just means the next reminder comes a window later.
 
+  **A `human` blocker means nag the human — every window, not once.** These reminders
+  reach you only because infra never messages a person; you are the delivery mechanism,
+  not the audience. Forward each one to the human on their bridge — they are the only
+  party who can unblock the task, so a reminder that stops in your mailbox has done
+  nothing. `Hold and ack` is a real verdict for machine events and for blockers nobody
+  can move; it is NOT one here. Silence is not a signal to stop: the human may leave a
+  task unanswered as long as they like, and the chase is what you owe them meanwhile.
+  Keep each nag short — what it is, what it needs from them, how long it has waited —
+  and let it repeat. It is a reminder, not an escalation.
+
+  **Do not snooze to quiet a nag.** `resumeAt` is for a date the human named, or a time
+  before which they demonstrably cannot act. Reaching for it because the reminders have
+  become repetitive silences the one party who needs them and turns a live blocker into
+  a task nobody is chasing — which is how work dies on the board. Noisy is the intended
+  behaviour of a human blocker; the cure is the human answering, or the human telling
+  you a date.
+
   **The daily picture is yours to compose.** Externally-blocked and snoozed tasks remind once a day, and several arriving together is the whole parked picture, not a queue to answer one by one. Fold them into ONE message to the human: a compact table — id · what it is (one line) · status · waiting on (who/what, how long). Include the hourly human-blocked items too; they don't generate the daily wake but they belong in the picture. Write it to be skimmed and skipped — no urgency markers, no closing question. If nothing is parked there are no reminders and there is nothing to send.
 
 ## Tasks — the dojo's central unit
