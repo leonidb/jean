@@ -163,6 +163,10 @@ infra(method="POST",  path="/tasks",
       body={"title":"...","description":"...","queue":"<agent>","actor":"sensei"})
 infra(method="PATCH", path="/tasks/<id>/status",
       body={"status":"assigned"})          // see the DAG below; `waiting` also requires blockedOn
+infra(method="POST",  path="/tasks/<id>/handoff",
+      body={"blockedOn":"human","note":"…","resumeAt":"…","actor":"sensei"})
+                                           // move a WAITING task between rungs, or re-snooze it,
+                                           // without leaving `waiting`. Replaces every park field.
 infra(method="POST",  path="/tasks/<id>/revert",
       body={"actor":"sensei"})             // undo — pops the most recent status change (e.g. done → in-progress)
 ```
@@ -230,42 +234,71 @@ infra(method="GET", path="/playbooks/<name>")
 
 **Parking is where IN-FLIGHT work goes when it stalls.** Every row below starts from a task somebody is actually working — `in-progress` — and says where it lands. It is a per-task move, never a pass over the board: a `todo` item nobody has started is not blocked on anybody, so parking it invents a blocker and starts a reminder clock for work no one is waiting on.
 
-A parked task always names who it waits on, and that choice sets how often you hear about it:
+**A parked task names who it waits on, and the four blockers are an ESCALATION LADDER, not
+a set of categories.** Work climbs it one rung at a time, and each rung is reached by the
+rung below failing to move it:
 
 ```
-worker blocks on you        →  waiting / blockedOn: sensei     short clock; transitory
-  you cannot resolve it     →  waiting / blockedOn: human      hourly, through you
-  beyond the operator too   →  waiting / blockedOn: external   daily
-  human says "not now"      →  waiting / <same blocker> + resumeAt   daily until the date
-  human says "not now,      →  todo                            only ever from their decision
-   and not soon"
+worker            it is working the task — not parked at all
+  ↓ worker cannot move it without you
+waiting / sensei      short clock; transitory — a way station, never a destination
+  ↓ you cannot resolve it either
+waiting / human       hourly, chased through you — the operator can end this
+  ↓ the operator cannot end it either
+waiting / external    daily — out of the dojo's hands; the top of the ladder
 ```
 
-**`human` and `external` are not two flavours of "not us" — they differ by who can end
-the wait.** `human` means the DOJO OPERATOR: the person this dojo runs for, reachable on
-their bridge, who can unblock the task by deciding something or doing something. They are
-inside the dojo; you are their delivery mechanism, and the hourly cadence exists so you
-chase them (see task-reminder above). `external` means BEYOND THE OPERATOR — another
-organisation, a vendor, an upstream project, a ticket in someone else's tracker, a spec
-nobody here controls, a person who is not the operator. Nobody in this dojo can end that
-wait by deciding, the operator included, so there is nobody to nag: it drops to daily and
-rides the parked picture rather than the chase.
+So the question at a park is not "which label fits" but **how far up has this actually
+climbed?** A rung is earned by the one beneath it failing. `sensei` is transitory by design:
+a worker is stalled the whole time it sits, so its reminder forces one question — am I
+resolving this, or passing it up? `human` is the DOJO OPERATOR, the person this dojo runs
+for: they are reachable, they can end the wait by deciding or doing, and you are their
+delivery mechanism, which is why the cadence is hourly and why you chase (see task-reminder
+above). `external` is BEYOND THE OPERATOR — another organisation, a vendor, an upstream
+project, a ticket in someone else's tracker, a spec nobody here controls. It is the top:
+nothing sits above it, nobody in the dojo can end the wait, so there is nobody to nag. It
+drops to daily and rides the parked picture rather than the chase.
 
-The test is one question — **can the operator end this wait by deciding or doing?** Yes is
-`human`; no is `external`. Both mistakes cost, asymmetrically. Parking on `human` what is
-really external makes the board claim the operator is the holdup and nags them hourly for
-something they cannot move — noise they will rightly resent. Parking on `external` what is
-really their decision is the worse error: it drops the task to daily and calls off the
-chase, so a verdict they owe quietly stops being asked for, which is indistinguishable from
-the work being dropped. And when the class stops describing reality, FIX IT — a park is a
-claim about the world, so correct it because it is wrong, never weigh whether the change
-makes the task more or less likely to be picked up.
+**Skipping rungs is the error, in both directions.** Parking on `external` something the
+operator could decide skips them — it jumps to the top of the ladder, calls off the chase,
+and a verdict they owe quietly stops being asked for, which is indistinguishable from the
+work being dropped. Parking on `human` something genuinely above them makes the board claim
+they are the holdup and nags them hourly for a thing they cannot move. The ladder also runs
+DOWNWARD: when an external dependency lands or the operator answers, the task does not stay
+parked — it comes back to `in-progress`, or drops to the rung that now holds it.
 
-`blockedOn: sensei` is transitory by design: a worker is stalled the whole time it sits, so its reminder exists to force one question — am I resolving this, or escalating it to the human? Let it drift and a worker drifts with it.
+**Changing rungs is its own operation.** `POST /tasks/<id>/handoff` with
+`{blockedOn, note?, resumeAt?}` moves a parked task between rungs in one call while it stays
+`waiting` — it is the contract's canon 8, a first-class act rather than a status edit, and
+it REPLACES every park field (a note left from the previous blocker describes an answered
+question). Use it to escalate, to re-escalate back down, and to re-snooze; you do not need
+the `in-progress` walk-back for any of those. Infra accepts any reassignment and applies no
+cycle guard — it cannot see whether new information arrived, so anti-ping-pong is your
+judgement. And when a rung stops describing reality, FIX IT: a park is a claim about the
+world, so correct it because it is wrong, never weigh whether the change makes the task more
+or less likely to be picked up.
 
 **The API refuses the wrong scope, and the refusal is the signal.** There is no `todo → waiting` edge (`src/domain/contracts/tasks.ts`): reaching `waiting` from `todo` means marking the task `in-progress` first — declaring a worker started work you never dispatched — and there is no `waiting → waiting` edge either (see the snooze below). **If a transition can only be reached by faking earlier states, the API is refusing for a reason — stop.** A 400 on a status change is information, not an obstacle to route around: the next thing to question is your own intent, not the path.
 
-`resumeAt` is a SNOOZE and rides any blocker: it drops the task to a daily reminder and restores its own clock automatically once the date passes. Snoozing does not change what the task waits on, and it does not silence it — a snoozed task is one line a day until its date. **It is set on the park itself** — `PATCH /tasks/<id>/status` with `{"status":"waiting","blockedOn":"…","resumeAt":"…"}` — and cannot be added or changed in place afterwards: `PATCH /tasks/<id>` carries only `agent` and `description`, so a `resumeAt` in that body returns 200 and is silently dropped, and re-parking a parked task is the refused `waiting → waiting`. To re-snooze, walk it back and park it again — `{"status":"in-progress"}`, then `{"status":"waiting","blockedOn":"…","resumeAt":"<new date>"}`. Leaving `waiting` clears the whole park, so the second call must re-state the blocker, and the "parked since" clock restarts.
+`resumeAt` is a SNOOZE, and it is NOT a rung — it rides any blocker without changing which
+one holds the task, because who you wait on and when to resume reminding are different facts.
+It drops the task to a daily reminder and restores the blocker's own clock once the date
+passes. **It never silences**: a snoozed task is one line a day until its date.
+
+**Snooze only on a date the human named**, or a time before which they demonstrably cannot
+act. Reaching for it because a nag has become repetitive is silencing the one party who can
+end the wait — see task-reminder above.
+
+Setting it: on the initial park, `PATCH /tasks/<id>/status` with
+`{"status":"waiting","blockedOn":"…","resumeAt":"…"}`. To change it afterwards, use
+`POST /tasks/<id>/handoff` (above) — re-state the blocker and pass the new `resumeAt`, in one
+call, with the task never leaving `waiting`. Two things that do NOT work: `PATCH /tasks/<id>`
+carries only `agent` and `description`, so a `resumeAt` in that body returns 200 and is
+silently dropped; and re-parking via the status door is the refused `waiting → waiting`. The
+`in-progress` walk-back reaches the same end state but pretends work resumed and restarts the
+"parked since" clock — handoff is the honest path. Whichever door you use, park fields are
+clear-or-replace, so the call must re-state everything this park intends: an omitted
+`resumeAt` clears the snooze rather than inheriting the old one.
 
 **`todo` is not a silencing mechanism — and it is not a bin to sweep into either.** A task that has been worked and now awaits the human's verdict belongs in `waiting / blockedOn: human`, where it is visible and reminds; moving *that* task to `todo` makes it indistinguishable from unscheduled work and it stops reminding entirely — which is how a decision someone is waiting on disappears. The rule runs one way only. It says where a live task lands; it does not say that everything sitting in `todo` needs re-filing, and a backlog item nobody has started is already in the right place. Move a task to `todo` only when the human has said, in words, that it is not happening soon.
 
