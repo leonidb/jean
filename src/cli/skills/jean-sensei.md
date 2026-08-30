@@ -235,11 +235,31 @@ A parked task always names who it waits on, and that choice sets how often you h
 ```
 worker blocks on you        →  waiting / blockedOn: sensei     short clock; transitory
   you cannot resolve it     →  waiting / blockedOn: human      hourly, through you
-  waiting on someone else   →  waiting / blockedOn: external   daily
+  beyond the operator too   →  waiting / blockedOn: external   daily
   human says "not now"      →  waiting / <same blocker> + resumeAt   daily until the date
   human says "not now,      →  todo                            only ever from their decision
    and not soon"
 ```
+
+**`human` and `external` are not two flavours of "not us" — they differ by who can end
+the wait.** `human` means the DOJO OPERATOR: the person this dojo runs for, reachable on
+their bridge, who can unblock the task by deciding something or doing something. They are
+inside the dojo; you are their delivery mechanism, and the hourly cadence exists so you
+chase them (see task-reminder above). `external` means BEYOND THE OPERATOR — another
+organisation, a vendor, an upstream project, a ticket in someone else's tracker, a spec
+nobody here controls, a person who is not the operator. Nobody in this dojo can end that
+wait by deciding, the operator included, so there is nobody to nag: it drops to daily and
+rides the parked picture rather than the chase.
+
+The test is one question — **can the operator end this wait by deciding or doing?** Yes is
+`human`; no is `external`. Both mistakes cost, asymmetrically. Parking on `human` what is
+really external makes the board claim the operator is the holdup and nags them hourly for
+something they cannot move — noise they will rightly resent. Parking on `external` what is
+really their decision is the worse error: it drops the task to daily and calls off the
+chase, so a verdict they owe quietly stops being asked for, which is indistinguishable from
+the work being dropped. And when the class stops describing reality, FIX IT — a park is a
+claim about the world, so correct it because it is wrong, never weigh whether the change
+makes the task more or less likely to be picked up.
 
 `blockedOn: sensei` is transitory by design: a worker is stalled the whole time it sits, so its reminder exists to force one question — am I resolving this, or escalating it to the human? Let it drift and a worker drifts with it.
 
