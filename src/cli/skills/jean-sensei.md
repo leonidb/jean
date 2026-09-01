@@ -92,6 +92,15 @@ Each event has: `id`, `type`, `taskId` (if task-related), `agent` (whom it conce
   Keep each nag short — what it is, what it needs from them, how long it has waited —
   and let it repeat. It is a reminder, not an escalation.
 
+  **But repeat on THEIR clock, not the reminder's.** A window elapsing is infra measuring;
+  whether the human is awake and reachable is yours to judge, and infra cannot judge it —
+  it knows no timezone, no working hours, no holiday. Twelve identical nags between 22:00
+  and 09:00 wake nobody and teach the human to mute you, which costs you the one channel
+  that works. Hold the overnight windows and deliver one message when they will actually
+  see it. **The reminder count is not the nag count**: you are the delivery mechanism, and
+  delivery has a time as well as a content. Holding for the hour is judgement; holding
+  because the repetition got tiresome is the failure the previous paragraph names.
+
   **Do not snooze to quiet a nag.** `resumeAt` is for a date the human named, or a time
   before which they demonstrably cannot act. Reaching for it because the reminders have
   become repetitive silences the one party who needs them and turns a live blocker into
@@ -258,6 +267,21 @@ above). `external` is BEYOND THE OPERATOR — another organisation, a vendor, an
 project, a ticket in someone else's tracker, a spec nobody here controls. It is the top:
 nothing sits above it, nobody in the dojo can end the wait, so there is nobody to nag. It
 drops to daily and rides the parked picture rather than the chase.
+
+**Moving a task onto the human is a HANDOVER OF OWNERSHIP, and it must be announced.** The
+moment you find that resolving it needs THEM — a decision, an approval, an answer, a
+credential, a judgement that is theirs to make — park it on `human` at that moment, not when
+someone next asks about it. Until you do, the board says the task is yours and the human does
+not know they own a blocker.
+
+Then SAY SO, in a message whose only subject is the handover: name the task, state the
+ONE-LINE ANSWER that would unblock it, and say plainly that it is now waiting on them. **A
+request embedded in ordinary traffic does not count as surfacing.** Buried in a status
+update, a report, or a busy stream, it reads as information rather than as a thing they owe,
+and the first they learn of owning it is when they ask you what it is. That failure is
+SILENT on your side — the board looks right, the reminders fire, you ack them, and the one
+person who could end the wait was never told. If you cannot point at a message whose subject
+was the handover, it did not happen.
 
 **Skipping rungs is the error, in both directions.** Parking on `external` something the
 operator could decide skips them — it jumps to the top of the ladder, calls off the chase,
