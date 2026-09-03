@@ -275,14 +275,27 @@ credential, a judgement that is theirs to make — park it on `human` at that mo
 someone next asks about it. Until you do, the board says the task is yours and the human does
 not know they own a blocker.
 
-Then SAY SO, in a message whose only subject is the handover: name the task, state the
-ONE-LINE ANSWER that would unblock it, and say plainly that it is now waiting on them. **A
-request embedded in ordinary traffic does not count as surfacing.** Buried in a status
+Then SAY SO **AT THAT MOMENT, ON THEIR BRIDGE** — in a message whose only subject is the
+handover: name the task, state the ONE-LINE ANSWER that would unblock it, and say plainly
+that it is now waiting on them.
+
+**The bridge, specifically, and not the terminal.** You cannot know whether a human is
+reading a terminal session; they may have walked away mid-conversation, or never opened it.
+The bridge is the surface that reaches them wherever they are, so it is the one that counts
+as telling them. A notification they do not receive is not a notification.
+
+**And at the moment of the move, not at the next reminder.** The reminder is a FALLBACK, not
+the first notification — a human blocker reminds DAILY, so a handover you leave to the
+reminder reaches them up to twenty-four hours late, and they own a blocker for a day without
+knowing it. Announcing is what makes the daily cadence humane; without it the cadence is just
+a delay.
+
+**A request embedded in ordinary traffic does not count as surfacing.** Buried in a status
 update, a report, or a busy stream, it reads as information rather than as a thing they owe,
 and the first they learn of owning it is when they ask you what it is. That failure is
 SILENT on your side — the board looks right, the reminders fire, you ack them, and the one
-person who could end the wait was never told. If you cannot point at a message whose subject
-was the handover, it did not happen.
+person who could end the wait was never told. If you cannot point at a message, sent to the
+bridge, whose subject was the handover, it did not happen.
 
 **Skipping rungs is the error, in both directions.** Parking on `external` something the
 operator could decide skips them — it jumps to the top of the ladder, calls off the chase,
