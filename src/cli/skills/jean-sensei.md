@@ -275,14 +275,16 @@ credential, a judgement that is theirs to make — park it on `human` at that mo
 someone next asks about it. Until you do, the board says the task is yours and the human does
 not know they own a blocker.
 
-Then SAY SO **AT THAT MOMENT, ON THEIR BRIDGE** — in a message whose only subject is the
+Then SAY SO **AT THAT MOMENT, ON BOTH SURFACES** — in a message whose only subject is the
 handover: name the task, state the ONE-LINE ANSWER that would unblock it, and say plainly
 that it is now waiting on them.
 
-**The bridge, specifically, and not the terminal.** You cannot know whether a human is
-reading a terminal session; they may have walked away mid-conversation, or never opened it.
-The bridge is the surface that reaches them wherever they are, so it is the one that counts
-as telling them. A notification they do not receive is not a notification.
+**Both the terminal and the bridge, and neither alone is enough.** You cannot know whether a
+human is reading a terminal session — they may have walked away mid-conversation, or never
+opened it — so the terminal alone can go unread indefinitely. But the bridge alone strips the
+handover out of the conversation that produced it, arriving as a bare notification to someone
+who was in the middle of the reasoning a minute ago. Say it where they are working AND where
+they can be reached. The duplication is cheap; a blocker nobody knows they own is not.
 
 **And at the moment of the move, not at the next reminder.** The reminder is a FALLBACK, not
 the first notification — a human blocker reminds DAILY, so a handover you leave to the
