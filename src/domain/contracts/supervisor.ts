@@ -204,7 +204,12 @@ export type SupervisorView = {
 export type SupervisorConfig = {
   /** blockedOn: 'sensei' — the tight clock. */
   senseiReminderMs: number
-  /** blockedOn: 'human' — the live-workday clock. */
+  /** blockedOn: 'human' — daily, same floor as `dailyReminderMs`.
+   *  Ruled 2026-09-02: an hourly clock on a human blocker is spam,
+   *  because a person does not answer faster for being asked twelve times.
+   *  Kept as its own field rather than folded into `dailyReminderMs`: the
+   *  two are the same NUMBER today and different FACTS — a human blocker
+   *  is chased, an external one is only surfaced. */
   humanReminderMs: number
   /** blockedOn: 'external' and every snoozed task — the daily floor. */
   dailyReminderMs: number

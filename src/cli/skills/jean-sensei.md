@@ -108,7 +108,7 @@ Each event has: `id`, `type`, `taskId` (if task-related), `agent` (whom it conce
   behaviour of a human blocker; the cure is the human answering, or the human telling
   you a date.
 
-  **The daily picture is yours to compose.** Externally-blocked and snoozed tasks remind once a day, and several arriving together is the whole parked picture, not a queue to answer one by one. Fold them into ONE message to the human: a compact table — id · what it is (one line) · status · waiting on (who/what, how long). Include the hourly human-blocked items too; they don't generate the daily wake but they belong in the picture. Write it to be skimmed and skipped — no urgency markers, no closing question. If nothing is parked there are no reminders and there is nothing to send.
+  **The daily picture is yours to compose.** Every parked task reminds once a day — human-blocked, externally-blocked and snoozed alike — so several arriving together IS the whole parked picture rather than a queue to answer one by one. Fold them into ONE message to the human: a compact table — id · what it is (one line) · status · waiting on (who/what, how long). Write it to be skimmed and skipped — no urgency markers, no closing question. If nothing is parked there are no reminders and there is nothing to send. Cadence no longer separates the blockers; HANDLING does — the human-blocked rows are the ones you are chasing, the rest are only being surfaced.
 
 ## Tasks — the dojo's central unit
 
@@ -252,7 +252,7 @@ worker            it is working the task — not parked at all
   ↓ worker cannot move it without you
 waiting / sensei      short clock; transitory — a way station, never a destination
   ↓ you cannot resolve it either
-waiting / human       hourly, chased through you — the operator can end this
+waiting / human       daily, CHASED through you — the operator can end this
   ↓ the operator cannot end it either
 waiting / external    daily — out of the dojo's hands; the top of the ladder
 ```
@@ -262,8 +262,9 @@ climbed?** A rung is earned by the one beneath it failing. `sensei` is transitor
 a worker is stalled the whole time it sits, so its reminder forces one question — am I
 resolving this, or passing it up? `human` is the DOJO OPERATOR, the person this dojo runs
 for: they are reachable, they can end the wait by deciding or doing, and you are their
-delivery mechanism, which is why the cadence is hourly and why you chase (see task-reminder
-above). `external` is BEYOND THE OPERATOR — another organisation, a vendor, an upstream
+delivery mechanism, which is why you chase rather than file (see task-reminder above). The
+cadence is daily — the same floor as `external` — because a person does not answer faster
+for being asked twelve times; what separates the two rungs is that you FORWARD this one. `external` is BEYOND THE OPERATOR — another organisation, a vendor, an upstream
 project, a ticket in someone else's tracker, a spec nobody here controls. It is the top:
 nothing sits above it, nobody in the dojo can end the wait, so there is nobody to nag. It
 drops to daily and rides the parked picture rather than the chase.
@@ -287,7 +288,7 @@ was the handover, it did not happen.
 operator could decide skips them — it jumps to the top of the ladder, calls off the chase,
 and a verdict they owe quietly stops being asked for, which is indistinguishable from the
 work being dropped. Parking on `human` something genuinely above them makes the board claim
-they are the holdup and nags them hourly for a thing they cannot move. The ladder also runs
+they are the holdup and chases them daily for a thing they cannot move. The ladder also runs
 DOWNWARD: when an external dependency lands or the operator answers, the task does not stay
 parked — it comes back to `in-progress`, or drops to the rung that now holds it.
 

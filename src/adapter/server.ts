@@ -268,7 +268,7 @@ function defaultAttention(): AttentionConfig {
     notifier: { nudgeIntervalMs, backoffMs },
     supervisor: {
       senseiReminderMs,
-      humanReminderMs: envMs('JEAN_HUMAN_REMINDER_MS', 3_600_000),
+      humanReminderMs: envMs('JEAN_HUMAN_REMINDER_MS', 86_400_000),
       dailyReminderMs: envMs('JEAN_DAILY_REMINDER_MS', 86_400_000),
       idlePingAfterMs: envMs('JEAN_IDLE_PING_AFTER_MS', 86_400_000),
       probeTimeoutMs,
