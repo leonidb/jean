@@ -10,6 +10,7 @@ import { resolve } from 'node:path'
 
 export const CONFIG_SCHEMA: Record<string, 'string' | 'number'> = {
   port: 'number',
+  bind: 'string',
   identity: 'string',
   // Telegram is the default chat bridge. Each dojo needs its own botToken
   // (Telegram permits one getUpdates poller per token); chatId picks the chat.
@@ -23,6 +24,26 @@ export const CONFIG_SCHEMA: Record<string, 'string' | 'number'> = {
 
 export type JeanConfig = {
   port?: number
+  /** The address the infra listens on. Absent means loopback — the default
+   *  lives with the bind, in `createAdapterServer`, so there is one literal
+   *  rather than two that can drift.
+   *
+   *  EXPOSING IS AN EXPLICIT ACT. `"0.0.0.0"` makes the dojo reachable from
+   *  the network, where callers are identified only by the name they claim
+   *  and nothing on the HTTP surface asks for a secret (task 145).
+   *
+   *  TWO VALUES ARE USEFUL TODAY: absent (loopback) and `"0.0.0.0"`. Both
+   *  answer on IPv4 loopback, which is what every one of this dojo's own
+   *  clients dials — the CLI (`apiUrl`), the channel plugin, peer deliver,
+   *  and `probeInfra`, which is also the single-instance check. A SPECIFIC
+   *  INTERFACE ADDRESS binds, and is then unreachable from the machine it
+   *  runs on, because none of those callers learn the address: `.jean/
+   *  infra.port` carries a port and they reconstruct the host. Nothing is
+   *  special-cased — whatever is here goes to `Bun.serve` — but the server
+   *  probes its own loopback at start-up and says so if it cannot be
+   *  reached, rather than leaving an operator to discover it as "the CLI
+   *  stopped working" (codex pass, task 146). */
+  bind?: string
   /** Stable short name for this dojo. Appears as the `from` field on outbound
    *  peer messages and as the key under which other dojos register us. Set at
    *  `jean dojo init` (defaults to basename of dojo root) and rarely changed. */
@@ -138,6 +159,7 @@ export function resolveConfig(dataDir: string): JeanConfig {
     const p = Number(process.env.JEAN_PORT)
     if (!Number.isNaN(p)) config.port = p
   }
+  if (process.env.JEAN_BIND) config.bind = process.env.JEAN_BIND
   if (process.env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_CHAT_ID) {
     config.telegram ??= {}
     if (process.env.TELEGRAM_BOT_TOKEN) config.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN

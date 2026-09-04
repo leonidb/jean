@@ -78,7 +78,7 @@ async function boot(overrides: Parameters<typeof createAdapterServer>[0] = {}): 
 
 function connect(server: AdapterHandle, agent: string, role = 'worker') {
   const frames: Record<string, unknown>[] = []
-  const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
+  const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
   const ready = new Promise<void>((done, fail) => {
     openSockets.push(ws)
     const timer = setTimeout(() => fail(new Error(`register timed out for ${agent}`)), 4_000)
@@ -98,7 +98,7 @@ function connect(server: AdapterHandle, agent: string, role = 'worker') {
 }
 
 const post = (server: AdapterHandle, path: string, body: unknown, agent?: string) =>
-  fetch(`http://localhost:${server.port}${path}`, {
+  fetch(`http://127.0.0.1:${server.port}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(agent !== undefined && { 'x-jean-agent': agent }) },
     body: JSON.stringify(body),
@@ -152,7 +152,7 @@ describe('the outbound leg — a decision reaches a socket', () => {
     // writes one per tick forever. E1 shipped that; the count is the pin.
     expect(log.filter((e) => e.type === 'nudge').length).toBe(0)
     // And the mail is still pending: nothing about a refusal clears anything.
-    const still = (await (await fetch(`http://localhost:${server.port}/events?agent=worker-mute`)).json()) as {
+    const still = (await (await fetch(`http://127.0.0.1:${server.port}/events?agent=worker-mute`)).json()) as {
       events: unknown[]
     }
     expect(still.events.length).toBe(1)
@@ -187,7 +187,7 @@ describe('carriage — the two places the agent sees its own inbox', () => {
 
     // The piggyback: a response to a registered agent holding mail carries
     // the line. Any response — this one is a board read.
-    const board = await fetch(`http://localhost:${server.port}/board`, { headers: { 'x-jean-agent': 'worker-a' } })
+    const board = await fetch(`http://127.0.0.1:${server.port}/board`, { headers: { 'x-jean-agent': 'worker-a' } })
     const line = board.headers.get('x-jean-inbox')
     expect(line).toBeTruthy()
     expect(line).toContain('1 queued')
@@ -226,13 +226,13 @@ describe('carriage — the two places the agent sees its own inbox', () => {
     // One own act, so the quiet clock has NOT passed — the only thing that
     // can make this agent due is the blocking interrupt. (An empty mailbox
     // carries nothing, so this read reports no carriage.)
-    await fetch(`http://localhost:${server.port}/events?agent=worker-mute`)
+    await fetch(`http://127.0.0.1:${server.port}/events?agent=worker-mute`)
 
     await post(server, '/send', { from: 'chat-human', to: 'worker-mute', text: 'are you there?' })
     server.tick()
     expect(attempts).toBeGreaterThan(1) // the interrupt really does re-fire while untold
 
-    const shown = await fetch(`http://localhost:${server.port}/board`, { headers: { 'x-jean-agent': 'worker-mute' } })
+    const shown = await fetch(`http://127.0.0.1:${server.port}/board`, { headers: { 'x-jean-agent': 'worker-mute' } })
     expect(shown.headers.get('x-jean-inbox')).toContain('1 blocking') // it really was shown
 
     const settled = attempts
@@ -246,10 +246,10 @@ describe('carriage — the two places the agent sees its own inbox', () => {
     const worker = connect(server, 'worker-a')
     await worker.ready
 
-    const quiet = await fetch(`http://localhost:${server.port}/board`, { headers: { 'x-jean-agent': 'worker-a' } })
+    const quiet = await fetch(`http://127.0.0.1:${server.port}/board`, { headers: { 'x-jean-agent': 'worker-a' } })
     expect(quiet.headers.get('x-jean-inbox')).toBeNull() // the empty case says nothing
 
-    const stranger = await fetch(`http://localhost:${server.port}/board`, { headers: { 'x-jean-agent': 'nobody' } })
+    const stranger = await fetch(`http://127.0.0.1:${server.port}/board`, { headers: { 'x-jean-agent': 'nobody' } })
     expect(stranger.headers.get('x-jean-inbox')).toBeNull() // no mailbox, no line
   })
 })
@@ -266,7 +266,7 @@ describe('the delivery ledger — evidence of what this process handed over', ()
     server.tick()
     expect(await until(() => worker.frames.find((f) => f.type === 'deliver'))).toBeDefined()
 
-    const fetched = (await (await fetch(`http://localhost:${server.port}/events?agent=worker-a`)).json()) as {
+    const fetched = (await (await fetch(`http://127.0.0.1:${server.port}/events?agent=worker-a`)).json()) as {
       events: { id: number; code: string }[]
     }
     const first = fetched.events[0]
@@ -293,7 +293,7 @@ describe('the delivery ledger — evidence of what this process handed over', ()
     // push can land and the agent's own read is the first handover there is.
     server.attachSurface({ name: 'worker-a', role: 'worker', deliver: () => false })
     await post(server, '/send', { from: 'orchestrator-o', to: 'worker-a', text: 'unpushed' })
-    const fetched = (await (await fetch(`http://localhost:${server.port}/events?agent=worker-a`)).json()) as {
+    const fetched = (await (await fetch(`http://127.0.0.1:${server.port}/events?agent=worker-a`)).json()) as {
       events: { id: number; code: string }[]
     }
     const first = fetched.events[0]
@@ -354,12 +354,12 @@ describe('supervision reaches the orchestrator', () => {
     const created = (await (
       await post(server, '/tasks', { title: 'park me', queue: 'worker-a' }, 'orchestrator-o')
     ).json()) as { id: string }
-    await fetch(`http://localhost:${server.port}/tasks/${created.id}/status`, {
+    await fetch(`http://127.0.0.1:${server.port}/tasks/${created.id}/status`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json', 'x-jean-agent': 'orchestrator-o' },
       body: JSON.stringify({ status: 'in-progress' }),
     })
-    await fetch(`http://localhost:${server.port}/tasks/${created.id}/status`, {
+    await fetch(`http://127.0.0.1:${server.port}/tasks/${created.id}/status`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json', 'x-jean-agent': 'orchestrator-o' },
       body: JSON.stringify({ status: 'waiting', blockedOn: 'human' }),
@@ -371,7 +371,7 @@ describe('supervision reaches the orchestrator', () => {
     let reminder: { data: { taskId?: string } } | undefined
     for (let i = 0; i < 20 && reminder === undefined; i++) {
       server.tick()
-      const box = (await (await fetch(`http://localhost:${server.port}/events?agent=orchestrator-o`)).json()) as {
+      const box = (await (await fetch(`http://127.0.0.1:${server.port}/events?agent=orchestrator-o`)).json()) as {
         events: { type: string; data: { taskId?: string } }[]
       }
       reminder = box.events.find((e) => e.type === 'task-reminder')
@@ -412,7 +412,7 @@ describe('the bridge seam', () => {
     // a private one.
     await server.postInbound('chat-human', 'hello back', { sentAt: 1_700_000_000_000, sourceId: 'slack-42' })
     const orchestratorBox = (await (
-      await fetch(`http://localhost:${server.port}/events?agent=orchestrator-o`)
+      await fetch(`http://127.0.0.1:${server.port}/events?agent=orchestrator-o`)
     ).json()) as { events: { type: string; data: { agent?: string; text?: string; sourceId?: string } }[] }
     const reply = orchestratorBox.events.find((e) => e.type === 'reply')
     expect(reply?.data).toMatchObject({ agent: 'chat-human', text: 'hello back', sourceId: 'slack-42' })
@@ -474,7 +474,7 @@ describe('the unconsolidated slice', () => {
   test('/context/recent returns what the librarian has not folded in yet', async () => {
     const server = await boot()
     await post(server, '/context/memorize', { agent: 'worker-a', role: 'worker', text: 'the relay rotates keys' })
-    const recent = (await (await fetch(`http://localhost:${server.port}/context/recent`)).json()) as {
+    const recent = (await (await fetch(`http://127.0.0.1:${server.port}/context/recent`)).json()) as {
       cursor: { lastEventId: number }
       events: { id: number; text: string }[]
     }
@@ -484,12 +484,12 @@ describe('the unconsolidated slice', () => {
     // `?limit=` takes the NEW end — the interesting end of an unconsolidated
     // slice is the recent one.
     await post(server, '/context/memorize', { agent: 'worker-a', role: 'worker', text: 'and the token is short-lived' })
-    const limited = (await (await fetch(`http://localhost:${server.port}/context/recent?limit=1`)).json()) as {
+    const limited = (await (await fetch(`http://127.0.0.1:${server.port}/context/recent?limit=1`)).json()) as {
       events: { text: string }[]
     }
     expect(limited.events.map((e) => e.text)).toEqual(['and the token is short-lived'])
 
-    const bad = await fetch(`http://localhost:${server.port}/context/recent?limit=lots`)
+    const bad = await fetch(`http://127.0.0.1:${server.port}/context/recent?limit=lots`)
     expect(bad.status).toBe(400)
   })
 })
@@ -510,7 +510,7 @@ describe('a disconnected holder whose claim cannot be dated', () => {
 
   /** Who the server currently holds a session for. */
   async function liveNames(server: AdapterHandle): Promise<string[]> {
-    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+    const body = (await (await fetch(`http://127.0.0.1:${server.port}/agents`)).json()) as {
       agents: { name: string }[]
     }
     return body.agents.map((a) => a.name)
@@ -518,7 +518,7 @@ describe('a disconnected holder whose claim cannot be dated', () => {
 
   /** The composer's observed floor, as `/agents` reports it. */
   async function activityOf(server: AdapterHandle, name: string): Promise<number | undefined> {
-    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+    const body = (await (await fetch(`http://127.0.0.1:${server.port}/agents`)).json()) as {
       agents: { name: string; lastActivityAt?: number }[]
     }
     return body.agents.find((a) => a.name === name)?.lastActivityAt
@@ -624,7 +624,7 @@ describe('a disconnected holder whose claim cannot be dated', () => {
 
     const downs = await until('a down report to be emitted', async () => {
       server.tick()
-      const seenEvents = (await (await fetch(`http://localhost:${server.port}/history?raw=true`)).json()) as {
+      const seenEvents = (await (await fetch(`http://127.0.0.1:${server.port}/history?raw=true`)).json()) as {
         events: { type: string; data: { subject?: string } }[]
       }
       const reported = seenEvents.events.filter((e) => e.type === 'agent-down').map((e) => e.data.subject ?? '')
@@ -709,7 +709,7 @@ describe('a restart starts a fresh quiet clock (ruled, task 140)', () => {
     })
   type Row = { name: string; connected: boolean; pending: number; lastActivityAt?: number }
   const rowOf = async (server: AdapterHandle, name: string): Promise<Row | undefined> => {
-    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as { agents: Row[] }
+    const body = (await (await fetch(`http://127.0.0.1:${server.port}/agents`)).json()) as { agents: Row[] }
     return body.agents.find((a) => a.name === name)
   }
   /** `until` over an async read — `/agents` is a round trip, not a lookup. */
@@ -767,7 +767,7 @@ describe('a restart starts a fresh quiet clock (ruled, task 140)', () => {
     await worker.ready
     worker.ws.send(JSON.stringify({ type: 'reply', text: 'half done' }))
     const landed = await poll(async () => {
-      const res = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-worker-w`)).json()) as {
+      const res = (await (await fetch(`http://127.0.0.1:${server.port}/history?stream=agent-worker-w`)).json()) as {
         events: StoredEvent[]
       }
       return res.events.some((e) => e.type === 'reply') ? true : undefined
@@ -791,7 +791,7 @@ describe('a restart starts a fresh quiet clock (ruled, task 140)', () => {
 
     // The 133 invariant held: mail was waiting, so no second greet was
     // minted — the announcement was the seat's only way to a turn.
-    const log = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-sensei-s`)).json()) as {
+    const log = (await (await fetch(`http://127.0.0.1:${server.port}/history?stream=agent-sensei-s`)).json()) as {
       events: StoredEvent[]
     }
     expect(log.events.filter((e) => e.type === 'greet').length).toBe(1)
@@ -844,14 +844,14 @@ describe('a restart starts a fresh quiet clock (ruled, task 140)', () => {
 describe('an agent joining is mail, as its leaving is — over a real socket (task 139)', () => {
   type Box = { events: { id: number; code: string; type: string; data: Record<string, unknown> }[] }
   const boxOf = async (server: AdapterHandle, agent: string): Promise<Box['events']> =>
-    ((await (await fetch(`http://localhost:${server.port}/events?agent=${agent}`)).json()) as Box).events
+    ((await (await fetch(`http://127.0.0.1:${server.port}/events?agent=${agent}`)).json()) as Box).events
   const ackAll = async (server: AdapterHandle, agent: string) => {
     const pairs = (await boxOf(server, agent)).map((e) => ({ id: e.id, code: e.code }))
     await post(server, '/ack', { pairs }, agent)
   }
   const registerWith = (server: AdapterHandle, frame: Record<string, unknown>) =>
     new Promise<WebSocket>((done, fail) => {
-      const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
+      const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
       openSockets.push(ws)
       const timer = setTimeout(() => fail(new Error('no answer to register')), 4_000)
       ws.onopen = () => ws.send(JSON.stringify({ type: 'register', ...frame }))
@@ -878,7 +878,7 @@ describe('an agent joining is mail, as its leaving is — over a real socket (ta
     // its subject; the record itself IS flagged (admitted at this door).
     expect(await until(() => sensei.frames.find((f) => f.type === 'deliver' && f.from === 'infra'))).toBeDefined()
     expect((await boxOf(server, 'sensei-s')).map((e) => e.type)).toEqual(['greet'])
-    const own = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-sensei-s`)).json()) as {
+    const own = (await (await fetch(`http://127.0.0.1:${server.port}/history?stream=agent-sensei-s`)).json()) as {
       events: StoredEvent[]
     }
     const ownRegister = own.events.find((e) => e.type === 'register')
@@ -906,7 +906,7 @@ describe('an agent joining is mail, as its leaving is — over a real socket (ta
     // write a disconnect: it no longer owns the seat.)
     await registerWith(server, { agent: 'worker-w', role: 'worker', sessionId: 'S1' })
     await until(() => (worker.readyState === WebSocket.CLOSED ? true : undefined))
-    const log = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-worker-w`)).json()) as {
+    const log = (await (await fetch(`http://127.0.0.1:${server.port}/history?stream=agent-worker-w`)).json()) as {
       events: StoredEvent[]
     }
     const registers = log.events.filter((e) => e.type === 'register')
@@ -950,7 +950,7 @@ describe('an agent joining is mail, as its leaving is — over a real socket (ta
     // THE SAME SESSION RE-ATTACHES AS A SURFACE: a replace.
     server.attachSurface({ name: 'bridge-b', role: 'user', sessionId: 'B1', deliver: () => true })
     await until(() => (socket.readyState === WebSocket.CLOSED ? true : undefined))
-    const log = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-bridge-b`)).json()) as {
+    const log = (await (await fetch(`http://127.0.0.1:${server.port}/history?stream=agent-bridge-b`)).json()) as {
       events: StoredEvent[]
     }
     expect(log.events.filter((e) => e.type === 'disconnect').length).toBe(0)
@@ -990,7 +990,7 @@ describe('an agent joining is mail, as its leaving is — over a real socket (ta
       sensei.ws.close()
     })
     const recorded = await until(async () => {
-      const log = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-sensei-s`)).json()) as {
+      const log = (await (await fetch(`http://127.0.0.1:${server.port}/history?stream=agent-sensei-s`)).json()) as {
         events: StoredEvent[]
       }
       return log.events.some((e) => e.type === 'disconnect') ? true : undefined

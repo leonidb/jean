@@ -77,7 +77,7 @@ beforeAll(async () => {
   dir = mkdtempSync(resolve(tmpdir(), 'jean-e2-subs-'))
   writeFileSync(resolve(dir, 'history.jsonl'), `${SEED.map((e) => JSON.stringify(e)).join('\n')}\n`)
   server = await createAdapterServer({ dataDir: dir })
-  base = `http://localhost:${server.port}`
+  base = `http://127.0.0.1:${server.port}`
 })
 
 afterAll(() => {
@@ -196,7 +196,7 @@ describe('replay does not re-append what the fold already derives', () => {
     // And the derivation SURVIVED the replay rather than merely not
     // duplicating: the task's subscribers are unchanged across the restart,
     // which is the migration half of the one rule doing its job.
-    const res = await fetch(`http://localhost:${second.port}/tasks/${taskId}/unsubscribe`, {
+    const res = await fetch(`http://127.0.0.1:${second.port}/tasks/${taskId}/unsubscribe`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-jean-agent': 'orchestrator-o' },
       body: JSON.stringify({ agent: 'worker-a' }),
@@ -206,6 +206,6 @@ describe('replay does not re-append what the fold already derives', () => {
 
     // Restore the server this file's afterAll stops.
     server = await createAdapterServer({ dataDir: dir })
-    base = `http://localhost:${server.port}`
+    base = `http://127.0.0.1:${server.port}`
   })
 })

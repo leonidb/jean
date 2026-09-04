@@ -105,6 +105,21 @@ jean infra status                      # show running state
                                        # lives: no IDLE sleep while on AC. Lid
                                        # close still sleeps, and on battery the
                                        # assertion is inert by design
+                                       #
+                                       # the server binds 127.0.0.1 — a dojo is
+                                       # reachable from its own machine and no
+                                       # further. Callers are identified by the
+                                       # name they claim, with no secret on the
+                                       # HTTP surface, so exposing it is an
+                                       # explicit act: set `bind` to "0.0.0.0"
+                                       # in jean.config.json (or JEAN_BIND).
+                                       # Those two values are the useful ones —
+                                       # both answer on loopback, which is what
+                                       # this dojo's own CLI, agents and peers
+                                       # dial. A specific interface address
+                                       # binds and is then unreachable from
+                                       # here; the server warns at start if it
+                                       # cannot reach itself on loopback
 
 # Start an agent
 jean agent start <name>                # or manually:

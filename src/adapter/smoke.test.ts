@@ -22,7 +22,7 @@ const opened: WebSocket[] = []
 
 beforeAll(async () => {
   server = await createAdapterServer()
-  base = `http://localhost:${server.port}`
+  base = `http://127.0.0.1:${server.port}`
 })
 
 afterAll(async () => {
@@ -43,7 +43,7 @@ afterAll(async () => {
  *  handshake is a real WS exchange, not a mock. */
 function connect(agent: string, role = 'worker'): Promise<{ ws: WebSocket; inbox: unknown[] }> {
   return new Promise((done, fail) => {
-    const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
     opened.push(ws)
     const inbox: unknown[] = []
     const timer = setTimeout(() => fail(new Error(`register timed out for ${agent}`)), 4_000)
@@ -175,7 +175,7 @@ describe('E1 smoke — the round trip over a real socket', () => {
   })
 
   test('an invalid role in a register frame is REFUSED — a live role outranks the record', async () => {
-    const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
     opened.push(ws)
     // Resolved on the CLOSE, not the message: the server refuses and then
     // closes, and waiting for the close is what leaves no half-open socket

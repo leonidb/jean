@@ -59,7 +59,7 @@ async function logged(dir: string): Promise<StoredEvent[]> {
 }
 
 const get = async (server: AdapterHandle, path: string) => {
-  const res = await fetch(`http://localhost:${server.port}${path}`)
+  const res = await fetch(`http://127.0.0.1:${server.port}${path}`)
   return { status: res.status, body: (await res.json()) as Record<string, never> }
 }
 
@@ -201,14 +201,14 @@ describe('the task include — composed from the two owning modules', () => {
     const server = await boot(dir)
 
     const withPlaybook = (await (
-      await fetch(`http://localhost:${server.port}/tasks`, {
+      await fetch(`http://127.0.0.1:${server.port}/tasks`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ title: 'ship it', queue: 'worker-a', playbook: 'deploy' }),
       })
     ).json()) as { id: string }
     const without = (await (
-      await fetch(`http://localhost:${server.port}/tasks`, {
+      await fetch(`http://127.0.0.1:${server.port}/tasks`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ title: 'just do it', queue: 'worker-a' }),
@@ -232,7 +232,7 @@ describe('the task include — composed from the two owning modules', () => {
     const dir = dojo()
     const server = await boot(dir)
     const task = (await (
-      await fetch(`http://localhost:${server.port}/tasks`, {
+      await fetch(`http://127.0.0.1:${server.port}/tasks`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ title: 'orphaned', queue: 'worker-a', playbook: 'deleted-last-week' }),

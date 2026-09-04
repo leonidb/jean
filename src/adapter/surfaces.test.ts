@@ -36,7 +36,7 @@ const opened: WebSocket[] = []
 
 beforeAll(async () => {
   server = await createAdapterServer()
-  base = `http://localhost:${server.port}`
+  base = `http://127.0.0.1:${server.port}`
   await connect('orchestrator-o', 'sensei')
   await connect('worker-a', 'worker')
 })
@@ -63,7 +63,7 @@ const pushed = new Map<string, Record<string, unknown>[]>()
 
 function connect(agent: string, role: string): Promise<WebSocket> {
   return new Promise((done, fail) => {
-    const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
     opened.push(ws)
     pushed.set(agent, [])
     const timer = setTimeout(() => fail(new Error(`register timed out for ${agent}`)), 4_000)
@@ -451,7 +451,7 @@ describe('the knowledge surface', () => {
     )
     const own = await createAdapterServer({ dataDir: dir })
     const read = async (path: string) =>
-      (await (await fetch(`http://localhost:${own.port}${path}`)).json()) as Record<string, unknown>
+      (await (await fetch(`http://127.0.0.1:${own.port}${path}`)).json()) as Record<string, unknown>
 
     const found = (await read('/context/search?q=orzammar%20throughput&scope=knowledge')) as unknown as {
       hits: { description?: string; page: string }[]
@@ -574,7 +574,7 @@ describe('telemetry never takes an answer away', () => {
         },
       },
     })
-    const res = await fetch(`http://localhost:${own.port}/context/search?q=anything`)
+    const res = await fetch(`http://127.0.0.1:${own.port}/context/search?q=anything`)
     expect(res.status).toBe(200)
     expect((await res.json()) as { empty: boolean }).toMatchObject({ empty: true })
     own.stop()

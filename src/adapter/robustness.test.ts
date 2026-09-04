@@ -42,14 +42,14 @@ async function boot(options: Parameters<typeof createAdapterServer>[0] = {}): Pr
 }
 
 const post = (server: AdapterHandle, path: string, body: unknown, agent?: string) =>
-  fetch(`http://localhost:${server.port}${path}`, {
+  fetch(`http://127.0.0.1:${server.port}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(agent !== undefined && { 'x-jean-agent': agent }) },
     body: JSON.stringify(body),
   })
 
 const mailboxOf = async (server: AdapterHandle, agent: string) =>
-  (await (await fetch(`http://localhost:${server.port}/events?agent=${agent}`)).json()) as {
+  (await (await fetch(`http://127.0.0.1:${server.port}/events?agent=${agent}`)).json()) as {
     events: { id: number; code: string }[]
   }
 
@@ -57,7 +57,7 @@ const mailboxOf = async (server: AdapterHandle, agent: string) =>
  *  `registered` or `refused`, and this file needs both. */
 function register(server: AdapterHandle, frame: Record<string, unknown>) {
   return new Promise<{ ws: WebSocket; answer: Record<string, unknown> }>((done, fail) => {
-    const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
     openSockets.push(ws)
     const timer = setTimeout(() => fail(new Error('no answer to register')), 4_000)
     ws.onopen = () => ws.send(JSON.stringify({ type: 'register', ...frame }))
@@ -117,7 +117,7 @@ describe('a frame that is not a message', () => {
 
     // And the session is still the registered one: a dropped frame must not
     // cost the seat.
-    const agents = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+    const agents = (await (await fetch(`http://127.0.0.1:${server.port}/agents`)).json()) as {
       agents: { name: string }[]
     }
     expect(agents.agents.map((a) => a.name)).toContain('worker-a')
@@ -151,7 +151,7 @@ describe('two sessions under one name', () => {
     expect(first.ws.readyState).toBe(WebSocket.CLOSED)
 
     // And the survivor still holds the seat afterwards.
-    const agents = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+    const agents = (await (await fetch(`http://127.0.0.1:${server.port}/agents`)).json()) as {
       agents: { name: string }[]
     }
     expect(agents.agents.filter((a) => a.name === 'worker-a').length).toBe(1)

@@ -50,7 +50,7 @@ async function boot(): Promise<AdapterHandle> {
   return server
 }
 
-const base = (server: AdapterHandle) => `http://localhost:${server.port}`
+const base = (server: AdapterHandle) => `http://127.0.0.1:${server.port}`
 const get = async (server: AdapterHandle, path: string, agent?: string) => {
   const res = await fetch(`${base(server)}${path}`, {
     headers: agent === undefined ? {} : { 'x-jean-agent': agent },
@@ -68,7 +68,7 @@ const post = async (server: AdapterHandle, path: string, body: unknown, agent?: 
 
 function connect(server: AdapterHandle, agent: string, role = 'worker', sessionId?: string) {
   return new Promise<WebSocket>((done, fail) => {
-    const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
     openSockets.push(ws)
     const timer = setTimeout(() => fail(new Error(`register timed out for ${agent}`)), 4_000)
     ws.onopen = () =>

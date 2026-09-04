@@ -42,7 +42,7 @@ async function boot(): Promise<AdapterHandle> {
 
 /** Register over the socket — the door the mint actually hangs off. */
 function connect(server: AdapterHandle, agent: string, role: string) {
-  const ws = new WebSocket(`ws://localhost:${server.port}/ws`)
+  const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
   openSockets.push(ws)
   return new Promise<WebSocket>((done, fail) => {
     const timer = setTimeout(() => fail(new Error(`register timed out for ${agent}`)), 4_000)
@@ -58,7 +58,7 @@ function connect(server: AdapterHandle, agent: string, role: string) {
 }
 
 const greetsFor = async (server: AdapterHandle, agent: string): Promise<StoredEvent[]> => {
-  const res = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-${agent}`)).json()) as {
+  const res = (await (await fetch(`http://127.0.0.1:${server.port}/history?stream=agent-${agent}`)).json()) as {
     events: StoredEvent[]
   }
   return res.events.filter((e) => e.type === 'greet')
@@ -66,19 +66,19 @@ const greetsFor = async (server: AdapterHandle, agent: string): Promise<StoredEv
 
 /** Read the agent's live mailbox — ids and ack codes, as the agent sees it. */
 const mailboxOf = async (server: AdapterHandle, agent: string) =>
-  (await (await fetch(`http://localhost:${server.port}/events?agent=${agent}`)).json()) as {
+  (await (await fetch(`http://127.0.0.1:${server.port}/events?agent=${agent}`)).json()) as {
     events: { id: number; code: string; type: string }[]
   }
 
 const ack = (server: AdapterHandle, agent: string, pairs: { id: number; code: string }[]) =>
-  fetch(`http://localhost:${server.port}/events/ack`, {
+  fetch(`http://127.0.0.1:${server.port}/events/ack`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-jean-agent': agent },
     body: JSON.stringify({ pairs }),
   })
 
 const send = (server: AdapterHandle, to: string, text: string) =>
-  fetch(`http://localhost:${server.port}/send`, {
+  fetch(`http://127.0.0.1:${server.port}/send`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ from: 'api', to, text }),
@@ -114,7 +114,7 @@ describe('the greet — the zero case of the announcement', () => {
     const server = await boot()
     await connect(server, 'sensei', 'sensei')
     await settle(() => greetsFor(server, 'sensei'), 1)
-    const box = (await (await fetch(`http://localhost:${server.port}/events?agent=sensei`)).json()) as {
+    const box = (await (await fetch(`http://127.0.0.1:${server.port}/events?agent=sensei`)).json()) as {
       events: { type: string; code?: string }[]
     }
     const greet = box.events.find((e) => e.type === 'greet')

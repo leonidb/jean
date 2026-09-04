@@ -104,7 +104,7 @@ describe('the bridge, on the seam', () => {
     // OUTBOUND: a `user` is not a mailbox-holder, so routing hands it to the
     // adapter leg — the bridge's transport — rather than queueing it.
     const out = (await (
-      await fetch(`http://localhost:${server.port}/send`, {
+      await fetch(`http://127.0.0.1:${server.port}/send`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ from: 'orchestrator-o', to: 'chat-777', text: 'the board is clear' }),
@@ -117,7 +117,7 @@ describe('the bridge, on the seam', () => {
     // that keeps a burst in order.
     inbound('any news?', { sentAt: 1_700_000_000_000, sourceId: 'tg-42' })
     await new Promise((r) => setTimeout(r, 50))
-    const history = (await (await fetch(`http://localhost:${server.port}/history?stream=agent-chat-777`)).json()) as {
+    const history = (await (await fetch(`http://127.0.0.1:${server.port}/history?stream=agent-chat-777`)).json()) as {
       events: { type: string; data: { text?: string; sourceId?: string; sentAt?: number } }[]
     }
     const reply = history.events.find((e) => e.type === 'reply')
@@ -132,14 +132,14 @@ describe('the bridge, on the seam', () => {
     const server = await boot(dir, {
       bridgeStatus: () => ({ configured: true, kind: 'telegram', target: 'chat-777', connected: false }),
     })
-    const status = (await (await fetch(`http://localhost:${server.port}/status`)).json()) as {
+    const status = (await (await fetch(`http://127.0.0.1:${server.port}/status`)).json()) as {
       bridge: { configured: boolean; kind?: string; connected?: boolean }
     }
     expect(status.bridge).toMatchObject({ configured: true, kind: 'telegram', connected: false })
 
     const bare = await boot(dojo())
     expect(
-      ((await (await fetch(`http://localhost:${bare.port}/status`)).json()) as { bridge: unknown }).bridge,
+      ((await (await fetch(`http://127.0.0.1:${bare.port}/status`)).json()) as { bridge: unknown }).bridge,
     ).toEqual({
       configured: false,
     })
@@ -180,7 +180,7 @@ describe('peers, on the same seam', () => {
     attachPeers(server, loadPeers(dir).peers, () => {}, 'this-dojo')
 
     const out = (await (
-      await fetch(`http://localhost:${server.port}/send`, {
+      await fetch(`http://127.0.0.1:${server.port}/send`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ from: 'orchestrator-o', to: 'the-other-dojo', text: 'have you seen this' }),
@@ -214,7 +214,7 @@ describe('peers, on the same seam', () => {
     attachPeers(server, loadPeers(dir).peers, () => {}, 'this-dojo')
 
     const out = (await (
-      await fetch(`http://localhost:${server.port}/send`, {
+      await fetch(`http://127.0.0.1:${server.port}/send`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ from: 'orchestrator-o', to: 'silent', text: 'anyone home' }),
@@ -300,14 +300,14 @@ describe('peers, on the same seam', () => {
     })
     attachPeers(server, registry, () => {}, 'this-dojo')
 
-    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+    const body = (await (await fetch(`http://127.0.0.1:${server.port}/agents`)).json()) as {
       agents: { name: string; connected: boolean; peer?: { reachable: boolean; reason?: string } }[]
     }
     const row = (n: string) => body.agents.find((a) => a.name === n)
 
     const sendTo = async (to: string) =>
       (await (
-        await fetch(`http://localhost:${server.port}/send`, {
+        await fetch(`http://127.0.0.1:${server.port}/send`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ from: 'orchestrator-o', to, text: 'ping' }),
@@ -344,7 +344,7 @@ describe('peers, on the same seam', () => {
 
     // And the fact hangs on peers ONLY — a non-peer session must not grow one.
     server.attachSurface({ name: 'not-a-peer', role: 'user', sessionId: 'x', deliver: () => true })
-    const after = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+    const after = (await (await fetch(`http://127.0.0.1:${server.port}/agents`)).json()) as {
       agents: { name: string; peer?: unknown }[]
     }
     expect(after.agents.find((a) => a.name === 'not-a-peer')?.peer).toBeUndefined()
@@ -595,7 +595,7 @@ describe('the bridge’s row carries its transport', () => {
     server.attachSurface({ name: 'chat-777', role: 'user', sessionId: 'bridge:telegram', deliver: () => true })
     server.attachSurface({ name: 'someone-else', role: 'user', sessionId: 'other', deliver: () => true })
 
-    const body = (await (await fetch(`http://localhost:${server.port}/agents`)).json()) as {
+    const body = (await (await fetch(`http://127.0.0.1:${server.port}/agents`)).json()) as {
       agents: { name: string; connected: boolean; transport?: Record<string, unknown> }[]
     }
     const bridgeRow = body.agents.find((a) => a.name === 'chat-777')

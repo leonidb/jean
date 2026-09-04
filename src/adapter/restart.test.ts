@@ -13,10 +13,10 @@ describe('the log is the state — a restart answers from it', () => {
     await Bun.write(`${dir}/.keep`, '')
 
     const first = await createAdapterServer({ dataDir: dir })
-    const one = `http://localhost:${first.port}`
+    const one = `http://127.0.0.1:${first.port}`
     const reg = (agent: string, role: string) =>
       new Promise<WebSocket>((done) => {
-        const ws = new WebSocket(`ws://localhost:${first.port}/ws`)
+        const ws = new WebSocket(`ws://127.0.0.1:${first.port}/ws`)
         ws.onopen = () => ws.send(JSON.stringify({ type: 'register', agent, role }))
         ws.onmessage = () => done(ws)
       })
@@ -35,7 +35,7 @@ describe('the log is the state — a restart answers from it', () => {
     // from an empty projection while the store kept counting ids from disk —
     // state and log disagreeing, silently.
     const second = await createAdapterServer({ dataDir: dir })
-    const two = `http://localhost:${second.port}`
+    const two = `http://127.0.0.1:${second.port}`
     const box = (await (await fetch(`${two}/events?agent=worker-r`)).json()) as {
       events: { id: number; code: string }[]
     }
@@ -107,7 +107,7 @@ describe('a register written before task 139 is history on replay; one written a
     await Bun.write(`${dir}/history.jsonl`, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`)
 
     const server = await createAdapterServer({ dataDir: dir })
-    const base = `http://localhost:${server.port}`
+    const base = `http://127.0.0.1:${server.port}`
     const box = (await (await fetch(`${base}/events?agent=orchestrator-r`)).json()) as {
       events: { id: number; type: string; data: { agent?: string } }[]
     }
@@ -118,7 +118,7 @@ describe('a register written before task 139 is history on replay; one written a
     // The seat connects: mail waiting (the flagged register) → announced,
     // not greeted, and its own fresh register is not added to its mailbox.
     const ws = await new Promise<WebSocket>((done) => {
-      const s = new WebSocket(`ws://localhost:${server.port}/ws`)
+      const s = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
       s.onopen = () => s.send(JSON.stringify({ type: 'register', agent: 'orchestrator-r', role: 'sensei' }))
       s.onmessage = (ev) => {
         if ((JSON.parse(String(ev.data)) as { type: string }).type === 'registered') done(s)

@@ -141,8 +141,30 @@ export type AdapterPorts = {
   peerReach: (agent: AgentName) => unknown
 }
 
+/** LOOPBACK BY DEFAULT, AND THE DEFAULT LIVES HERE.
+ *
+ *  `Bun.serve` with no hostname binds the WILDCARD — measured, and worth
+ *  writing down because Bun does not admit it: with no hostname the server
+ *  reports `hostname === 'localhost'` and `lsof` shows `*:PORT` on IPv6, so
+ *  the reported value describes what Bun was told rather than what it bound.
+ *  An explicit IPv4 literal is the only form measured to narrow it:
+ *
+ *    (none)      reported localhost   bound IPv6 *          all interfaces
+ *    127.0.0.1   reported 127.0.0.1   bound IPv4 127.0.0.1  loopback only
+ *    localhost   reported localhost   bound IPv6 [::1]      loopback only
+ *    0.0.0.0     reported 0.0.0.0     bound IPv4 *          all interfaces
+ *
+ *  It matters because the HTTP surface has no secret: a caller is whoever
+ *  they say they are (`callerOf`), so the trust boundary is the bind (task
+ *  145). Tests construct servers directly, which is the other reason the
+ *  default belongs to the adapter and not to the launcher. */
+const LOOPBACK = '127.0.0.1'
+
 export type ServerOptions = {
   port?: number
+  /** The address to bind. Absent = loopback. The launcher passes the dojo's
+   *  `bind` config through; exposing is an explicit act, never a fallback. */
+  hostname?: string
   /** Absent = in-memory (tests). */
   dataDir?: string
   /** How long an in-progress task may go quiet before `/board` flags it.
@@ -178,6 +200,12 @@ export type Surface = {
 
 export type AdapterHandle = {
   port: number
+  /** The address actually handed to `Bun.serve`. Reported so a caller — and
+   *  the start-up log — can state the bind rather than assume it. Note that
+   *  Bun's own reported hostname describes what it was TOLD (see LOOPBACK):
+   *  the guarantee comes from passing an explicit literal, and the adapter
+   *  suite pins the narrowing behaviourally rather than by this string. */
+  hostname: string
   /** Release the clocks, finish the appends already accepted, close the
    *  socket — in that order. Awaitable; callers that do not care may not. */
   stop: () => Promise<void>
@@ -1539,6 +1567,8 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
   // ── Bun.serve ──────────────────────────────────────────────────
 
   const server = Bun.serve<{ name?: AgentName; session?: Session }>({
+    // EXPLICIT, always. Bun's default is the wildcard; see LOOPBACK above.
+    hostname: options.hostname ?? LOOPBACK,
     port: options.port ?? 0,
     async fetch(req, srv) {
       const url = new URL(req.url)
@@ -1787,10 +1817,11 @@ export async function createAdapterServer(options: ServerOptions = {}): Promise<
     throw err
   }
 
-  ports.log(`[jean:new] listening on ${server.port}\n`)
+  ports.log(`[jean:new] listening on ${server.hostname}:${server.port}\n`)
 
   return {
     port: server.port ?? 0,
+    hostname: server.hostname ?? LOOPBACK,
 
     async stop() {
       if (stopping) return // idempotent: a double stop must not throw
@@ -1971,14 +2002,28 @@ class InfraStartError extends Error {}
  * One instance per dojo.
  *
  * ONE PROBE, AND THEN THE REAL BIND IS THE TEST. The old launcher also
- * SPECULATIVELY bound the port and released it to see whether it was free —
- * and that probe bound `127.0.0.1` while the server itself binds the
- * wildcard, so the two are not the same question. Measured on the boot
- * check: with an unrelated process listening on `*:8791` over IPv6, the
- * speculative bind SUCCEEDED on IPv4 loopback, the real bind then failed,
- * and the operator got a raw `EADDRINUSE` stack trace instead of the
- * sentence this function exists to produce. Letting the one real bind answer
- * the question makes a mismatch impossible.
+ * SPECULATIVELY bound the port and released it to see whether it was free.
+ * That was a different question from the one the server asks — the probe
+ * bound `127.0.0.1` while the server bound the wildcard — and the two could
+ * disagree: measured on the boot check, with an unrelated process listening
+ * on `*:8791` over IPv6, the speculative bind SUCCEEDED on IPv4 loopback,
+ * the real bind then failed, and the operator got a raw `EADDRINUSE` stack
+ * trace instead of the sentence this function exists to produce.
+ *
+ * Since task 146 the server binds loopback too, so on the default the two
+ * are now the same question. The speculative probe is still not reinstated,
+ * for a reason that outlives the alignment: a bind-and-release can only ever
+ * answer about the instant it ran, while the real bind answers about the
+ * socket it is holding.
+ *
+ * ONE ASYMMETRY REMAINS, AND IT IS DELIBERATE. `probeInfra` below dials
+ * 127.0.0.1, so a live infra bound to a SPECIFIC interface address would not
+ * be recognised as jean-shaped here — this check would fall through and
+ * clean up runtime files that are not stale. That is a real hazard and it is
+ * the same one that makes such a bind useless anyway: every client of this
+ * dojo dials loopback (codex pass, task 146). It is bounded rather than
+ * fixed, by the start-up loopback check in the launcher, which tells the
+ * operator the bind is unreachable instead of letting it look like it worked.
  */
 async function enforceSingleInstance(dataDir: string, port: number): Promise<void> {
   const live = await probeInfra(port)
@@ -2037,6 +2082,10 @@ if (import.meta.main) {
     const infra = await startOrRefuse({
       dataDir,
       port,
+      // The dojo's own bind, or nothing — in which case the adapter's
+      // loopback default stands. Passing `config.bind` through rather than
+      // defaulting here keeps ONE literal for the default (see LOOPBACK).
+      hostname: config.bind,
       // THE TIMERS RUN IN PRODUCTION. Off by default because a test suite
       // must not inherit a clock; on here, because without them nothing ever
       // announces and the whole attention system is inert.
@@ -2073,6 +2122,26 @@ if (import.meta.main) {
           ),
       },
     })
+
+    // ── CAN THIS DOJO REACH ITS OWN INFRA? ──
+    //
+    // Every client of a dojo dials 127.0.0.1: the CLI's `apiUrl`, the channel
+    // plugin's ws/http, peer deliver, and `probeInfra` — which is also the
+    // single-instance check. A `bind` that does not answer there binds fine
+    // and is then useless from the machine it runs on, and the way an
+    // operator would otherwise meet that is "the CLI stopped working".
+    //
+    // So ask, once, with the thing the clients use. Loopback and 0.0.0.0
+    // both pass; a specific interface address is what this catches. It warns
+    // rather than refuses: the bind is the operator's to make, and the
+    // server is already serving whoever can reach it.
+    if ((await probeInfra(infra.port)) === null) {
+      process.stderr.write(
+        `[jean:new] WARNING: bound ${infra.hostname}:${infra.port}, which does not answer on ` +
+          `127.0.0.1 — this dojo's own CLI, agents and peers dial loopback and will not reach it. ` +
+          `Use the default (loopback) or "0.0.0.0".\n`,
+      )
+    }
 
     // ── THE HANDLERS ARE ARMED HERE, AND NOT EARLIER ──
     //
