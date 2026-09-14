@@ -26,7 +26,13 @@
  */
 
 import type { BlockedOn, TaskStatus } from './../../domain/contracts/tasks.ts'
-import type { AgentRole, ReplyData, SendData, TaskCommentData } from './../../domain/contracts/vocabulary.ts'
+import type {
+  AgentRole,
+  ReplyData,
+  SendData,
+  TaskCommentData,
+  TaskUpdatedData,
+} from './../../domain/contracts/vocabulary.ts'
 import { taskStream } from './../../domain/contracts/vocabulary.ts'
 import { playbooks } from './../../domain/playbooks/index.ts'
 import { tasks } from './../../domain/tasks/index.ts'
@@ -51,6 +57,41 @@ const isBlocker = (v: unknown): v is BlockedOn => typeof v === 'string' && v in 
  *  dropped: a caller that asked for a view it did not get and was told
  *  nothing has been silently answered with less than it requested. */
 const INCLUDES = new Set(['comments', 'messages', 'playbook'])
+
+/** The body fields `PATCH /tasks/:id` understands — the same rule as
+ *  `INCLUDES` one route over, and it was missing here (task 154). A
+ *  `Record<keyof TaskUpdatedData, true>` so a field added to the event's data
+ *  does not compile until it is named here, which is `STATUSES`' guard
+ *  applied to a body. `actorRole` rides alongside because `actorOf` reads it
+ *  and it never reaches the event. */
+const UPDATABLE: Record<keyof TaskUpdatedData | 'actorRole', true> = {
+  agent: true,
+  description: true,
+  actor: true,
+  actorRole: true,
+}
+
+/** Where the fields this route does NOT take actually live. A refusal that
+ *  only says no leaves the caller guessing, and the wrong door here is next
+ *  to the right one — every entry below is a body someone composed by hand
+ *  and got a 200 for.
+ *
+ *  `queue` and `title` are the two that name no door, and that is the answer
+ *  rather than a gap: both are written once, at creation. `queue` is not
+ *  creation-time provenance — `heldBy` reads it as the name that says who
+ *  holds an unstarted dispatch (`tasks/index.ts:499`), which is what puts a
+ *  down agent into the disconnected view for a task it has not started
+ *  (ruled, task 115). Moving one would move a supervision fact, so it is a
+ *  schema change and not this route's silence to break. */
+const ELSEWHERE: Record<string, string> = {
+  status: 'PATCH /tasks/<id>/status',
+  blockedOn: 'PATCH /tasks/<id>/status to park, or POST /tasks/<id>/handoff to move a parked task',
+  blockedNote: 'PATCH /tasks/<id>/status to park, or POST /tasks/<id>/handoff to move a parked task',
+  resumeAt: 'PATCH /tasks/<id>/status on the initial park, or POST /tasks/<id>/handoff to change it after',
+  queue: 'fixed at creation — a queue names who holds an unstarted dispatch and is read by supervision',
+  title: 'fixed at creation',
+  playbook: 'fixed at creation',
+}
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined)
 
@@ -212,10 +253,46 @@ export function taskRoutes(ctx: SurfaceContext): (req: Request, url: URL) => Pro
     return ctx.json(taskOr404(id))
   }
 
+  /**
+   * The reassignment and description door — and the one place in this file
+   * that used to answer 200 to a question it had not been asked (task 154).
+   *
+   * A body carrying `queue` was accepted, serialized without it, and returned
+   * 200 with the original queue in the response. Same for `resumeAt`, and
+   * same for `status` — a caller aiming at `/tasks/<id>/status` and missing
+   * by one path segment was told its close had succeeded. That is task 018's
+   * family exactly: a plausible-looking result answering a different question
+   * than the one asked, which is worse than no answer because nobody goes
+   * looking.
+   *
+   * So unknown fields are REFUSED and the refusal names the door, matching
+   * `GET /tasks/:id?include=` and `/board`'s no-parameters rule. And a body
+   * with nothing writable in it is refused too: it appended a `task-updated`
+   * carrying only an actor — a permanent event recording that nothing
+   * happened — and read to the caller as a successful edit.
+   */
   async function update(id: string, req: Request, url: URL): Promise<Response> {
     const body = await ctx.body(req)
     if (body === null) return ctx.json({ error: 'body must be { agent?, description?, actor? }' }, 400)
     if (taskOr404(id) === undefined) return refuse(renameTaskRefusal({ kind: 'unknown-task' }))
+    const unsupported = Object.keys(body).filter((k) => !(k in UPDATABLE))
+    if (unsupported.length > 0) {
+      const doors = unsupported.filter((k) => k in ELSEWHERE).map((k) => `${k}: ${ELSEWHERE[k]}`)
+      return ctx.json(
+        {
+          error: `unsupported field: ${unsupported.join(', ')}`,
+          valid: Object.keys(UPDATABLE),
+          ...(doors.length > 0 && { hint: doors.join('; ') }),
+        },
+        400,
+      )
+    }
+    if (str(body.agent) === undefined && typeof body.description !== 'string') {
+      return ctx.json(
+        { error: 'nothing to update: body must carry agent or description', valid: Object.keys(UPDATABLE) },
+        400,
+      )
+    }
     const { actor } = actorOf(req, url, body)
     // The reassignment path: `agent` here is what makes the server append the
     // new owner's automatic subscription (A-SUB), which is why an empty

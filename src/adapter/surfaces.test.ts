@@ -243,6 +243,31 @@ describe('the tasks surface', () => {
     expect(body).not.toHaveProperty('unavailable')
   })
 
+  test('a field PATCH /tasks/:id cannot apply is REFUSED, not dropped — and the refusal names the door', async () => {
+    // The live specimen (task 154): a body carrying `queue` returned 200 with
+    // the ORIGINAL queue in it, so the caller was told a move it never got.
+    // `status` is the same shape one path segment away — aiming at
+    // `/tasks/<id>/status` and missing used to answer 200 to a close that
+    // never happened.
+    const q = await call('PATCH', `/tasks/${id}`, { queue: 'somewhere-else' })
+    expect(q.status).toBe(400)
+    expect((q.body as unknown as { error: string }).error).toContain('queue')
+
+    const st = await call('PATCH', `/tasks/${id}`, { status: 'done' })
+    expect(st.status).toBe(400)
+    expect((st.body as unknown as { hint: string }).hint).toContain('/status')
+
+    // NOTHING WRITABLE IS ALSO A REFUSAL: this used to append a
+    // `task-updated` carrying only an actor — a permanent event recording
+    // that nothing happened, answered 200.
+    const empty = await call('PATCH', `/tasks/${id}`, {})
+    expect(empty.status).toBe(400)
+
+    // And the door still opens for what it does take.
+    const ok = await call('PATCH', `/tasks/${id}`, { description: 'still editable' })
+    expect(ok.status).toBe(200)
+  })
+
   test('a filter on /board is REFUSED, not ignored — and the refusal names the endpoint that filters', async () => {
     // The live specimen, reproduced: `?status=` was inert here, so this exact
     // call used to return the WHOLE board — every task, every description —
