@@ -173,12 +173,16 @@ export type SupervisedAgentFacts = {
    *  over. Its first draft here asserted the two-way invariant, and the
    *  builder refuted it against the live board: a task REASSIGNED away from
    *  the queue it was created in leaves the queue-holder on the stuck clock
-   *  owning nothing. Q-1 makes queue and owner coincide otherwise, so
-   *  reassignment is the whole of the gap. Under a
-   *  two-way reading the probe would then have named that task and, by the
-   *  ruled worker action, told the worker to park work belonging to someone
-   *  else mid-flight. Owner-only is what stops the payload turning a silent
-   *  over-inclusion into an explicit wrong instruction.
+   *  owning nothing. REASSIGNMENT IS NOT THE WHOLE OF THE GAP, and this
+   *  sentence said it was until task 153 checked it against the effect-side
+   *  doc: Q-1 also DECLINES TO FIRE when the queue is not yet a dojo agent,
+   *  which leaves `agent: undefined` with nobody reassigning anything. Both
+   *  shapes are set out where the payload is declared, and pinned together
+   *  in `tasks.conformance.test.ts`. Under a two-way reading the probe would
+   *  then have named that task and, by the ruled worker action, told the
+   *  worker to park work belonging to someone else mid-flight. Owner-only is
+   *  what stops the payload turning a silent over-inclusion into an explicit
+   *  wrong instruction.
    *
    *  Narrowing `engaged` itself is 084/135's business and is not done here. */
   engagedTaskIds: readonly string[]
@@ -265,10 +269,17 @@ export type SupervisorConfig = {
  * `engagedTaskIds` is meaningless on the idle arm and REQUIRED on the stuck
  * one, and the shape says so rather than leaving a reader to find out. The
  * idle ping is reached only past `if (agent.holdsUndone) continue`, so an
- * idle-armed probe has no tasks BY CONSTRUCTION; the stuck arm fires only
- * on `engaged`, so it always has at least one. The non-empty tuple is that
- * second half stated in the type — this repo's own habit (`Record<AgentRole,
- * true>` over a hand-written set) applied to a list.
+ * idle-armed probe has no tasks BY CONSTRUCTION; the stuck arm carries the
+ * field because that is the arm the question is about.
+ *
+ * WHICH ARM CARRIES THE FIELD IS ALL THE UNION SAYS — never how long the
+ * list is. An earlier draft of this paragraph went further and called it a
+ * non-empty tuple, reasoning that the stuck arm fires only on `engaged` and
+ * `engaged` is holding one. That is false; the field doc below carries the
+ * refutation, the two shapes that open the gap, and the reason an empty list
+ * is a fact rather than a gap. Stating the length here as well would put the
+ * same claim in two places that must agree, which is the failure this
+ * paragraph was written to avoid.
  */
 export type SupervisorEffect =
   | { kind: 'remind'; taskId: string; to: AgentName; blockedOn: BlockedOn; ageMs: number }
