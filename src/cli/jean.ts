@@ -2881,11 +2881,6 @@ function agentLaunchFlags(agentDir: string): string {
   return `--add-dir .jean --add-dir ${relJean} --add-dir ${relJean}/roles/${role}`
 }
 
-function isWorktreeDirty(path: string): boolean {
-  const result = Bun.spawnSync(['git', '-C', path, 'status', '--porcelain'], { stdout: 'pipe', stderr: 'pipe' })
-  return result.stdout.toString().trim().length > 0
-}
-
 // ── Agent Add ─────────────────────────────────────────────────────
 
 function cmdAgentAdd(args: string[]) {
@@ -3407,10 +3402,21 @@ function cmdAgentRemove(args: string[]) {
   }
 
   if (agent.branch !== undefined) {
-    // Worktree agent: check dirty state, remove via git
-    if (!force && isWorktreeDirty(agent.path)) {
-      console.error(`Agent "${name}" has uncommitted changes. Use --force to remove anyway.`)
-      process.exit(1)
+    // Worktree agent: check dirty/check-failed state, remove via git. Reuses
+    // export's own git-status classification rather than a second, narrower
+    // one — a worktree whose `.git` names a missing bare fails `git status`
+    // itself (exit non-zero), which a stdout-only dirty check silently reads
+    // as "clean" and would let `remove` destroy without --force.
+    if (!force) {
+      const check = checkGitRepo(agent.path)
+      if (check.kind === 'error') {
+        console.error(`Agent "${name}": git status check failed (${check.message}). Use --force to remove anyway.`)
+        process.exit(1)
+      }
+      if (check.dirty) {
+        console.error(`Agent "${name}" has uncommitted changes. Use --force to remove anyway.`)
+        process.exit(1)
+      }
     }
 
     const bareDir = findBareRepo(dojoRoot)
