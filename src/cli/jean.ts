@@ -2000,15 +2000,18 @@ function scanDojoRootEntries(dojoRoot: string): { agentPaths: string[]; unrecogn
  */
 async function cmdDojoExport(args: string[]) {
   const yesFlag = args.includes('--yes')
+  const dryRun = args.includes('--dry-run')
   const outIdx = args.indexOf('--out')
   const outArg = outIdx >= 0 ? args[outIdx + 1] : undefined
   if (outIdx >= 0 && (!outArg || outArg.startsWith('--'))) {
     console.error('--out requires a file path.')
     process.exit(1)
   }
-  const unexpected = args.filter((a, i) => a !== '--yes' && a !== '--out' && !(outIdx >= 0 && i === outIdx + 1))
+  const unexpected = args.filter(
+    (a, i) => a !== '--yes' && a !== '--dry-run' && a !== '--out' && !(outIdx >= 0 && i === outIdx + 1),
+  )
   if (unexpected.length > 0) {
-    console.error('Usage: jean dojo export [--out <file>] [--yes]')
+    console.error('Usage: jean dojo export [--out <file>] [--yes] [--dry-run]')
     console.error(`Unexpected argument: ${unexpected[0]}`)
     process.exit(1)
   }
@@ -2018,6 +2021,26 @@ async function cmdDojoExport(args: string[]) {
   const dojoName = basename(dojoRoot)
   const cfg = readConfig(dataDir)
 
+  // A check that would otherwise abort export before the pre-flight report
+  // ever prints. --dry-run downgrades every one of these to a reported
+  // finding and keeps going, so one run surfaces everything a real export
+  // would need — including a check the user has not gotten past yet —
+  // instead of stopping at the first blocker. `anyFinding` drives the
+  // all-clear line below: dry-run must say so explicitly when there is
+  // truly nothing to report, not just trail off after the repo listing.
+  let anyFinding = false
+  const stopOrReport = (lines: string[]): void => {
+    anyFinding = true
+    if (dryRun) {
+      console.log(`${RED}Would stop a real export:${RESET}`)
+      for (const l of lines) console.log(`  ${l}`)
+      console.log()
+      return
+    }
+    for (const l of lines) console.error(l)
+    process.exit(1)
+  }
+
   // The exclude patterns built below rely on bsdtar/libarchive glob
   // semantics (the `^` anchor and backslash-escapes); GNU tar reads `^` as a
   // literal, so every anchored exclude would silently match nothing but
@@ -2026,9 +2049,10 @@ async function cmdDojoExport(args: string[]) {
   // actually applied to.
   const tarVersion = Bun.spawnSync(['tar', '--version'], { stdout: 'pipe', stderr: 'pipe' })
   if (!tarVersion.stdout.toString().includes('bsdtar')) {
-    console.error("This command's exclude patterns assume bsdtar (macOS's default tar).")
-    console.error("The 'tar' on this PATH is not bsdtar.")
-    process.exit(1)
+    stopOrReport([
+      "This command's exclude patterns assume bsdtar (macOS's default tar).",
+      "The 'tar' on this PATH is not bsdtar.",
+    ])
   }
 
   // .jean/context and .jean/workspace are git repos BY REQUIREMENT (dojo init
@@ -2047,56 +2071,67 @@ async function cmdDojoExport(args: string[]) {
       // Single-quoted so the printed commands work verbatim, copy-pasted,
       // even when the dojo's own path contains a space.
       const q = shellQuote(dir)
-      console.error(`${label} exists but is not a git repository — it is meant to always be one.`)
-      console.error('Fix it first, then re-run export:')
-      console.error(`  git -C ${q} init -q -b main`)
-      console.error(`  git -C ${q} add -A`)
-      console.error(`  git -C ${q} commit -q -m "initial commit"`)
-      process.exit(1)
+      stopOrReport([
+        `${label} exists but is not a git repository — it is meant to always be one.`,
+        'Fix it first, then re-run export:',
+        `  git -C ${q} init -q -b main`,
+        `  git -C ${q} add -A`,
+        `  git -C ${q} commit -q -m "initial commit"`,
+      ])
     }
   }
 
-  // Validate the destination before the pre-flight prompt — a doomed export
-  // should fail fast, not after the user has already said yes.
-  const dateStamp = new Date().toISOString().slice(0, 10)
-  // The dojo's directory name, not `cfg.identity` — identity is free text
-  // and may contain a `/`, which would otherwise land inside a path.
-  const defaultOut = resolve(dirname(dojoRoot), `${dojoName}-${dateStamp}.tar.gz`)
-  const outArgResolved = resolve(outArg ?? defaultOut)
-  const outParent = dirname(outArgResolved)
-  if (!existsSync(outParent)) {
-    console.error(`--out's directory does not exist: ${outParent}`)
-    process.exit(1)
-  }
-  // Resolve the parent through realpath before the inside-dojo comparison —
-  // a symlinked parent (e.g. a shortcut into the dojo) would otherwise
-  // compare unequal to the (already realpath'd) dojoRoot while writing
-  // physically inside it, which tar would then try to archive into itself.
-  const outPath = resolve(realpathSync(outParent), basename(outArgResolved))
-  if (outPath === dojoRoot || outPath.startsWith(`${dojoRoot}${sep}`)) {
-    console.error(`Refusing to write the archive inside the dojo itself: ${outPath}`)
-    process.exit(1)
-  }
-  // Atomically claim the destination now, rather than an existsSync check
-  // separate from whatever later creates the file — that gap is exactly the
-  // window import's own destination check had to close (see cmdDojoImport).
-  // `tar -cf` itself has no no-clobber option; it happily overwrites, so the
-  // claim is a zero-byte placeholder tar's own write then fills in.
-  try {
-    writeFileSync(outPath, '', { flag: 'wx' })
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      console.error(`Archive already exists: ${outPath}`)
-      process.exit(1)
-    }
-    throw err
-  }
-  // From here on, any refusal must give up the claim rather than leave an
-  // empty, orphaned placeholder where an archive never actually landed.
-  const abort = (message: string): never => {
-    rmSync(outPath, { force: true })
+  // Destination handling is meaningless under --dry-run — nothing is ever
+  // written, so no --out is validated or claimed, and `abort` stays a plain
+  // print-and-exit that the (dry-run-only) infra check below never reaches.
+  let outPath = ''
+  let abort: (message: string) => never = (message) => {
     console.error(message)
     process.exit(1)
+  }
+  if (!dryRun) {
+    // Validate the destination before the pre-flight prompt — a doomed export
+    // should fail fast, not after the user has already said yes.
+    const dateStamp = new Date().toISOString().slice(0, 10)
+    // The dojo's directory name, not `cfg.identity` — identity is free text
+    // and may contain a `/`, which would otherwise land inside a path.
+    const defaultOut = resolve(dirname(dojoRoot), `${dojoName}-${dateStamp}.tar.gz`)
+    const outArgResolved = resolve(outArg ?? defaultOut)
+    const outParent = dirname(outArgResolved)
+    if (!existsSync(outParent)) {
+      console.error(`--out's directory does not exist: ${outParent}`)
+      process.exit(1)
+    }
+    // Resolve the parent through realpath before the inside-dojo comparison —
+    // a symlinked parent (e.g. a shortcut into the dojo) would otherwise
+    // compare unequal to the (already realpath'd) dojoRoot while writing
+    // physically inside it, which tar would then try to archive into itself.
+    outPath = resolve(realpathSync(outParent), basename(outArgResolved))
+    if (outPath === dojoRoot || outPath.startsWith(`${dojoRoot}${sep}`)) {
+      console.error(`Refusing to write the archive inside the dojo itself: ${outPath}`)
+      process.exit(1)
+    }
+    // Atomically claim the destination now, rather than an existsSync check
+    // separate from whatever later creates the file — that gap is exactly the
+    // window import's own destination check had to close (see cmdDojoImport).
+    // `tar -cf` itself has no no-clobber option; it happily overwrites, so the
+    // claim is a zero-byte placeholder tar's own write then fills in.
+    try {
+      writeFileSync(outPath, '', { flag: 'wx' })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        console.error(`Archive already exists: ${outPath}`)
+        process.exit(1)
+      }
+      throw err
+    }
+    // From here on, any refusal must give up the claim rather than leave an
+    // empty, orphaned placeholder where an archive never actually landed.
+    abort = (message: string): never => {
+      rmSync(outPath, { force: true })
+      console.error(message)
+      process.exit(1)
+    }
   }
 
   const { pid, port } = readRuntimeFiles(dataDir)
@@ -2107,7 +2142,9 @@ async function cmdDojoExport(args: string[]) {
       info = await probeInfra(port)
     }
     if (isOwnInfra(info, dataDir)) {
-      abort(`Infra is running for this dojo (pid ${pid}, port ${port}). Run 'jean infra stop' first.`)
+      const message = `Infra is running for this dojo (pid ${pid}, port ${port}). Run 'jean infra stop' first.`
+      if (dryRun) stopOrReport([message])
+      else abort(message)
     }
   }
 
@@ -2123,10 +2160,25 @@ async function cmdDojoExport(args: string[]) {
   ]
   for (const r of repos) {
     if (!existsSync(resolve(r.path, '.git'))) continue
-    console.log(`  ${formatGitRepoCheck(r.label, checkGitRepo(r.path))}`)
+    const check = checkGitRepo(r.path)
+    console.log(`  ${formatGitRepoCheck(r.label, check)}`)
+    // Never having had a remote (context/workspace, most agents day to day)
+    // is normal and not actionable, so it alone does not count against
+    // all-clear — but dirty/detached/an upstream that WAS configured and is
+    // now gone/ahead/behind/a failed check are exactly what this report
+    // exists to surface.
+    const clean =
+      check.kind === 'ok' &&
+      !check.dirty &&
+      !check.detached &&
+      !check.upstreamGone &&
+      check.ahead === 0 &&
+      check.behind === 0
+    if (!clean) anyFinding = true
   }
 
   if (unrecognised.length > 0) {
+    anyFinding = true
     console.log()
     for (const name of unrecognised) console.log(`  ${name}: unrecognised top-level entry — will not travel`)
   }
@@ -2141,6 +2193,7 @@ async function cmdDojoExport(args: string[]) {
     (e): e is [string, Peer & { origin: { type: 'local-path'; path: string } }] => e[1].origin.type === 'local-path',
   )
   if (writePaths.length > 0 || peerEntries.length > 0) {
+    anyFinding = true
     console.log()
     for (const p of writePaths) console.log(`  senseiWritePaths: ${p}`)
     for (const [id, peer] of peerEntries) console.log(`  peer ${id}: ${peer.origin.path}`)
@@ -2152,6 +2205,7 @@ async function cmdDojoExport(args: string[]) {
     cfg.slack?.botToken ? 'slack.botToken' : null,
   ].filter((k): k is string => k !== null)
   if (credentialKeys.length > 0) {
+    anyFinding = true
     console.log()
     for (const key of credentialKeys) console.log(`  config carries ${key}`)
   }
@@ -2169,6 +2223,16 @@ async function cmdDojoExport(args: string[]) {
   }
 
   console.log()
+
+  // A genuinely separate branch, not a flag threaded through the write path
+  // below — dry-run returns here unconditionally, so there is no route by
+  // which a clean report falls through into claiming a destination or
+  // writing an archive.
+  if (dryRun) {
+    if (!anyFinding) console.log(`${GREEN}No issues found — export can run cleanly.${RESET}`)
+    console.log(`${DIM}Dry run — nothing written. Re-run without --dry-run to export.${RESET}`)
+    return
+  }
 
   if (!yesFlag) {
     if (process.stdin.isTTY !== true) {
@@ -3527,7 +3591,8 @@ Commands:
   jean dojo prune                             Drop registry entries whose dojo folder was deleted
   jean dojo move <new-path>                   Move this dojo to a new location
   jean dojo repair                            Fix records of this dojo's own path (after a copy or manual move)
-  jean dojo export [--out <file>] [--yes]     Archive this dojo to move it to another machine
+  jean dojo export [--out <file>] [--yes] [--dry-run]    Archive this dojo to move it to another machine
+    --dry-run         Report what export would find and do; write nothing, ask nothing
   jean dojo import <archive> [path]           Unpack an exported dojo and repair it in place
   jean dojo start [agents...] [--only a,b,c]  Lay out current iTerm tab: infra | sensei | workers
                                               (macOS + iTerm2; current shell becomes the infra pane)

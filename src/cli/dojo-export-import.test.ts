@@ -579,6 +579,85 @@ describe('jean dojo export / import', () => {
     expect(existsSync(archive)).toBe(false)
   })
 
+  test('--dry-run reports a running infra as a finding instead of aborting, and writes nothing', async () => {
+    process.env.JEAN_REGISTRY_PATH = resolve(tmp, 'dojos.json')
+    const dojoRoot = resolve(tmp, 'dojo')
+    expect(runJean(tmp, 'dojo', 'init', dojoRoot, '--git', '--port', '8763').exitCode).toBe(0)
+    gitInitContext(dojoRoot)
+    const dojoRootReal = realpathSync(dojoRoot)
+    const dataDir = resolve(dojoRootReal, '.jean')
+
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ name: 'jean-infra', dataDir, pid: process.pid }),
+    })
+    servers.push(server)
+    writeFileSync(resolve(dojoRoot, '.jean', 'infra.pid'), `${process.pid}\n`)
+    writeFileSync(resolve(dojoRoot, '.jean', 'infra.port'), `${server.port}\n`)
+
+    const result = await runJeanAsync(dojoRoot, 'dojo', 'export', '--dry-run')
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Infra is running for this dojo')
+    // No default archive landed alongside the dojo.
+    const dateStamp = new Date().toISOString().slice(0, 10)
+    expect(existsSync(resolve(tmp, `dojo-${dateStamp}.tar.gz`))).toBe(false)
+  })
+
+  test('--dry-run reports a non-git .jean/context as a finding and keeps going through the rest of the report', () => {
+    process.env.JEAN_REGISTRY_PATH = resolve(tmp, 'dojos.json')
+    const dojoRoot = resolve(tmp, 'dojo')
+    expect(runJean(tmp, 'dojo', 'init', dojoRoot, '--git', '--port', '8764').exitCode).toBe(0)
+    // Deliberately NOT calling gitInitContext — this is the finding under test.
+    expect(runJean(dojoRoot, 'agent', 'add', 'worker1').exitCode).toBe(0)
+
+    const result = runJean(dojoRoot, 'dojo', 'export', '--dry-run')
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('') // reported on stdout, not as a real refusal
+    expect(result.stdout).toContain('.jean/context')
+    expect(result.stdout).toContain('not a git repository')
+    // The report continues past that finding instead of stopping there.
+    expect(result.stdout).toContain('.jean/workspace:')
+    expect(result.stdout).toContain('worker1:')
+    const dateStamp = new Date().toISOString().slice(0, 10)
+    expect(existsSync(resolve(tmp, `dojo-${dateStamp}.tar.gz`))).toBe(false)
+  })
+
+  test('--dry-run says so explicitly when there is nothing to report', () => {
+    process.env.JEAN_REGISTRY_PATH = resolve(tmp, 'dojos.json')
+    const dojoRoot = resolve(tmp, 'dojo')
+    expect(runJean(tmp, 'dojo', 'init', dojoRoot, '--git', '--port', '8765').exitCode).toBe(0)
+    gitInitContext(dojoRoot)
+    // A freshly added agent is clean and simply lacks an upstream — normal,
+    // not a finding — so this dojo has nothing at all to report.
+    expect(runJean(dojoRoot, 'agent', 'add', 'worker1').exitCode).toBe(0)
+
+    const result = runJean(dojoRoot, 'dojo', 'export', '--dry-run')
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('No issues found')
+    expect(result.stdout).not.toContain('Would stop a real export')
+    const dateStamp = new Date().toISOString().slice(0, 10)
+    expect(existsSync(resolve(tmp, `dojo-${dateStamp}.tar.gz`))).toBe(false)
+  })
+
+  test('--dry-run with findings does not print the all-clear line, writes nothing, and never prompts', () => {
+    process.env.JEAN_REGISTRY_PATH = resolve(tmp, 'dojos.json')
+    const dojoRoot = resolve(tmp, 'dojo')
+    expect(runJean(tmp, 'dojo', 'init', dojoRoot, '--git', '--port', '8766').exitCode).toBe(0)
+    gitInitContext(dojoRoot)
+    expect(runJean(dojoRoot, 'agent', 'add', 'worker1').exitCode).toBe(0)
+    writeFileSync(resolve(dojoRoot, 'worker1', 'dirty.txt'), 'uncommitted\n')
+
+    // Non-TTY, no --yes: a real export would refuse here. --dry-run must not
+    // even reach that prompt, clean report or not.
+    const result = runJean(dojoRoot, 'dojo', 'export', '--dry-run')
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('uncommitted change')
+    expect(result.stdout).not.toContain('No issues found')
+    expect(result.stdout).not.toContain('Not a terminal')
+    const dateStamp = new Date().toISOString().slice(0, 10)
+    expect(existsSync(resolve(tmp, `dojo-${dateStamp}.tar.gz`))).toBe(false)
+  })
+
   test('import refuses an existing destination path', () => {
     process.env.JEAN_REGISTRY_PATH = resolve(tmp, 'old-machine-dojos.json')
     const dojoRoot = resolve(tmp, 'dojo')
