@@ -36,6 +36,17 @@ export async function probeInfra(port: number, timeoutMs = 500): Promise<InfraIn
   }
 }
 
+/** Does a `probeInfra` result identify THIS dojo's own infra — as opposed to
+ *  no server, a foreign server, or another dojo's infra that happens to
+ *  share a recycled port? The one question both `enforceSingleInstance`
+ *  (refusing a second start) and `jean dojo repair` (deciding whether a
+ *  copied dojo's runtime files are live) need answered the same way.
+ *  `dataDir === ''` counts as a match too — a legacy server that never
+ *  recorded one. */
+export function isOwnInfra(info: InfraInfo | null, dataDir: string): boolean {
+  return info?.name === INFRA_IDENTITY && (info.dataDir === '' || info.dataDir === dataDir)
+}
+
 /** Read the pid and port from `.jean/infra.pid` and `.jean/infra.port` in a data dir. */
 export function readRuntimeFiles(dataDir: string): { pid: number | null; port: number | null } {
   const pidFile = resolve(dataDir, 'infra.pid')

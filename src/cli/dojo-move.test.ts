@@ -64,6 +64,35 @@ describe('jean dojo move', () => {
     expect(status.exitCode).toBe(0)
   })
 
+  test('regenerates permissions at the new path, for the agent and the librarian', () => {
+    const oldRoot = resolve(tmp, 'perm-old')
+    expect(runJean(tmp, 'dojo', 'init', oldRoot, '--git', '--port', '8704').exitCode).toBe(0)
+    expect(runJean(oldRoot, 'agent', 'add', 'worker1').exitCode).toBe(0)
+
+    const newRoot = resolve(tmp, 'perm-new')
+    expect(runJean(oldRoot, 'dojo', 'move', newRoot).exitCode).toBe(0)
+
+    // Old-path DIRECTORY rules (the ones that actually grant or deny reachable
+    // access) are dropped; only the one EXACT-FILE rule the framework emits —
+    // the .mcp.json self-escalation deny, whose target is never supposed to
+    // exist — is left behind for the old path too (see absoluteGlobRuleTarget
+    // in jean.ts for why: it can't tell "old and gone" apart from "correctly
+    // absent" for that one rule, so it conservatively never drops it).
+    const isOldDirRule = (r: string) => r.includes(oldRoot) && !r.endsWith('/.mcp.json)')
+
+    const settings = JSON.parse(readFileSync(resolve(newRoot, 'worker1', '.claude', 'settings.local.json'), 'utf8'))
+    const workerRules: string[] = [...settings.permissions.allow, ...settings.permissions.deny]
+    expect(workerRules.some((r) => r.includes(newRoot))).toBe(true)
+    expect(workerRules.some(isOldDirRule)).toBe(false)
+
+    const librarianSettings = JSON.parse(
+      readFileSync(resolve(newRoot, '.jean', 'roles', 'librarian', '.claude', 'settings.local.json'), 'utf8'),
+    )
+    const librarianRules: string[] = [...librarianSettings.permissions.allow, ...librarianSettings.permissions.deny]
+    expect(librarianRules.some((r) => r.includes(newRoot))).toBe(true)
+    expect(librarianRules.some(isOldDirRule)).toBe(false)
+  })
+
   test('refuses to overwrite an existing destination', () => {
     const oldRoot = resolve(tmp, 'old')
     expect(runJean(tmp, 'dojo', 'init', oldRoot, '--port', '8701').exitCode).toBe(0)

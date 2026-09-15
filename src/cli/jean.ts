@@ -60,19 +60,11 @@ import {
   provisionLibrarianTrigger,
 } from '../infra/librarian.ts'
 import { identityFromConfig, loadPeers, type Peer, savePeers } from '../infra/peers.ts'
-import {
-  allocatePort,
-  pruneStale,
-  readRegistry,
-  registryPath,
-  removeDojo,
-  upsertDojo,
-  writeRegistry,
-} from '../infra/registry.ts'
+import { allocatePort, pruneStale, readRegistry, registryPath, upsertDojo, writeRegistry } from '../infra/registry.ts'
 import {
   findDojoRootFrom,
-  INFRA_IDENTITY,
   isLocalInfraAlive,
+  isOwnInfra,
   isProcessAlive,
   probeInfra,
   readRuntimeFiles,
@@ -1103,7 +1095,10 @@ async function cmdDojo(args: string[]) {
       await cmdDojoInit(args.slice(1))
       break
     case 'move':
-      cmdDojoMove(args.slice(1))
+      await cmdDojoMove(args.slice(1))
+      break
+    case 'repair':
+      await cmdDojoRepair(args.slice(1))
       break
     case 'start':
       cmdDojoStart(args.slice(1))
@@ -1118,7 +1113,7 @@ async function cmdDojo(args: string[]) {
       cmdDojoPrune()
       break
     default:
-      console.error('Usage: jean dojo <init|move|start|list|register|prune> ...')
+      console.error('Usage: jean dojo <init|move|repair|start|list|register|prune> ...')
       process.exit(1)
   }
 }
@@ -1462,13 +1457,11 @@ function cmdDojoPrune() {
 // ── Dojo move: relocate a dojo on disk ───────────────────────────
 
 /**
- * Move the current dojo to a new path, repairing git worktrees. Jean bakes no
- * absolute path into agent config (the channel server is user-scoped and agents
- * self-identify from cwd), so a move is just relocate + `git worktree repair`.
- * Intended to keep a dojo move down to a single command — critical-path for
- * organizing command-center dojo layouts.
+ * Move the current dojo to a new path, then repair it there. Intended to keep
+ * a dojo move down to a single command — critical-path for organizing
+ * command-center dojo layouts.
  */
-function cmdDojoMove(args: string[]) {
+async function cmdDojoMove(args: string[]) {
   const oldRoot = realpathSync(findDojoRoot())
   const targetArg = args.find((a) => !a.startsWith('--'))
   if (!targetArg) {
@@ -1497,6 +1490,9 @@ function cmdDojoMove(args: string[]) {
   }
 
   // Infra must be stopped — PID files and open sockets don't survive the move.
+  // Same-machine, pre-rename, so a live pid is trustworthy here in a way a
+  // COPIED pid file is not (repairDojo below presumes copied state is stale;
+  // this check is what stops the rename itself, before repair ever runs).
   const dataDir = resolve(oldRoot, '.jean')
   const { pid } = readRuntimeFiles(dataDir)
   if (pid !== null && isProcessAlive(pid)) {
@@ -1504,42 +1500,142 @@ function cmdDojoMove(args: string[]) {
     process.exit(1)
   }
 
-  // Capture port/identity from the still-present old config before moving, so we
-  // can repoint the registry afterward without re-reading from the moved tree.
-  const movedCfg = readConfig(dataDir)
-
   renameSync(oldRoot, newRoot)
   // Our own cwd may have been inside the old root — now a ghost inode, which
   // makes any posix_spawn fail with ENOENT. Rebase onto the new root before
-  // touching worktrees or agent configs.
+  // repairing.
   if (process.cwd().startsWith(oldRoot)) process.chdir(newRoot)
 
-  // Repoint the machine-global registry at the new location. removeDojo is
-  // required (upsert no longer prunes neighbors); re-add under the new path
-  // when the dojo has a port to track.
-  removeDojo(oldRoot)
-  if (movedCfg.port !== undefined) {
-    upsertDojo({ path: newRoot, port: movedCfg.port, identity: movedCfg.identity })
+  console.log(`${GREEN}Dojo moved${RESET}`)
+  console.log(`  From: ${oldRoot}`)
+  console.log(`  To:   ${newRoot}`)
+  console.log()
+
+  // Everything that records the old path — worktrees, agent permissions, the
+  // registry — gets fixed up by the same repair a copy-to-a-new-machine needs.
+  await repairDojo(newRoot)
+
+  if (process.cwd().startsWith(oldRoot)) {
+    console.log()
+    console.log(`${DIM}Your shell is still on the old path — cd to the new location.${RESET}`)
+  }
+  console.log()
+  console.log(`${DIM}Note: Claude Code session history is keyed by absolute cwd.${RESET}`)
+  console.log(`${DIM}Past sessions from the old path won't be found by 'claude -c' here.${RESET}`)
+}
+
+// ── Dojo repair: fix a dojo's records of where it lives ──────────
+
+/**
+ * Parse an absolute DIRECTORY-glob Edit rule (`Edit(//path/**)`, what
+ * `fileRule`'s default emits) back to the filesystem path it targets.
+ *
+ * Returns null for anything else — including the framework's one absolute
+ * EXACT-FILE rule, `Edit(//<worktree>/.mcp.json)` (the self-escalation deny,
+ * permissions.ts:215). That file is never supposed to exist — Jean writes no
+ * per-worktree .mcp.json by design — so an existence check would strip that
+ * deny on every single repair, forever. Only the directory-glob form, whose
+ * target is supposed to exist, is checked.
+ */
+function absoluteGlobRuleTarget(rule: string): string | null {
+  const m = /^Edit\(\/\/(.+)\/\*\*\)$/.exec(rule)
+  return m ? `/${m[1]}` : null
+}
+
+type RepairOpts = { dryRun?: boolean }
+
+/**
+ * Bring every record of this dojo's own absolute path up to date with
+ * `dojoRoot` — wherever it actually is right now. Used standalone, after a
+ * dojo directory is copied to a new machine, and by `cmdDojoMove`, for which
+ * a move is exactly this repair run at a path that didn't exist a moment ago.
+ *
+ * Presumes copied state is stale rather than assuming anything is running —
+ * this is typically the FIRST command run after a copy. The one refusal is a
+ * VERIFIED one: the recorded port answers, right now, as this dojo's own
+ * infra — `enforceSingleInstance`'s own rule (server.ts), applied here
+ * instead of at a start.
+ */
+async function repairDojo(dojoRoot: string, opts: RepairOpts = {}): Promise<void> {
+  const dryRun = opts.dryRun ?? false
+  const plan = dryRun ? 'would ' : ''
+  const dataDir = resolve(dojoRoot, '.jean')
+  const bareDir = resolve(dataDir, '.bare')
+
+  if (existsSync(bareDir) && !Bun.which('git')) {
+    console.error(`This dojo has a git bare repo (${bareDir}) but 'git' is not on PATH.`)
+    console.error('Install git first, then re-run.')
+    process.exit(1)
   }
 
-  // Discover agent worktrees by scanning for .jean/.jean-agent.json — we can't
-  // use discoverAgents() yet because it calls `git worktree list`, which reads
-  // stale gitdir pointers and drops all worktrees until repair runs.
+  // ── Runtime files — presumed stale until PROVEN otherwise ────────
+  //
+  // A recorded pid being alive proves nothing on its own: pids get reused,
+  // and on a freshly copied dojo it is a coincidence by construction. The one
+  // question worth asking is the one `enforceSingleInstance` already asks at
+  // every infra start — does the recorded port answer, right now, as THIS
+  // dojo's own infra? Everything else (no pid, a dead pid, a live pid that
+  // answers as someone else's infra or doesn't answer at all) is stale copied
+  // data, removed by default rather than guessed about.
+  const pidFile = resolve(dataDir, 'infra.pid')
+  const portFile = resolve(dataDir, 'infra.port')
+  const { pid, port } = readRuntimeFiles(dataDir)
+  if (pid === null && port === null) {
+    console.log(`  ${DIM}runtime${RESET}      no stale runtime files`)
+  } else {
+    let verifiedOurs = false
+    if (pid !== null && port !== null && isProcessAlive(pid)) {
+      let info = await probeInfra(port)
+      if (info === null) {
+        // A loaded machine can be slow to answer right after a copy — one retry.
+        await new Promise((r) => setTimeout(r, 2000))
+        info = await probeInfra(port)
+      }
+      verifiedOurs = isOwnInfra(info, dataDir)
+    }
+    if (verifiedOurs) {
+      console.error(`Infra is running for this dojo (pid ${pid}, port ${port}). Run 'jean infra stop' first.`)
+      process.exit(1)
+    }
+    console.log(
+      `  ${DIM}runtime${RESET}      ${plan}remove stale infra.pid / infra.port${pid !== null ? ` (pid ${pid})` : ''}`,
+    )
+    if (!dryRun) {
+      rmSync(pidFile, { force: true })
+      rmSync(portFile, { force: true })
+    }
+  }
+
+  // ── Git worktrees ──────────────────────────────────────────────
+  //
+  // Discover agent dirs by scanning for .jean/.jean-agent.json directly —
+  // NOT discoverAgents()/`git worktree list`, which reads exactly the stale
+  // pointers this step exists to fix, and returns nothing until it has run.
+  // A top-level directory with no .jean-agent.json is unofficial (a plain
+  // `main/` checkout with no agent identity is one) — reported
+  // as unrecognised, never touched.
   const agentPaths: string[] = []
+  const unrecognised: string[] = []
   try {
-    for (const entry of readdirSync(newRoot, { withFileTypes: true })) {
+    for (const entry of readdirSync(dojoRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name.startsWith('.')) continue
-      const p = resolve(newRoot, entry.name)
+      const p = resolve(dojoRoot, entry.name)
       if (existsSync(resolve(p, '.jean', '.jean-agent.json'))) agentPaths.push(p)
+      else unrecognised.push(entry.name)
     }
   } catch {}
 
-  // Git worktrees store absolute gitdir pointers on both ends (bare→worktree
-  // and worktree→bare). `worktree repair` with explicit paths rewrites both.
-  const bareDir = resolve(newRoot, '.jean', '.bare')
-  if (existsSync(bareDir) && agentPaths.length > 0) {
+  if (!existsSync(bareDir)) {
+    console.log(`  ${DIM}worktrees${RESET}    skip — no .jean/.bare`)
+  } else if (agentPaths.length === 0) {
+    console.log(`  ${DIM}worktrees${RESET}    no agent directories found`)
+  } else if (dryRun) {
+    console.log(
+      `  ${DIM}worktrees${RESET}    ${plan}repair ${agentPaths.length} agent(s): ${agentPaths.map((p) => basename(p)).join(', ')}`,
+    )
+  } else {
     const repair = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'repair', ...agentPaths], {
-      cwd: newRoot,
+      cwd: dojoRoot,
       stdout: 'pipe',
       stderr: 'pipe',
     })
@@ -1548,23 +1644,115 @@ function cmdDojoMove(args: string[]) {
       console.error(repair.stderr.toString().trim())
       process.exit(1)
     }
+    console.log(
+      `  ${DIM}worktrees${RESET}    repaired ${agentPaths.length} agent(s): ${agentPaths.map((p) => basename(p)).join(', ')}`,
+    )
+  }
+  if (unrecognised.length > 0) {
+    console.log(
+      `  ${DIM}worktrees${RESET}    unrecognised, not touched: ${unrecognised.join(', ')} ${DIM}(no .jean-agent.json)${RESET}`,
+    )
   }
 
-  // No agent config to rewrite — Jean bakes no absolute path into a worktree.
-  // Each agent self-identifies from its .jean-agent.json (cwd-derived) and walks
-  // up to the dojo root; hook paths in settings.local.json and --add-dir args are
-  // all relative and survive the move.
-
-  console.log(`${GREEN}Dojo moved${RESET}`)
-  console.log(`  From: ${oldRoot}`)
-  console.log(`  To:   ${newRoot}`)
-  if (process.cwd().startsWith(oldRoot)) {
-    console.log()
-    console.log(`${DIM}Your shell is still on the old path — cd to the new location.${RESET}`)
+  // ── Registry ───────────────────────────────────────────────────
+  //
+  // Not carried between machines — on a fresh machine this is the first
+  // entry, and pruning is a no-op. Prune first (drops a move's now-vanished
+  // old path), then upsert — but never into a port collision: that would
+  // otherwise put two dojos on one port with no warning until the second
+  // infra failed to bind.
+  const cfg = readConfig(dataDir)
+  const beforeRegistry = readRegistry()
+  const afterRegistry = pruneStale(beforeRegistry)
+  const droppedCount = beforeRegistry.length - afterRegistry.length
+  if (!dryRun) writeRegistry(afterRegistry)
+  const prunedNote =
+    droppedCount > 0 ? `; ${plan}prune ${droppedCount} stale ${droppedCount === 1 ? 'entry' : 'entries'}` : ''
+  if (cfg.port === undefined) {
+    console.log(
+      `  ${DIM}registry${RESET}     no port in jean.config.json — not registered. Set one: jean config set port <N>, then jean dojo register${prunedNote}`,
+    )
+  } else {
+    const alloc = allocatePort(cfg.port, dojoRoot)
+    if ('error' in alloc) {
+      const free = allocatePort(undefined, dojoRoot)
+      console.log(
+        `  ${DIM}registry${RESET}     ${alloc.error}${'port' in free ? ` Next free port: ${free.port}.` : ''}${prunedNote}`,
+      )
+    } else {
+      if (!dryRun) upsertDojo({ path: dojoRoot, port: cfg.port, identity: cfg.identity })
+      console.log(`  ${DIM}registry${RESET}     ${plan}register at ${registryPath()} (port ${cfg.port})${prunedNote}`)
+    }
   }
+
+  // ── Permissions ────────────────────────────────────────────────
+  //
+  // Same merge logic `jean agent sync-permissions` runs, regenerating every
+  // agent's (and the librarian's) rules for the current path — plus, only
+  // here, dropping any remaining absolute DIRECTORY rule whose target no
+  // longer exists: old-root leftovers and senseiWritePaths ghosts alike.
+  console.log(`  ${DIM}permissions${RESET}`)
+  const permResult = syncAgentPermissions(dojoRoot, { dryRun, indent: '    ', dropDeadAbsolute: true })
+  if (permResult.targetCount === 0) {
+    // syncAgentPermissions already printed "No agents found." at this indent.
+  } else if (permResult.totalChanges === 0) {
+    console.log(`    ${DIM}all ${permResult.targetCount} agent(s) already current${RESET}`)
+  } else {
+    console.log(`    ${plan}sync ${permResult.totalChanges} rule(s) across ${permResult.touchedAgents} agent(s)`)
+  }
+
+  // ── Peers ──────────────────────────────────────────────────────
+  //
+  // Not carried between machines either — re-established with `jean peer
+  // link` once every dojo involved is up again. Same rule as permissions:
+  // check the recorded path; if it doesn't exist, drop the record and say so.
+  const peersFile = loadPeers(dataDir)
+  const peerEntries = Object.entries(peersFile.peers)
+  const dead = peerEntries.filter(
+    ([, peer]) => peer.origin.type !== 'local-path' || !existsSync(resolve(peer.origin.path, '.jean')),
+  )
+  if (dead.length > 0 && !dryRun) {
+    for (const [id] of dead) delete peersFile.peers[id]
+    savePeers(dataDir, peersFile)
+  }
+  if (peerEntries.length === 0) {
+    console.log(`  ${DIM}peers${RESET}        none registered`)
+  } else if (dead.length === 0) {
+    console.log(`  ${DIM}peers${RESET}        ${peerEntries.length} registered, all resolve`)
+  } else {
+    console.log(`  ${DIM}peers${RESET}        ${plan}drop ${dead.length} unresolved:`)
+    for (const [id] of dead) {
+      console.log(`                 ${id} — once it's up at its new location: jean peer link <path>`)
+    }
+  }
+
+  // ── Machine checks — reported only; none of this is this dojo's to fix ──
+  if (!isChannelRegistered()) {
+    console.log(`  ${DIM}channel${RESET}      not registered on this machine — run: jean setup`)
+  }
+  if (cfg.telegram?.botToken) {
+    console.log(
+      `  ${DIM}telegram${RESET}     botToken is set — Telegram allows one poller per token: stop the source machine's infra before starting here`,
+    )
+  }
+}
+
+async function cmdDojoRepair(args: string[]) {
+  const dryRun = args.includes('--dry-run')
+  if (args.some((a) => !a.startsWith('--'))) {
+    console.error('Usage: jean dojo repair [--dry-run]')
+    console.error('Run from inside the dojo whose records need to point here.')
+    process.exit(1)
+  }
+  // realpath before any comparison this run makes — macOS /var ↔ /private/var
+  // is the classic trap, and every generated permission rule is wrong under
+  // a symlinked root otherwise (move already does this for the same reason).
+  const dojoRoot = realpathSync(findDojoRoot())
+  console.log(`${GREEN}${dryRun ? 'Dry run: would repair' : 'Repairing'} dojo at ${dojoRoot}${RESET}`)
   console.log()
-  console.log(`${DIM}Note: Claude Code session history is keyed by absolute cwd.${RESET}`)
-  console.log(`${DIM}Past sessions from the old path won't be found by 'claude -c' here.${RESET}`)
+  await repairDojo(dojoRoot, { dryRun })
+  console.log()
+  console.log(`${GREEN}${dryRun ? 'Dry run complete — nothing was written.' : 'Done.'}${RESET}`)
 }
 
 // ── Dojo start: split current terminal tab into infra + agent panes ──
@@ -1796,7 +1984,7 @@ async function cmdInfraStart() {
   const existing = readRuntimeFiles(dataDir)
   if (existing.pid !== null && existing.port !== null && isProcessAlive(existing.pid)) {
     const info = await probeInfra(existing.port)
-    if (info?.name === INFRA_IDENTITY && info.dataDir === dataDir) {
+    if (isOwnInfra(info, dataDir)) {
       console.error(`Infrastructure already running (pid ${existing.pid}, port ${existing.port}).`)
       console.error('Use "jean infra stop" first.')
       process.exit(1)
@@ -2334,9 +2522,19 @@ function cmdAgentList() {
 // creation; this command keeps existing dojos current as framework
 // defaults evolve.
 
-function cmdAgentSyncPermissions(args: string[]) {
-  const dryRun = args.includes('--dry-run')
-  const dojoRoot = findDojoRoot()
+/**
+ * Regenerate every agent's (and the librarian's) settings.local.json against
+ * current framework defaults for `dojoRoot` — the shared logic behind `jean
+ * agent sync-permissions` and `jean dojo repair`. Union-merge, so it only
+ * adds what's missing; see `mergePermissions` for what little it removes.
+ */
+function syncAgentPermissions(
+  dojoRoot: string,
+  opts: { dryRun?: boolean; indent?: string; dropDeadAbsolute?: boolean } = {},
+): { targetCount: number; totalChanges: number; touchedAgents: number } {
+  const dryRun = opts.dryRun ?? false
+  const pre = opts.indent ?? ''
+  const dropDeadAbsolute = opts.dropDeadAbsolute ?? false
 
   const senseiWritePaths = readConfig(resolve(dojoRoot, '.jean')).senseiWritePaths
 
@@ -2365,11 +2563,10 @@ function cmdAgentSyncPermissions(args: string[]) {
   }
 
   if (targets.length === 0) {
-    console.log('No agents found.')
-    return
+    console.log(`${pre}No agents found.`)
+    return { targetCount: 0, totalChanges: 0, touchedAgents: 0 }
   }
 
-  console.log()
   let totalChanges = 0
   let touchedAgents = 0
 
@@ -2377,7 +2574,7 @@ function cmdAgentSyncPermissions(args: string[]) {
     const label = `${BOLD}${t.name}${RESET}${DIM} (${t.role})${RESET}`
 
     if (!existsSync(t.settingsPath)) {
-      console.log(`  ${DIM}skip${RESET}  ${label} — no settings.local.json`)
+      console.log(`${pre}${DIM}skip${RESET}  ${label} — no settings.local.json`)
       continue
     }
 
@@ -2385,7 +2582,7 @@ function cmdAgentSyncPermissions(args: string[]) {
     try {
       json = JSON.parse(readFileSync(t.settingsPath, 'utf8')) as Record<string, unknown>
     } catch {
-      console.log(`  ${DIM}error${RESET} ${label} — invalid JSON, skipping`)
+      console.log(`${pre}${DIM}error${RESET} ${label} — invalid JSON, skipping`)
       continue
     }
 
@@ -2399,29 +2596,65 @@ function cmdAgentSyncPermissions(args: string[]) {
       obsoleteAllow,
     })
 
-    const changes = addedAllow.length + addedDeny.length + removedAllow.length + removedDeny.length
+    // Repair-only: drop any remaining absolute DIRECTORY rule whose target no
+    // longer exists — old-root leftovers and senseiWritePaths ghosts alike.
+    // (Not part of plain sync-permissions — see absoluteGlobRuleTarget for why
+    // the framework's one exact-file rule is deliberately excluded.)
+    const isDead = (rule: string) => {
+      const target = absoluteGlobRuleTarget(rule)
+      return target !== null && !existsSync(target)
+    }
+    const deadAllow = dropDeadAbsolute ? merged.allow.filter(isDead) : []
+    const deadDeny = dropDeadAbsolute ? merged.deny.filter(isDead) : []
+    const finalAllow = deadAllow.length ? merged.allow.filter((r) => !deadAllow.includes(r)) : merged.allow
+    const finalDeny = deadDeny.length ? merged.deny.filter((r) => !deadDeny.includes(r)) : merged.deny
+
+    const changes =
+      addedAllow.length +
+      addedDeny.length +
+      removedAllow.length +
+      removedDeny.length +
+      deadAllow.length +
+      deadDeny.length
     if (changes === 0) {
-      console.log(`  ${DIM}ok${RESET}    ${label} — already current`)
+      console.log(`${pre}${DIM}ok${RESET}    ${label} — already current`)
       continue
     }
 
-    console.log(`  ${GREEN}sync${RESET}  ${label}`)
-    for (const rule of removedAllow) console.log(`    ${RED}-${RESET} Allow: ${rule} ${DIM}(obsolete/inert)${RESET}`)
-    for (const rule of removedDeny) console.log(`    ${RED}-${RESET} Deny:  ${rule} ${DIM}(inert Write rule)${RESET}`)
-    for (const rule of addedAllow) console.log(`    ${GREEN}+${RESET} Allow: ${rule}`)
-    for (const rule of addedDeny) console.log(`    ${GREEN}+${RESET} Deny:  ${rule}`)
+    console.log(`${pre}${GREEN}sync${RESET}  ${label}`)
+    for (const rule of removedAllow)
+      console.log(`${pre}  ${RED}-${RESET} Allow: ${rule} ${DIM}(obsolete/inert)${RESET}`)
+    for (const rule of removedDeny)
+      console.log(`${pre}  ${RED}-${RESET} Deny:  ${rule} ${DIM}(inert Write rule)${RESET}`)
+    for (const rule of deadAllow)
+      console.log(`${pre}  ${RED}-${RESET} Allow: ${rule} ${DIM}(target does not exist)${RESET}`)
+    for (const rule of deadDeny)
+      console.log(`${pre}  ${RED}-${RESET} Deny:  ${rule} ${DIM}(target does not exist)${RESET}`)
+    for (const rule of addedAllow) console.log(`${pre}  ${GREEN}+${RESET} Allow: ${rule}`)
+    for (const rule of addedDeny) console.log(`${pre}  ${GREEN}+${RESET} Deny:  ${rule}`)
     totalChanges += changes
     touchedAgents++
 
     if (!dryRun) {
-      json.permissions = merged
+      json.permissions = { allow: finalAllow, deny: finalDeny }
       writeFileSync(t.settingsPath, `${JSON.stringify(json, null, 2)}\n`)
     }
   }
 
+  return { targetCount: targets.length, totalChanges, touchedAgents }
+}
+
+function cmdAgentSyncPermissions(args: string[]) {
+  const dryRun = args.includes('--dry-run')
+  const dojoRoot = findDojoRoot()
+
+  console.log()
+  const { targetCount, totalChanges, touchedAgents } = syncAgentPermissions(dojoRoot, { dryRun })
+  if (targetCount === 0) return
+
   console.log()
   if (totalChanges === 0) {
-    console.log(`${DIM}All ${targets.length} agent(s) already current.${RESET}`)
+    console.log(`${DIM}All ${targetCount} agent(s) already current.${RESET}`)
     return
   }
 
@@ -2698,6 +2931,7 @@ Commands:
   jean dojo register                          Register the current dojo into ~/.jean/dojos.json
   jean dojo prune                             Drop registry entries whose dojo folder was deleted
   jean dojo move <new-path>                   Move this dojo to a new location
+  jean dojo repair                            Fix records of this dojo's own path (after a copy or manual move)
   jean dojo start [agents...] [--only a,b,c]  Lay out current iTerm tab: infra | sensei | workers
                                               (macOS + iTerm2; current shell becomes the infra pane)
   jean satori                                 Guided dojo setup (interactive)

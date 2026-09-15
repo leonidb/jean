@@ -73,7 +73,7 @@ import { createStore, jsonlBackend, memoryBackend, type StoredEvent } from '../e
 import { resolveConfig } from '../infra/config.ts'
 import { identityFromConfig, loadPeers, peerReach } from '../infra/peers.ts'
 import { upsertDojo } from '../infra/registry.ts'
-import { INFRA_IDENTITY, probeInfra, readRuntimeFiles } from '../probe.ts'
+import { INFRA_IDENTITY, isOwnInfra, probeInfra, readRuntimeFiles } from '../probe.ts'
 import { type Attention, type AttentionConfig, AttentionConfigError, createAttention } from './attention.ts'
 import type { Caller, SurfaceContext } from './context.ts'
 import type { SupervisionExecutor } from './executors.ts'
@@ -2028,9 +2028,8 @@ class InfraStartError extends Error {}
 async function enforceSingleInstance(dataDir: string, port: number): Promise<void> {
   const live = await probeInfra(port)
   if (live?.name === INFRA_IDENTITY) {
-    const sameDojo = live.dataDir === '' || live.dataDir === dataDir
     throw new InfraStartError(
-      sameDojo
+      isOwnInfra(live, dataDir)
         ? `Infrastructure already running for this dojo (pid ${live.pid}, port ${port}). Use "jean infra stop" first.`
         : `Port ${port} is held by another dojo's infra (${live.dataDir}). Set a different \`port\` in jean.config.json.`,
     )
