@@ -1100,6 +1100,12 @@ async function cmdDojo(args: string[]) {
     case 'repair':
       await cmdDojoRepair(args.slice(1))
       break
+    case 'export':
+      await cmdDojoExport(args.slice(1))
+      break
+    case 'import':
+      await cmdDojoImport(args.slice(1))
+      break
     case 'start':
       cmdDojoStart(args.slice(1))
       break
@@ -1113,7 +1119,7 @@ async function cmdDojo(args: string[]) {
       cmdDojoPrune()
       break
     default:
-      console.error('Usage: jean dojo <init|move|repair|start|list|register|prune> ...')
+      console.error('Usage: jean dojo <init|move|repair|export|import|start|list|register|prune> ...')
       process.exit(1)
   }
 }
@@ -1544,6 +1550,19 @@ function absoluteGlobRuleTarget(rule: string): string | null {
 
 type RepairOpts = { dryRun?: boolean }
 
+/** What repair found that the caller might want to act on — `jean dojo
+ *  import` uses this to decide which next-step hints are worth printing;
+ *  `cmdDojoRepair` and `cmdDojoMove` just let it fall on the floor. */
+type RepairSummary = {
+  channelMissing: boolean
+  droppedPeers: string[]
+  /** Set when the registry step could not register this dojo — no port
+   *  configured, or the configured one collides with another existing-path
+   *  dojo. Not a failure (nothing errored; the dojo just isn't registered
+   *  yet), but a caller printing "Done." unconditionally would bury it. */
+  registryIncomplete: string | null
+}
+
 /**
  * Bring every record of this dojo's own absolute path up to date with
  * `dojoRoot` — wherever it actually is right now. Used standalone, after a
@@ -1556,7 +1575,7 @@ type RepairOpts = { dryRun?: boolean }
  * infra — `enforceSingleInstance`'s own rule (server.ts), applied here
  * instead of at a start.
  */
-async function repairDojo(dojoRoot: string, opts: RepairOpts = {}): Promise<void> {
+async function repairDojo(dojoRoot: string, opts: RepairOpts = {}): Promise<RepairSummary> {
   const dryRun = opts.dryRun ?? false
   const plan = dryRun ? 'would ' : ''
   const dataDir = resolve(dojoRoot, '.jean')
@@ -1714,17 +1733,17 @@ async function repairDojo(dojoRoot: string, opts: RepairOpts = {}): Promise<void
   if (!dryRun) writeRegistry(afterRegistry)
   const prunedNote =
     droppedCount > 0 ? `; ${plan}prune ${droppedCount} stale ${droppedCount === 1 ? 'entry' : 'entries'}` : ''
+  let registryIncomplete: string | null = null
   if (cfg.port === undefined) {
-    console.log(
-      `  ${DIM}registry${RESET}     no port in jean.config.json — not registered. Set one: jean config set port <N>, then jean dojo register${prunedNote}`,
-    )
+    registryIncomplete = 'no port in jean.config.json — jean config set port <N>, then jean dojo register'
+    console.log(`  ${DIM}registry${RESET}     ${registryIncomplete}${prunedNote}`)
   } else {
     const alloc = allocatePort(cfg.port, dojoRoot)
     if ('error' in alloc) {
       const free = allocatePort(undefined, dojoRoot)
-      console.log(
-        `  ${DIM}registry${RESET}     ${alloc.error}${'port' in free ? ` Next free port: ${free.port}.` : ''}${prunedNote}`,
-      )
+      const freeNote = 'port' in free ? ` Next free port: ${free.port}.` : ''
+      registryIncomplete = `${alloc.error}${freeNote}`
+      console.log(`  ${DIM}registry${RESET}     ${registryIncomplete}${prunedNote}`)
     } else {
       if (!dryRun) upsertDojo({ path: dojoRoot, port: cfg.port, identity: cfg.identity })
       console.log(`  ${DIM}registry${RESET}     ${plan}register at ${registryPath()} (port ${cfg.port})${prunedNote}`)
@@ -1773,7 +1792,8 @@ async function repairDojo(dojoRoot: string, opts: RepairOpts = {}): Promise<void
   }
 
   // ── Machine checks — reported only; none of this is this dojo's to fix ──
-  if (!isChannelRegistered()) {
+  const channelMissing = !isChannelRegistered()
+  if (channelMissing) {
     console.log(`  ${DIM}channel${RESET}      not registered on this machine — run: jean setup`)
   }
   if (cfg.telegram?.botToken) {
@@ -1781,6 +1801,8 @@ async function repairDojo(dojoRoot: string, opts: RepairOpts = {}): Promise<void
       `  ${DIM}telegram${RESET}     botToken is set — Telegram allows one poller per token: stop the source machine's infra before starting here`,
     )
   }
+
+  return { channelMissing, droppedPeers: dead.map(([id]) => id), registryIncomplete }
 }
 
 async function cmdDojoRepair(args: string[]) {
@@ -1799,6 +1821,527 @@ async function cmdDojoRepair(args: string[]) {
   await repairDojo(dojoRoot, { dryRun })
   console.log()
   console.log(`${GREEN}${dryRun ? 'Dry run complete — nothing was written.' : 'Done.'}${RESET}`)
+}
+
+// ── Dojo export / import: move a dojo between machines ───────────
+
+/** How many sample dirty paths to name before falling back to "+N more" —
+ *  a worktree with hundreds of uncommitted paths (measured, in the wild)
+ *  would otherwise scroll the whole pre-flight off screen. */
+const DIRTY_SAMPLE_SIZE = 3
+
+type RepoCheck =
+  | { kind: 'error'; message: string }
+  | {
+      kind: 'ok'
+      dirty: boolean
+      dirtyCount: number
+      /** Up to DIRTY_SAMPLE_SIZE paths, for a glimpse of what's uncommitted. */
+      dirtySample: string[]
+      /** HEAD isn't on a branch at all — distinct from "on a branch with no
+       *  upstream". Decided by `symbolic-ref`'s own exit code, not by
+       *  matching git's (locale-dependent) error text against the `@{u}`
+       *  lookup below, which fails the same way — exit 128 — for both. */
+      detached: boolean
+      /** A branch has `branch.<name>.merge` configured (it once had an
+       *  upstream), but the remote-tracking ref itself is gone — distinct
+       *  from never having one configured. Decided by `git config --get`'s
+       *  exit code on that key, once more not by matching error text. */
+      upstreamGone: boolean
+      upstream: string | null
+      ahead: number
+      behind: number
+    }
+
+/** `git status`/upstream state for one repo — an agent worktree, `.jean/context`,
+ *  or `.jean/workspace`. A branch with no upstream reports that explicitly:
+ *  ahead/behind have no meaning there, and reporting zero for both would read
+ *  as clean when it is really undefined. A git command that itself fails —
+ *  not "no upstream", an actual error — is reported as an error rather than
+ *  silently folded into "clean". */
+function checkGitRepo(dir: string): RepoCheck {
+  const status = Bun.spawnSync(['git', '-C', dir, 'status', '--porcelain'], { stdout: 'pipe', stderr: 'pipe' })
+  if (status.exitCode !== 0) {
+    return { kind: 'error', message: status.stderr.toString().trim() || `git status exited ${status.exitCode}` }
+  }
+  const dirtyLines = status.stdout
+    .toString()
+    .split('\n')
+    .filter((l) => l.trim().length > 0)
+  // Porcelain format: a 2-char status code, a space, then the path.
+  const dirtySample = dirtyLines.slice(0, DIRTY_SAMPLE_SIZE).map((l) => l.slice(3))
+
+  const onBranch = Bun.spawnSync(['git', '-C', dir, 'symbolic-ref', '-q', 'HEAD'], { stdout: 'pipe', stderr: 'pipe' })
+  const detached = onBranch.exitCode !== 0
+
+  const upstreamCheck = Bun.spawnSync(['git', '-C', dir, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  if (upstreamCheck.exitCode !== 0) {
+    // "Never configured" and "configured, but the remote-tracking ref is
+    // gone" fail the @{u} lookup identically (exit 128); branch.<name>.merge
+    // being SET is what tells them apart — only meaningful on a branch.
+    let upstreamGone = false
+    if (!detached) {
+      const branchName = onBranch.stdout
+        .toString()
+        .trim()
+        .replace(/^refs\/heads\//, '')
+      const configured = Bun.spawnSync(['git', '-C', dir, 'config', '--get', `branch.${branchName}.merge`], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      upstreamGone = configured.exitCode === 0
+    }
+    return {
+      kind: 'ok',
+      dirty: dirtyLines.length > 0,
+      dirtyCount: dirtyLines.length,
+      dirtySample,
+      detached,
+      upstreamGone,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+    }
+  }
+  const upstream = upstreamCheck.stdout.toString().trim()
+  // left-right with a THREE-dot range gives both counts in one call:
+  // "<behind>\t<ahead>\n" — commits only reachable from @{u} (left), then
+  // only from HEAD (right). Measured.
+  const counts = Bun.spawnSync(['git', '-C', dir, 'rev-list', '--left-right', '--count', '@{u}...HEAD'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  if (counts.exitCode !== 0) {
+    return { kind: 'error', message: counts.stderr.toString().trim() || `git rev-list exited ${counts.exitCode}` }
+  }
+  const [left, right] = counts.stdout.toString().trim().split(/\s+/)
+  return {
+    kind: 'ok',
+    dirty: dirtyLines.length > 0,
+    dirtyCount: dirtyLines.length,
+    dirtySample,
+    detached,
+    upstreamGone: false,
+    upstream,
+    ahead: Number(right ?? 0),
+    behind: Number(left ?? 0),
+  }
+}
+
+function formatGitRepoCheck(label: string, check: RepoCheck): string {
+  if (check.kind === 'error') return `${label}: git check failed (${check.message})`
+  const parts: string[] = []
+  if (check.dirty) {
+    const remainder = check.dirtyCount - check.dirtySample.length
+    const sample = check.dirtySample.join(', ') + (remainder > 0 ? `, +${remainder} more` : '')
+    parts.push(`${check.dirtyCount} uncommitted change(s) (${sample})`)
+  }
+  if (check.detached) parts.push('detached HEAD — not on a branch')
+  else if (check.upstreamGone) parts.push('upstream branch is gone')
+  else if (check.upstream === null) parts.push('no upstream')
+  else {
+    if (check.ahead > 0) parts.push(`${check.ahead} unpushed commit(s) to ${check.upstream}`)
+    if (check.behind > 0) parts.push(`${check.behind} behind ${check.upstream}`)
+  }
+  if (parts.length === 0) return `${label}: clean, up to date with ${check.upstream}`
+  return `${label}: ${parts.join(', ')}`
+}
+
+/** Single-quote a string for verbatim use in a POSIX shell command line —
+ *  for printed instructions meant to be copy-pasted, where the path itself
+ *  (a dojo directory) is not under our control and may contain a space. */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB']
+  let n = bytes / 1024
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${n.toFixed(1)} ${units[i]}`
+}
+
+/** Top-level dojo-root entries, split into carried agent directories (a dir
+ *  with .jean/.jean-agent.json) and everything else. Files count too, unlike
+ *  repair's worktree-only scan — a stray FILE at the root (a hand-written
+ *  script, say) is just as much "will not travel" as a stray directory. */
+function scanDojoRootEntries(dojoRoot: string): { agentPaths: string[]; unrecognised: string[] } {
+  const agentPaths: string[] = []
+  const unrecognised: string[] = []
+  for (const entry of readdirSync(dojoRoot, { withFileTypes: true })) {
+    if (entry.name === '.jean') continue
+    const p = resolve(dojoRoot, entry.name)
+    if (entry.isDirectory() && existsSync(resolve(p, '.jean', '.jean-agent.json'))) {
+      agentPaths.push(p)
+    } else {
+      unrecognised.push(entry.name)
+    }
+  }
+  return { agentPaths, unrecognised }
+}
+
+/**
+ * Archive a dojo for moving to another machine. Refuses only on a VERIFIED
+ * live infra for THIS dojo (the same probe `repair` uses) — a tar of a dojo
+ * whose own infra is still appending to history.jsonl tears it mid-write.
+ *
+ * The pre-flight states the contract and shows what it found; a stray
+ * top-level entry or an absolute path is reported, never silently dropped or
+ * silently carried. What travels is the bare repo — committed-to-any-branch
+ * survives, uncommitted work is the dojo's own risk to accept.
+ */
+async function cmdDojoExport(args: string[]) {
+  const yesFlag = args.includes('--yes')
+  const outIdx = args.indexOf('--out')
+  const outArg = outIdx >= 0 ? args[outIdx + 1] : undefined
+  if (outIdx >= 0 && (!outArg || outArg.startsWith('--'))) {
+    console.error('--out requires a file path.')
+    process.exit(1)
+  }
+  const unexpected = args.filter((a, i) => a !== '--yes' && a !== '--out' && !(outIdx >= 0 && i === outIdx + 1))
+  if (unexpected.length > 0) {
+    console.error('Usage: jean dojo export [--out <file>] [--yes]')
+    console.error(`Unexpected argument: ${unexpected[0]}`)
+    process.exit(1)
+  }
+
+  const dojoRoot = realpathSync(findDojoRoot())
+  const dataDir = resolve(dojoRoot, '.jean')
+  const dojoName = basename(dojoRoot)
+  const cfg = readConfig(dataDir)
+
+  // The exclude patterns built below rely on bsdtar/libarchive glob
+  // semantics (the `^` anchor and backslash-escapes); GNU tar reads `^` as a
+  // literal, so every anchored exclude would silently match nothing but
+  // `node_modules` would still work, and unrecognised entries would travel.
+  // Refuse up front rather than archive something the excludes never
+  // actually applied to.
+  const tarVersion = Bun.spawnSync(['tar', '--version'], { stdout: 'pipe', stderr: 'pipe' })
+  if (!tarVersion.stdout.toString().includes('bsdtar')) {
+    console.error("This command's exclude patterns assume bsdtar (macOS's default tar).")
+    console.error("The 'tar' on this PATH is not bsdtar.")
+    process.exit(1)
+  }
+
+  // .jean/context and .jean/workspace are git repos BY REQUIREMENT (dojo init
+  // git-inits workspace; the librarian git-inits context on its first run) —
+  // present but not a git repo is a dojo that predates that design, and
+  // export refuses rather than silently archiving a non-repo where a repo
+  // belongs. Absent is fine (nothing to export); this is a hard stop before
+  // the pre-flight prompt, not a pre-flight finding — export does not fix it
+  // itself, since that would mutate the source dojo for an operation meant
+  // to only read it.
+  for (const [label, dir] of [
+    ['.jean/context', resolve(dataDir, 'context')],
+    ['.jean/workspace', resolve(dataDir, 'workspace')],
+  ] as const) {
+    if (existsSync(dir) && !existsSync(resolve(dir, '.git'))) {
+      // Single-quoted so the printed commands work verbatim, copy-pasted,
+      // even when the dojo's own path contains a space.
+      const q = shellQuote(dir)
+      console.error(`${label} exists but is not a git repository — it is meant to always be one.`)
+      console.error('Fix it first, then re-run export:')
+      console.error(`  git -C ${q} init -q -b main`)
+      console.error(`  git -C ${q} add -A`)
+      console.error(`  git -C ${q} commit -q -m "initial commit"`)
+      process.exit(1)
+    }
+  }
+
+  // Validate the destination before the pre-flight prompt — a doomed export
+  // should fail fast, not after the user has already said yes.
+  const dateStamp = new Date().toISOString().slice(0, 10)
+  // The dojo's directory name, not `cfg.identity` — identity is free text
+  // and may contain a `/`, which would otherwise land inside a path.
+  const defaultOut = resolve(dirname(dojoRoot), `${dojoName}-${dateStamp}.tar.gz`)
+  const outArgResolved = resolve(outArg ?? defaultOut)
+  const outParent = dirname(outArgResolved)
+  if (!existsSync(outParent)) {
+    console.error(`--out's directory does not exist: ${outParent}`)
+    process.exit(1)
+  }
+  // Resolve the parent through realpath before the inside-dojo comparison —
+  // a symlinked parent (e.g. a shortcut into the dojo) would otherwise
+  // compare unequal to the (already realpath'd) dojoRoot while writing
+  // physically inside it, which tar would then try to archive into itself.
+  const outPath = resolve(realpathSync(outParent), basename(outArgResolved))
+  if (outPath === dojoRoot || outPath.startsWith(`${dojoRoot}${sep}`)) {
+    console.error(`Refusing to write the archive inside the dojo itself: ${outPath}`)
+    process.exit(1)
+  }
+  // Atomically claim the destination now, rather than an existsSync check
+  // separate from whatever later creates the file — that gap is exactly the
+  // window import's own destination check had to close (see cmdDojoImport).
+  // `tar -cf` itself has no no-clobber option; it happily overwrites, so the
+  // claim is a zero-byte placeholder tar's own write then fills in.
+  try {
+    writeFileSync(outPath, '', { flag: 'wx' })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      console.error(`Archive already exists: ${outPath}`)
+      process.exit(1)
+    }
+    throw err
+  }
+  // From here on, any refusal must give up the claim rather than leave an
+  // empty, orphaned placeholder where an archive never actually landed.
+  const abort = (message: string): never => {
+    rmSync(outPath, { force: true })
+    console.error(message)
+    process.exit(1)
+  }
+
+  const { pid, port } = readRuntimeFiles(dataDir)
+  if (pid !== null && port !== null && isProcessAlive(pid)) {
+    let info = await probeInfra(port)
+    if (info === null) {
+      await new Promise((r) => setTimeout(r, 2000))
+      info = await probeInfra(port)
+    }
+    if (isOwnInfra(info, dataDir)) {
+      abort(`Infra is running for this dojo (pid ${pid}, port ${port}). Run 'jean infra stop' first.`)
+    }
+  }
+
+  const { agentPaths, unrecognised } = scanDojoRootEntries(dojoRoot)
+
+  console.log(`${GREEN}Pre-flight: ${dojoRoot}${RESET}`)
+  console.log()
+
+  const repos: { label: string; path: string }[] = [
+    ...agentPaths.map((p) => ({ label: basename(p), path: p })),
+    { label: '.jean/context', path: resolve(dataDir, 'context') },
+    { label: '.jean/workspace', path: resolve(dataDir, 'workspace') },
+  ]
+  for (const r of repos) {
+    if (!existsSync(resolve(r.path, '.git'))) continue
+    console.log(`  ${formatGitRepoCheck(r.label, checkGitRepo(r.path))}`)
+  }
+
+  if (unrecognised.length > 0) {
+    console.log()
+    for (const name of unrecognised) console.log(`  ${name}: unrecognised top-level entry — will not travel`)
+  }
+
+  // A relative senseiWritePaths entry resolves against the dojo root and
+  // survives a move fine; only absolute-style (leading `/` or `~/`) ones name
+  // a fixed machine location that may not exist, or mean something else, on
+  // the destination.
+  const writePaths = (cfg.senseiWritePaths ?? []).filter((p) => p.startsWith('/') || p.startsWith('~/'))
+  const peersFile = loadPeers(dataDir)
+  const peerEntries = Object.entries(peersFile.peers).filter(
+    (e): e is [string, Peer & { origin: { type: 'local-path'; path: string } }] => e[1].origin.type === 'local-path',
+  )
+  if (writePaths.length > 0 || peerEntries.length > 0) {
+    console.log()
+    for (const p of writePaths) console.log(`  senseiWritePaths: ${p}`)
+    for (const [id, peer] of peerEntries) console.log(`  peer ${id}: ${peer.origin.path}`)
+  }
+
+  const credentialKeys = [
+    cfg.telegram?.botToken ? 'telegram.botToken' : null,
+    cfg.slack?.appToken ? 'slack.appToken' : null,
+    cfg.slack?.botToken ? 'slack.botToken' : null,
+  ].filter((k): k is string => k !== null)
+  if (credentialKeys.length > 0) {
+    console.log()
+    for (const key of credentialKeys) console.log(`  config carries ${key}`)
+  }
+
+  const bareDir = resolve(dataDir, '.bare')
+  if (existsSync(bareDir)) {
+    const remote = Bun.spawnSync(['git', '-C', bareDir, 'remote', 'get-url', 'origin'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    if (remote.exitCode === 0) {
+      console.log()
+      console.log(`  .jean/.bare remote: ${remote.stdout.toString().trim()}`)
+    }
+  }
+
+  console.log()
+
+  if (!yesFlag) {
+    if (process.stdin.isTTY !== true) {
+      abort('Not a terminal — pass --yes to export non-interactively.')
+    }
+    // Bun's confirm() itself only accepts a bare y/Y — measured: typing
+    // "yes" returns false and cancels, despite the [y/N] confirm() shows.
+    // prompt() plus our own match accepts either.
+    const answer = prompt(
+      'Commit what you want kept — uncommitted work is not guaranteed to travel. Proceed with export? [y/N]',
+    )
+    if (!answer || !/^y(es)?$/i.test(answer.trim())) {
+      abort('Export cancelled.')
+    }
+  }
+
+  // Anchored to the archive's own root (^<dojoName>/…) — an unanchored pattern
+  // matches its name at ANY depth, which silently drops the wrong thing:
+  // bare `main` took `.jean/.bare/refs/heads/main` with it (a branch ref, not
+  // a stray worktree), and even a two-segment `<dojoName>/main` matched a
+  // coincidental deeper occurrence of the same relative suffix elsewhere in a
+  // worktree (measured). `node_modules` alone stays unanchored on purpose —
+  // every depth of it is exactly what should go.
+  //
+  // Every path component built from something we did not write ourselves
+  // (the dojo's own name, an unrecognised entry's name) is escaped: bsdtar
+  // exclude patterns are shell-style globs, so a literal `*`, `?`, `[`, `]`
+  // or `\` in a real directory name is otherwise read as a wildcard —
+  // measured: an unrecognised entry named exactly `*` excluded the ENTIRE
+  // archive (every root child, including .jean and every agent), silently,
+  // exit 0. The hand-written relPath patterns below keep their one
+  // INTENTIONAL wildcard (`infra.log*`, for a rotated log) unescaped.
+  const escapeGlob = (s: string) => s.replace(/[\\*?[\]]/g, '\\$&')
+  const dojoNameEscaped = escapeGlob(dojoName)
+  const anchor = (relPath: string) => `^${dojoNameEscaped}/${relPath}`
+  const anchorLiteral = (name: string) => `^${dojoNameEscaped}/${escapeGlob(name)}`
+  const excludes = [
+    'node_modules',
+    anchor('.jean/.headless'),
+    anchor('.jean/.consolidator/runs'),
+    anchor('.jean/.consolidator/staging'),
+    anchor('.jean/sessions'),
+    anchor('.jean/infra.pid'),
+    anchor('.jean/infra.port'),
+    anchor('.jean/infra.log*'),
+    anchor('.jean/board.snapshot.json'),
+    anchor('.jean/triggers.snapshot.json'),
+    ...unrecognised.map((name) => anchorLiteral(name)),
+  ]
+  const tarArgs = ['tar', '-czf', outPath, '-C', dirname(dojoRoot)]
+  for (const e of excludes) tarArgs.push('--exclude', e)
+  tarArgs.push(dojoName)
+
+  // COPYFILE_DISABLE: macOS bsdtar's own opt-out for AppleDouble (._*)
+  // sidecar files — determinism, not a security concern either way.
+  const tar = Bun.spawnSync(tarArgs, {
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  if (tar.exitCode !== 0) {
+    rmSync(outPath, { force: true })
+    console.error('tar failed:')
+    console.error(tar.stderr.toString().trim())
+    process.exit(1)
+  }
+
+  const size = statSync(outPath).size
+  console.log(`${GREEN}Exported${RESET}`)
+  console.log(`  ${outPath} ${DIM}(${formatBytes(size)})${RESET}`)
+  console.log()
+  console.log(`On the new machine: ${BOLD}jean dojo import ${shellQuote(basename(outPath))}${RESET}`)
+}
+
+/**
+ * Unpack an exported dojo and bring its records up to date for wherever it
+ * landed. Repair is the whole of the fix-up (worktree pointers, permissions,
+ * registry, peers, stale runtime files) — this only unpacks and calls it.
+ */
+async function cmdDojoImport(args: string[]) {
+  const positional = args.filter((a) => !a.startsWith('--'))
+  const archiveArg = positional[0]
+  if (!archiveArg || positional.length > 2) {
+    console.error('Usage: jean dojo import <archive> [path]')
+    process.exit(1)
+  }
+  const archivePath = resolve(archiveArg)
+  if (!existsSync(archivePath)) {
+    console.error(`Archive not found: ${archivePath}`)
+    process.exit(1)
+  }
+
+  // List before extracting — `--strip-components 1` assumes exactly one
+  // top-level directory; anything else (a corrupt archive, or one that
+  // isn't a dojo export at all) would otherwise mix unrelated trees into
+  // the target instead of failing cleanly.
+  const list = Bun.spawnSync(['tar', '-tf', archivePath], { stdout: 'pipe', stderr: 'pipe' })
+  if (list.exitCode !== 0) {
+    console.error(`Not a readable tar archive: ${archivePath}`)
+    console.error(list.stderr.toString().trim())
+    process.exit(1)
+  }
+  const entries = list.stdout
+    .toString()
+    .split('\n')
+    .filter((l) => l.trim().length > 0)
+  const topLevelNames = new Set(entries.map((l) => l.split('/')[0]))
+  if (topLevelNames.size !== 1) {
+    console.error(`Expected exactly one top-level entry in the archive, found ${topLevelNames.size}: ${archivePath}`)
+    process.exit(1)
+  }
+  const [archiveRoot] = topLevelNames
+  if (!entries.includes(`${archiveRoot}/.jean/jean.config.json`)) {
+    console.error(`Archive does not contain .jean/jean.config.json — doesn't look like a dojo export: ${archivePath}`)
+    process.exit(1)
+  }
+
+  const targetPath = resolve(positional[1] ?? archiveRoot ?? '')
+  mkdirSync(dirname(targetPath), { recursive: true })
+  // Non-recursive, and not preceded by its own existsSync: this IS the
+  // existence check, atomically — a plain mkdirSync throws EEXIST if the
+  // path is already there, rather than the check-then-create gap a separate
+  // existsSync would leave (another process could create the target in
+  // between, and a recursive mkdir would then silently succeed against it,
+  // with extraction proceeding to write into — and a later failure removing
+  // — a directory this invocation never made).
+  try {
+    mkdirSync(targetPath)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      console.error(`Destination already exists: ${targetPath}`)
+      process.exit(1)
+    }
+    throw err
+  }
+  const extract = Bun.spawnSync(['tar', '-xpf', archivePath, '-C', targetPath, '--strip-components', '1'], {
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  if (extract.exitCode !== 0) {
+    console.error('tar extraction failed:')
+    console.error(extract.stderr.toString().trim())
+    rmSync(targetPath, { recursive: true, force: true })
+    process.exit(1)
+  }
+
+  console.log(`${GREEN}Imported${RESET}`)
+  console.log(`  ${archivePath}`)
+  console.log(`  → ${targetPath}`)
+  console.log()
+
+  const dojoRoot = realpathSync(targetPath)
+  const summary = await repairDojo(dojoRoot)
+
+  if (summary.registryIncomplete) {
+    // Not a failure — nothing errored — but printing a bare "Done." here
+    // would read as success while the dojo is silently unregistered.
+    console.log(`${DIM}Registration incomplete:${RESET} ${summary.registryIncomplete}`)
+    console.log()
+  }
+
+  console.log(`${DIM}Next:${RESET}`)
+  console.log(`  ${DIM}bun install${RESET} in each agent worktree — node_modules was excluded`)
+  if (summary.channelMissing) console.log(`  ${DIM}jean setup${RESET} — no channel registered on this machine yet`)
+  console.log(`  ${DIM}jean agent sync-skills${RESET} — this machine's Jean may ship newer skills`)
+  for (const id of summary.droppedPeers) {
+    console.log(`  ${DIM}jean peer link <path-to-${id}>${RESET} once ${id} is up on this machine`)
+  }
+  console.log(
+    `  ${DIM}attachments referenced by old messages are in .jean/inbox/ under their original filenames${RESET}`,
+  )
+  console.log(`  ${DIM}jean infra start${RESET} when ready`)
 }
 
 // ── Dojo start: split current terminal tab into infra + agent panes ──
@@ -2978,6 +3521,8 @@ Commands:
   jean dojo prune                             Drop registry entries whose dojo folder was deleted
   jean dojo move <new-path>                   Move this dojo to a new location
   jean dojo repair                            Fix records of this dojo's own path (after a copy or manual move)
+  jean dojo export [--out <file>] [--yes]     Archive this dojo to move it to another machine
+  jean dojo import <archive> [path]           Unpack an exported dojo and repair it in place
   jean dojo start [agents...] [--only a,b,c]  Lay out current iTerm tab: infra | sensei | workers
                                               (macOS + iTerm2; current shell becomes the infra pane)
   jean satori                                 Guided dojo setup (interactive)
