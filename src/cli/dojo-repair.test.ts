@@ -129,6 +129,41 @@ describe('jean dojo repair', () => {
     expect(entries.some((e) => e.path === oldRootReal)).toBe(false)
   })
 
+  test('a stale bare entry recorded for a different agent is left unrepaired, not attached to this one', () => {
+    process.env.JEAN_REGISTRY_PATH = resolve(tmp, 'dojos.json')
+    const dojoRoot = resolve(tmp, 'dojo')
+    expect(runJean(tmp, 'dojo', 'init', dojoRoot, '--git', '--port', '8722').exitCode).toBe(0)
+    expect(runJean(dojoRoot, 'agent', 'add', 'worker1').exitCode).toBe(0)
+    expect(runJean(dojoRoot, 'agent', 'add', 'worker2').exitCode).toBe(0)
+
+    const worker1Git = resolve(dojoRoot, 'worker1', '.git')
+    const worker2Git = resolve(dojoRoot, 'worker2', '.git')
+    const entry1Gitdir = resolve(dojoRoot, '.jean', '.bare', 'worktrees', 'worker1', 'gitdir')
+    const beforeWorker1Git = readFileSync(worker1Git, 'utf8')
+    const beforeEntry1Gitdir = readFileSync(entry1Gitdir, 'utf8')
+
+    // Simulate corruption: worker2's own .git wrongly names worker1's entry
+    // (hand-editing, or a bug elsewhere) instead of its own — the scenario a
+    // foreign worktree whose entry name collides with a stale one produces.
+    writeFileSync(worker2Git, `gitdir: ${resolve(dojoRoot, '.jean', '.bare', 'worktrees', 'worker1')}\n`)
+
+    const repair = runJean(dojoRoot, 'dojo', 'repair')
+    expect(repair.exitCode).toBe(0)
+    expect(repair.stdout).toContain('could not repair')
+    expect(repair.stdout).toContain('worker2')
+
+    // worker1's own pointer and the bare's entry for it are untouched — the
+    // guard refuses before writing, rather than attaching worker2 to worker1's slot.
+    expect(readFileSync(worker1Git, 'utf8')).toBe(beforeWorker1Git)
+    expect(readFileSync(entry1Gitdir, 'utf8')).toBe(beforeEntry1Gitdir)
+    const worker1Status = Bun.spawnSync(['git', 'status'], {
+      cwd: resolve(dojoRoot, 'worker1'),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(worker1Status.exitCode).toBe(0)
+  })
+
   test('a dead (not-alive) recorded pid is removed without refusal', () => {
     const { oldRoot, newRoot } = buildAndCopy()
     writeFileSync(resolve(oldRoot, '.jean', 'infra.pid'), '999999\n')

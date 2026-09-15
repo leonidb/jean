@@ -1564,7 +1564,11 @@ async function repairDojo(dojoRoot: string, opts: RepairOpts = {}): Promise<void
 
   if (existsSync(bareDir) && !Bun.which('git')) {
     console.error(`This dojo has a git bare repo (${bareDir}) but 'git' is not on PATH.`)
-    console.error('Install git first, then re-run.')
+    // Named explicitly rather than "re-run": a caller reaching repairDojo via
+    // import has already extracted to dojoRoot, and re-running import itself
+    // would refuse — the destination now exists. `jean dojo repair` is the
+    // one recovery command that's always correct here, from any caller.
+    console.error(`Install git, then run 'jean dojo repair' from inside ${dojoRoot}.`)
     process.exit(1)
   }
 
@@ -1613,40 +1617,82 @@ async function repairDojo(dojoRoot: string, opts: RepairOpts = {}): Promise<void
   // pointers this step exists to fix, and returns nothing until it has run.
   // A top-level directory with no .jean-agent.json is unofficial (a plain
   // `main/` checkout with no agent identity is one) — reported
-  // as unrecognised, never touched.
-  const agentPaths: string[] = []
+  // as unrecognised, never touched. Not every agent is a worktree: a `--no-
+  // worktree` agent has no `.git` at all, and an `--existing` agent can wrap
+  // its OWN independent repo (a `.git` DIRECTORY, not a worktree of this
+  // dojo's bare) — only a `.git` FILE names a worktree admin entry, so only
+  // those are worktree-repaired; every agent still gets permissions.
+  //
+  // The two pointer files are written DIRECTLY rather than by calling `git
+  // worktree repair` — measured (git 2.39) that command does more than fix
+  // the paths given to it: run from a COPY whose SOURCE dojo still exists on
+  // the same machine, it follows the copy's (still-stale, blindly-copied)
+  // admin entries to the SOURCE's still-valid `.git` files and REWRITES
+  // THOSE — cross-wiring a dojo nobody asked to touch, including worktrees
+  // never named on the command line, while leaving the copy's own worktree
+  // pointing at the SOURCE's bare. Exit 0 throughout; `git status` succeeds
+  // on both sides while pointing at the wrong object stores. Writing only
+  // the two files this agent's OWN entry needs — read fresh from its own
+  // (stale but textually intact) `.git` file, written only under dojoRoot —
+  // cannot reach outside the dojo at all, so it cannot reach the source.
+  const worktreePaths: string[] = []
   const unrecognised: string[] = []
   try {
     for (const entry of readdirSync(dojoRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name.startsWith('.')) continue
       const p = resolve(dojoRoot, entry.name)
-      if (existsSync(resolve(p, '.jean', '.jean-agent.json'))) agentPaths.push(p)
-      else unrecognised.push(entry.name)
+      if (existsSync(resolve(p, '.jean', '.jean-agent.json'))) {
+        const gitPath = resolve(p, '.git')
+        if (existsSync(gitPath) && statSync(gitPath).isFile()) worktreePaths.push(p)
+      } else {
+        unrecognised.push(entry.name)
+      }
     }
   } catch {}
 
   if (!existsSync(bareDir)) {
     console.log(`  ${DIM}worktrees${RESET}    skip — no .jean/.bare`)
-  } else if (agentPaths.length === 0) {
-    console.log(`  ${DIM}worktrees${RESET}    no agent directories found`)
-  } else if (dryRun) {
-    console.log(
-      `  ${DIM}worktrees${RESET}    ${plan}repair ${agentPaths.length} agent(s): ${agentPaths.map((p) => basename(p)).join(', ')}`,
-    )
+  } else if (worktreePaths.length === 0) {
+    console.log(`  ${DIM}worktrees${RESET}    no agent worktrees found`)
   } else {
-    const repair = Bun.spawnSync(['git', '-C', bareDir, 'worktree', 'repair', ...agentPaths], {
-      cwd: dojoRoot,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    if (repair.exitCode !== 0) {
-      console.error('git worktree repair failed:')
-      console.error(repair.stderr.toString().trim())
-      process.exit(1)
+    const fixed: string[] = []
+    const unrepairable: string[] = []
+    for (const p of worktreePaths) {
+      const gitFile = resolve(p, '.git')
+      const match = /^gitdir: (.+)$/.exec(readFileSync(gitFile, 'utf8').trim())
+      const entryName = match?.[1] ? basename(match[1]) : null
+      const entryDir = entryName ? resolve(bareDir, 'worktrees', entryName) : null
+      if (!entryDir || !existsSync(entryDir)) {
+        unrepairable.push(basename(p))
+        continue
+      }
+      // The entry is chosen by the basename of whatever this agent's `.git`
+      // names — which a foreign worktree, elsewhere, whose directory happens
+      // to share this one's name would also produce. Only reuse an entry
+      // whose OWN last-recorded worktree path already agrees with this
+      // directory's name: a real copy/move keeps the directory's name, so
+      // its stale entry still names `.../<this name>/.git`; anything else is
+      // an entry that belongs to someone else and is left unrepaired rather
+      // than attached to the wrong agent.
+      const entryGitdirFile = resolve(entryDir, 'gitdir')
+      const recordedPath = existsSync(entryGitdirFile) ? readFileSync(entryGitdirFile, 'utf8').trim() : null
+      if (!recordedPath || basename(dirname(recordedPath)) !== basename(p)) {
+        unrepairable.push(basename(p))
+        continue
+      }
+      fixed.push(basename(p))
+      if (dryRun) continue
+      writeFileSync(gitFile, `gitdir: ${entryDir}\n`)
+      writeFileSync(entryGitdirFile, `${gitFile}\n`)
     }
-    console.log(
-      `  ${DIM}worktrees${RESET}    repaired ${agentPaths.length} agent(s): ${agentPaths.map((p) => basename(p)).join(', ')}`,
-    )
+    if (fixed.length > 0) {
+      console.log(`  ${DIM}worktrees${RESET}    ${plan}repair ${fixed.length} agent(s): ${fixed.join(', ')}`)
+    }
+    if (unrepairable.length > 0) {
+      console.log(
+        `  ${DIM}worktrees${RESET}    could not repair (no .jean/.bare/worktrees entry matches this agent): ${unrepairable.join(', ')}`,
+      )
+    }
   }
   if (unrecognised.length > 0) {
     console.log(
