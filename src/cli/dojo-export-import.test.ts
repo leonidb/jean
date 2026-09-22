@@ -17,6 +17,7 @@ import {
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { readRegistry } from '../infra/registry.ts'
+import { macosOnly } from '../test-tags.ts'
 
 const CLI = resolve(import.meta.dir, 'jean.ts')
 
@@ -88,7 +89,9 @@ function gitInitContext(dojoRoot: string): void {
   Bun.spawnSync(['git', '-C', context, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'initial'])
 }
 
-describe('jean dojo export / import', () => {
+// macos-only: `dojo export` refuses on GNU tar, whose glob semantics differ
+// from bsdtar's. Untag when the command is ported.
+macosOnly.describe('jean dojo export / import', () => {
   let tmp: string
   let prevReg: string | undefined
   let servers: Array<{ stop: (force?: boolean) => void }> = []
