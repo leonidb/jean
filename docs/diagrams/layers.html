@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Jean — four layers, each built on the one below</title>
+<!--
+  The canonical layered diagram. This file is the source of truth for the
+  picture; the PNGs beside it are what ships. Chrome has no HTML -> SVG path
+  worth taking, so the export is a raster and this file stays the greppable,
+  diffable original.
+
+  Rebuild:  bun run export.ts "$PWD/layers.html" "$PWD" layers 1280 760
+
+  The layering: agents on top with playbooks as a band inside them, then
+  accountability, then knowledge, all resting on the event log. The human sits
+  beside the stack and touches every layer it participates in.
+
+  Restraint is the style: deliberate negative space, understated surfaces, one
+  accent colour. Amber is that accent, and it is spent on only two things — the
+  sensei, and the human's threads. The two actors who decide.
+-->
+<style>
+  :root {
+    --page:      #ffffff;
+    --board:     #fcfdff;
+    --board-2:   #eef2f8;
+    --ink:       #0b1220;
+    --muted:     #5b6675;
+    --faint:     #8b95a5;
+    --shadow:    0 1px 2px rgba(11,18,32,.05), 0 14px 34px -14px rgba(11,18,32,.22);
+
+    /* the stack: one cool ramp, graphite -> teal -> indigo -> violet going up */
+    /* L0 is the graphite floor at the bottom of the cool ramp. In the light
+       scheme it stays the heaviest band of the four without borrowing the dark
+       scheme's near-black slab. */
+    --l0-weave:  #586492; --l0-fill: #a9b2cb; --l0-fill2: #bcc3d9;
+    --l0-ink:    #212844; --l0-faint: #434c68;
+    --l0-edge:   #97a0bd; --l0-rail-bg: #3c4468; --l0-rail-ink: #ffffff;
+    --l1-accent: #14708f; --l1-fill: #e7f4f9; --l1-fill2: #f5fbfd; --l1-edge: #b9dfec; --l1-chip: #ffffff;
+    --l2-accent: #4448a8; --l2-fill: #eaedfb; --l2-fill2: #f5f6fe; --l2-edge: #c6cbf2; --l2-chip: #ffffff;
+    --l3-accent: #7540bd; --l3-fill: #f2ebfc; --l3-fill2: #faf6fe; --l3-edge: #dbc8f5; --l3-chip: #ffffff;
+    --l3-band:   #ebe0fa; --l3-band-edge: #d3bcf1;
+    --worker:    #9a7ac9;
+
+    /* the one accent */
+    --accent:    #b06a12; --accent-soft: #f6e2c2; --accent-glow: rgba(198,131,32,.12);
+
+    --human-ink: #3c4453; --human-fill: #f4f6fa; --human-edge: #dbe2ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page:      #05070c;
+      --board:     #0e131f;
+      --board-2:   #070a12;
+      --ink:       #e9edf5;
+      --muted:     #9aa5b6;
+      --faint:     #6d7889;
+      --shadow:    0 1px 2px rgba(0,0,0,.55), 0 18px 44px -16px rgba(0,0,0,.9);
+
+      --l0-weave:  #7c86bb; --l0-fill: #0f1326; --l0-fill2: #171c33;
+      --l0-ink:    #d3d9f0; --l0-faint: #7d87a6;
+      --l0-edge:   transparent; --l0-rail-bg: rgba(255,255,255,.08); --l0-rail-ink: var(--l0-ink);
+      --l1-accent: #6ccbe9; --l1-fill: #0d2734; --l1-fill2: #0b1e28; --l1-edge: #1d4f64; --l1-chip: #113140;
+      --l2-accent: #a0a6f5; --l2-fill: #171b3d; --l2-fill2: #12142e; --l2-edge: #313878; --l2-chip: #1d2149;
+      --l3-accent: #c9a3f3; --l3-fill: #23163a; --l3-fill2: #1a1029; --l3-edge: #472d6a; --l3-chip: #2c1c45;
+      --l3-band:   #2b1b45; --l3-band-edge: #4b3070;
+      --worker:    #a682d8;
+
+      --accent:    #eab866; --accent-soft: #3a2a10; --accent-glow: rgba(234,184,102,.14);
+
+      --human-ink: #b9c3d2; --human-fill: #0f141e; --human-edge: #232c3b;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--page); }
+  body {
+    font: 400 15px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .board {
+    width: 1280px; height: 760px;
+    padding: 38px 44px 34px;
+    background: radial-gradient(130% 100% at 82% -14%, var(--board) 0%, var(--board-2) 72%);
+    display: grid; grid-template-rows: auto 1fr; row-gap: 22px;
+  }
+
+  /* ---- header ----------------------------------------------------------- */
+  header { display: flex; align-items: flex-start; justify-content: space-between; }
+  .eyebrow {
+    font: 600 11px/1 ui-sans-serif, sans-serif;
+    letter-spacing: .17em; text-transform: uppercase; color: var(--faint);
+  }
+  h1 {
+    margin: 9px 0 0;
+    font: 650 31px/1.12 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    letter-spacing: -.019em;
+  }
+  h1 .thin { color: var(--muted); font-weight: 400; }
+
+  /* the wordmark */
+  .mark { display: flex; align-items: center; gap: 13px; padding-top: 4px; }
+  .mark .word {
+    font: 400 34px/1 Georgia, "Iowan Old Style", "Times New Roman", serif;
+    letter-spacing: .005em; color: var(--ink);
+  }
+
+  /* ---- one grid: stack | thread gutter | the human --------------------- */
+  .frame {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 128px 126px;
+    grid-template-rows: auto auto auto auto;
+    row-gap: 12px;
+    align-content: center;
+  }
+
+  /* ---- the layers ------------------------------------------------------- */
+  .layer {
+    grid-column: 1; position: relative;
+    border-radius: 16px; padding: 16px 22px 16px 68px;
+    box-shadow: var(--shadow); border: 1px solid transparent;
+  }
+  .layer .rail {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 48px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 16px 0 0 16px;
+    font: 660 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .layer h2 {
+    margin: 0; display: flex; align-items: baseline; gap: 13px; flex-wrap: wrap;
+    font: 650 20px/1.2 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    letter-spacing: -.012em;
+  }
+  .layer h2 em {
+    font: 400 14px/1.3 ui-sans-serif, sans-serif; font-style: normal; color: var(--muted);
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
+  .chip { font: 500 12.5px/1 ui-sans-serif, sans-serif; padding: 7px 11px; border-radius: 8px; border: 1px solid; }
+
+  /* L3 — agents, with playbooks as a band inside it */
+  .l3 { grid-row: 1; background: linear-gradient(120deg, var(--l3-fill), var(--l3-fill2)); border-color: var(--l3-edge); }
+  .l3 .rail { background: var(--l3-accent); color: #fff; }
+  .l3 h2 { color: var(--l3-accent); }
+  .l3 .inner { display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: 20px; margin-top: 12px; align-items: center; }
+  /* the sensei stands forward of the group and turned toward it */
+  .group { display: grid; grid-template-columns: 46px 1fr; column-gap: 20px; align-items: end; }
+  .group .figs { display: flex; align-items: flex-end; gap: 10px; }
+  .group svg { display: block; }
+  .fig-sensei { width: 44px; height: 56px; }
+  .fig-sensei .body { fill: var(--accent); }
+  .fig-worker { width: 30px; height: 42px; }
+  .fig-worker .body { fill: var(--worker); opacity: .8; }
+  .group .cap {
+    font: 500 10.5px/1 ui-sans-serif, sans-serif; color: var(--muted);
+    padding-top: 7px; letter-spacing: .02em;
+  }
+  .group .cap.s { color: var(--accent); font-weight: 620; text-align: center; }
+  .band {
+    border: 1px solid var(--l3-band-edge); border-radius: 12px;
+    background: var(--l3-band); padding: 10px 14px 12px;
+  }
+  .band .t {
+    display: flex; align-items: baseline; gap: 10px;
+    font: 620 12px/1 ui-sans-serif, sans-serif;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--l3-accent);
+  }
+  .band .t span { font: 400 11.5px/1 ui-sans-serif, sans-serif; letter-spacing: 0; text-transform: none; color: var(--muted); }
+  .band .chips { margin-top: 9px; }
+  .band .chip { border-color: var(--l3-band-edge); background: var(--l3-chip); color: var(--l3-accent); }
+
+  /* L2 — accountability */
+  .l2 { grid-row: 2; background: linear-gradient(120deg, var(--l2-fill), var(--l2-fill2)); border-color: var(--l2-edge); }
+  .l2 .rail { background: var(--l2-accent); color: #fff; }
+  .l2 h2 { color: var(--l2-accent); }
+  .facet { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+  .facet div { border-radius: 11px; padding: 10px 13px; border: 1px solid var(--l2-edge); background: var(--l2-chip); }
+  .facet b { display: block; font: 620 13.5px/1.25 ui-sans-serif, sans-serif; color: var(--l2-accent); }
+  .facet span { font-size: 11.5px; color: var(--muted); }
+
+  /* L1 — knowledge */
+  .l1 { grid-row: 3; background: linear-gradient(120deg, var(--l1-fill), var(--l1-fill2)); border-color: var(--l1-edge); }
+  .l1 .rail { background: var(--l1-accent); color: #fff; }
+  .l1 h2 { color: var(--l1-accent); }
+  .l1 .chip { border-color: var(--l1-edge); background: var(--l1-chip); color: var(--l1-accent); }
+
+  /* L0 — the floor everyone stands on. Tatami, not generic striation:
+     alternating mats, each woven in the other's direction. Quiet on purpose. */
+  .l0 {
+    grid-row: 4; margin: 2px -12px 0;
+    background: linear-gradient(120deg, var(--l0-fill), var(--l0-fill2));
+    border-color: var(--l0-edge); padding-bottom: 18px;
+  }
+  .l0 .rail { background: var(--l0-rail-bg); color: var(--l0-rail-ink); }
+  .l0 h2 { color: var(--l0-ink); }
+  .l0 h2 em { color: var(--l0-faint); }
+  .tatami { display: flex; gap: 6px; margin-top: 14px; height: 26px; opacity: .42; }
+  .tatami i {
+    flex: 1; border-radius: 1px;
+    outline: 1px solid color-mix(in srgb, var(--l0-weave) 30%, transparent);
+    outline-offset: 0;
+  }
+  .tatami i:nth-child(odd) {
+    background: repeating-linear-gradient(90deg,
+      var(--l0-weave) 0 .5px, transparent .5px 3px);
+  }
+  .tatami i:nth-child(even) {
+    background: repeating-linear-gradient(0deg,
+      var(--l0-weave) 0 .5px, transparent .5px 3px);
+  }
+  .l0 .caption {
+    margin-top: 10px; font: 500 11.5px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--l0-faint);
+  }
+
+  /* ---- the human's threads, one per layer it participates in ----------- */
+  .thread {
+    grid-column: 2; position: relative;
+    display: flex; flex-direction: column; justify-content: center; align-items: flex-end;
+  }
+  .thread label {
+    align-self: stretch; text-align: center;
+    font: 500 10.5px/1.25 ui-sans-serif, sans-serif; color: var(--accent);
+    margin-bottom: 5px; letter-spacing: .01em;
+  }
+  .thread .line {
+    align-self: stretch; height: 1.5px;
+    background: linear-gradient(90deg, var(--accent-soft), var(--accent));
+    position: relative; border-radius: 1px;
+  }
+  /* it touches the layer; it does not point at it — participation, not flow */
+  .thread .line::before {
+    content: ""; position: absolute; left: -3px; top: 50%; margin-top: -3.5px;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  }
+  .thread .line { margin-right: -16px; }
+  .thread .line::after {
+    content: ""; position: absolute; right: -3.5px; top: 50%; margin-top: -3.5px;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  }
+  .t3 { grid-row: 1; }
+  .t2 { grid-row: 2; }
+  .t1 { grid-row: 3; }
+
+  /* ---- the human ------------------------------------------------------- */
+  .human {
+    grid-column: 3; grid-row: 1 / -1;
+    border: 1.5px dashed var(--human-edge); border-radius: 16px;
+    background: var(--human-fill);
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    align-items: stretch; padding: 18px 7px 18px 8px; position: relative; overflow: hidden;
+  }
+  .human .caption {
+    grid-column: 2; align-self: center;
+    writing-mode: vertical-rl; transform: rotate(180deg);
+    font: 620 13.5px/1 ui-sans-serif, sans-serif; letter-spacing: .04em;
+    color: var(--human-ink); text-align: center; justify-self: center;
+  }
+  /* THE SURFACES BELONG TO THE HUMAN, NOT TO ONE THREAD. On the accountability
+     thread they read as if the other two threads used something else; they are
+     how the person reaches the dojo at all. */
+  .human .who {
+    grid-column: 1; z-index: 1; position: relative;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 12px;
+  }
+  .human .who { justify-content: flex-end; }
+  .human .surfaces {
+    font: 500 10px/1.35 ui-sans-serif, sans-serif; color: var(--accent);
+    text-align: center; letter-spacing: .01em;
+  }
+  .human .figure { display: block; }
+  .human .glass { fill: var(--human-fill); stroke: var(--human-ink); stroke-width: 1.7; }
+  .human .cloth {
+    fill: color-mix(in srgb, var(--human-ink) 13%, transparent);
+    stroke: var(--human-ink); stroke-width: 1.7;
+  }
+  .human .desk { fill: color-mix(in srgb, var(--human-ink) 22%, transparent); }
+  .human .collar { fill: none; stroke: var(--human-ink); stroke-width: 1.5; stroke-linecap: round; }
+  .human .warm  { fill: var(--accent); }
+  /* variant b: the terminal's light rises the rail, so the human reaches every layer */
+  .human::before {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(0deg, var(--accent-glow) 0%, transparent 62%);
+  }
+</style>
+
+<div class="board">
+  <header>
+    <div>
+      <div class="eyebrow">A dojo — one project, one group of agents, one body of knowledge</div>
+      <h1>Four layers, <span class="thin">each built on the one below</span></h1>
+    </div>
+    <div class="mark">
+      <span class="word">Jean</span>
+    </div>
+  </header>
+
+  <div class="frame">
+
+    <!-- ============ L3 · agents, with playbooks inside ============ -->
+    <section class="layer l3">
+      <div class="rail">L3</div>
+      <h2>Agents <em>a group working together</em></h2>
+      <div class="inner">
+        <div class="group">
+          <div>
+            <!-- the sensei stands forward of the group and turned toward it:
+                 the head sits toward the workers' side, and the near shoulder
+                 drops. That is all the turn a silhouette needs. -->
+            <svg class="fig-sensei" viewBox="0 0 44 56" aria-hidden="true">
+              <circle class="body" cx="24" cy="11.5" r="9"/>
+              <path class="body" d="M24 23c-7 0-11.5 4.4-12.4 11L8 56h32l-3.2-22C35.9 27.4 31 23 24 23z"/>
+            </svg>
+            <div class="cap s">sensei</div>
+          </div>
+          <div>
+            <div class="figs">
+              <svg class="fig-worker" viewBox="0 0 30 42" aria-hidden="true">
+                <circle class="body" cx="15" cy="8.5" r="6.6"/>
+                <path class="body" d="M15 17.5c-5.2 0-8.6 3.3-9.3 8.2L3 42h24l-2.7-16.3c-.7-4.9-4.1-8.2-9.3-8.2z"/>
+              </svg>
+              <svg class="fig-worker" viewBox="0 0 30 42" aria-hidden="true">
+                <circle class="body" cx="15" cy="8.5" r="6.6"/>
+                <path class="body" d="M15 17.5c-5.2 0-8.6 3.3-9.3 8.2L3 42h24l-2.7-16.3c-.7-4.9-4.1-8.2-9.3-8.2z"/>
+              </svg>
+              <svg class="fig-worker" viewBox="0 0 30 42" aria-hidden="true">
+                <circle class="body" cx="15" cy="8.5" r="6.6"/>
+                <path class="body" d="M15 17.5c-5.2 0-8.6 3.3-9.3 8.2L3 42h24l-2.7-16.3c-.7-4.9-4.1-8.2-9.3-8.2z"/>
+              </svg>
+            </div>
+            <div class="cap">workers</div>
+          </div>
+        </div>
+        <div class="band">
+          <div class="t">Playbooks <span>how the group works</span></div>
+          <div class="chips">
+            <span class="chip">how work flows</span>
+            <span class="chip">what to record</span>
+            <span class="chip">which agents</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ L2 · accountability ============ -->
+    <section class="layer l2">
+      <div class="rail">L2</div>
+      <h2>Accountability <em>nothing falls through the cracks</em></h2>
+      <div class="facet">
+        <div><b>Accountable delivery</b><span>event-level — read before clear, announced until acted on</span></div>
+        <div><b>Chain of responsibility</b><span>task-level — reminders, escalation, always an address</span></div>
+      </div>
+    </section>
+
+    <!-- ============ L1 · knowledge ============ -->
+    <section class="layer l1">
+      <div class="rail">L1</div>
+      <h2>Knowledge <em>what the dojo knows</em></h2>
+      <div class="chips">
+        <span class="chip">board</span>
+        <span class="chip">wiki</span>
+        <span class="chip">memories</span>
+        <span class="chip">conversation</span>
+      </div>
+    </section>
+
+    <!-- ============ L0 · the floor everyone stands on ============ -->
+    <section class="layer l0">
+      <div class="rail">L0</div>
+      <h2>Event log <em>the base of everything</em></h2>
+      <div class="tatami">
+        <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      </div>
+      <div class="caption">append-only · state = fold(log) · replayable · auditable</div>
+    </section>
+
+    <!-- ============ the human's threads ============ -->
+    <div class="thread t3"><label>defines playbooks</label><div class="line"></div></div>
+    <div class="thread t2"><label>answers escalations</label><div class="line"></div></div>
+    <div class="thread t1"><label>converses, reads</label><div class="line"></div></div>
+
+    <!-- ============ the human ============ -->
+    <aside class="human">
+      <div class="who">
+      <!-- Seated at a small desk in the evening, the terminal's light rising
+           up the rail so the human touches every layer. A side view, facing
+           the stack: the whole seat is mirrored with one transform, so the
+           person looks toward the layers with the desk between them and it. -->
+      <svg class="figure" width="94" height="132" viewBox="0 0 94 132" aria-hidden="true">
+        <g transform="translate(94,0) scale(-1,1)">
+          <!-- desk and its one visible leg -->
+          <rect class="desk" x="49" y="74" width="45" height="4.5" rx="2"/>
+          <rect class="desk" x="86" y="78.5" width="4.5" height="44" rx="2"/>
+          <!-- the terminal, the single warm thing in the frame -->
+          <rect class="warm" x="60" y="46" width="28" height="22" rx="2.5"/>
+          <rect class="desk" x="72" y="68" width="4" height="6" rx="1"/>
+          <!-- seated figure -->
+          <rect class="cloth" x="52" y="80" width="14" height="34" rx="7"/>
+          <path class="cloth" d="M22 84h30a7 7 0 0 1 0 14H22z"/>
+          <path class="cloth" d="M25 44c-9 0-14.5 5.4-15.5 13.6L7 90h30l-2.5-32.4C33.5 49.4 34 44 25 44z"/>
+          <path class="cloth" d="M33 56c8 3 16 7 22 12" stroke-linecap="round"/>
+          <circle class="glass" cx="25" cy="26" r="13"/>
+          <path class="collar" d="M18 47 25 57l7-10"/>
+          <!-- the stool -->
+          <rect class="desk" x="6" y="90" width="32" height="4.5" rx="2"/>
+          <rect class="desk" x="9" y="94.5" width="4" height="30" rx="2"/>
+          <rect class="desk" x="31" y="94.5" width="4" height="30" rx="2"/>
+        </g>
+        <!-- the phone, standing on the desk beside the terminal — it sits
+             between the terminal and the person, both hands at the desk. -->
+        <g class="phone-grp">
+          <rect class="glass" x="37" y="55" width="8" height="18" rx="2.2"/>
+          <rect class="warm"  x="38.6" y="57" width="4.8" height="12.5" rx="1.2"/>
+        </g>
+      </svg>
+      <div class="surfaces">terminal · Telegram</div>
+      </div>
+      <div class="caption">The human — a participant at every layer</div>
+    </aside>
+
+  </div>
+</div>
+</html>

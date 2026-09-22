@@ -1,92 +1,37 @@
 # Jean
 
-Yet Another Lightweight Loom for Agents.
+Jean /ʒɑ̃/ (zhon) runs a group of Claude Code agents on one project, with one of them in charge.
 
-A framework for multi-agent execution where autonomous coding agents work in parallel, communicate through channels, and are orchestrated by a central intelligent agent. You describe a task — a bug to reproduce, a PR to review, code to investigate — and an orchestrator routes it to the right agent. Agents work in separate folders, each with role-specific skills. When an agent finishes or gets stuck, the orchestrator checks in, updates the board, and notifies you. The layer between "I noticed something" and "it's handled" — without breaking your flow.
+A **dojo** is where a group trains under one teacher; here it is a project, the agents working on it, and the record of everything that passed between them. The **sensei** is the agent in charge: you talk to it, and it turns what you ask for into tasks and hands them out. A **worker** is an agent that takes a task, does it, and reports back.
 
-**Status:** Early development
+You tell the sensei what you want. It writes a task, picks a worker, and sends it over. The worker does the work and reports back to the sensei, which has the result when you ask — and if the worker goes quiet, the sensei hears about that too. Every task, message and report passes through the dojo's log as it happens, so when you come back you read what happened, in order. What the agents learn while they work — about the project, and about how you work — accumulates in the dojo's **library**: a wiki built from what they memorize, which every agent reads, so the dojo grows more tuned to your work the longer it runs.
 
-## How It Works
+Everything runs on your machine: the agents, the log, and the server they share. One person, one project, a handful of agents.
 
-```
-┌──────────┐     ┌──────────┐
-│ Agent A  │     │ Agent B  │     (Claude sessions with Jean plugin)
-│ (scratch)│     │ (review) │
-└────┬─────┘     └────┬─────┘
-     │                │
-  channel          channel       (Claude Code channels)
-     │                │
-     └────────┬───────┘
-              │
-      ┌───────▼────────┐
-      │  Orchestrator  │         (Claude session — the intelligence layer)
-      └───────┬────────┘
-              │
-      ┌───────▼────────┐
-      │ Infrastructure │         (Bun/TypeScript — deterministic plumbing)
-      └────────────────┘
-```
+New to Jean? Start with [your first session](docs/running.md#your-first-session).
 
-- **Agents** are just Claude with role-specific skills. They receive tasks via channels, work, and stop when done.
-- **Orchestrator** is a Claude session that routes work, checks on agents, manages the board, and talks to you.
-- **Infrastructure** handles channel wiring, board persistence, and agent lifecycle.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/layers-dark.png">
+  <img alt="Jean's capabilities as four stacked layers — agents and their playbooks on top, then accountability, then knowledge, all resting on an append-only event log, with a person beside the stack connected to the layers they take part in" src="docs/diagrams/layers-light.png">
+</picture>
 
-## Quick Start
+Four layers, each resting on the one below, make up the stack: an **event log** that keeps everything that happened, **knowledge** the dojo searches, **accountability** for who owes the next move, and **agents** who act on it. You take part at every layer.
 
-### Prerequisites
-- [Bun](https://bun.sh) (v1.3+)
-- Claude Code with channels support
+## Compared to the alternatives
 
-### Install
-```bash
-cd jean && bun install
-```
+**A single Claude Code session** is simpler, and needs nothing extra to run. It can spawn subagents and background tasks, but they report into that one conversation, in one terminal. A dojo's agents are separate, long-running sessions, each with its own mailbox and its own working directory, passing work between them through a sensei that keeps the record — with a durable log anyone with access can read back. That log survives whether or not the session that produced it is still open.
 
-### Run the infrastructure service
-```bash
-jean infra start          # from the dojo root; detaches, logs to .jean/infra.log
-```
+**A hosted agent service** runs the work somewhere else and hands back the result, and keeps going while your machine is shut. A dojo's agents are ordinary Claude Code sessions in your own terminals, and that is the trade: they are up while your machine is, and in exchange the orchestration is something you can step into. Dispatch through the sensei and watch the board, or open a worker's own terminal and work with it directly — per agent, and changing your mind mid-task.
 
-### Connect an agent
-Register the Jean channel **once per machine** (writes a user-scope MCP server to `~/.claude.json`):
-```bash
-jean setup
-```
-The channel server self-identifies per session from the agent worktree's `.jean-agent.json` (and walks up to the dojo root), so there's no per-worktree `.mcp.json` and no per-agent env to maintain.
+**An agent SDK or framework** gives you the pieces to build an agent that behaves as you specify. Jean builds no agent: each one is Claude Code, the tool you already work in, with a task board, a mailbox and an event log wired around it.
 
-Then start an agent (this passes the channel flag + dir scoping for you):
-```bash
-jean agent start <name>
-# or manually:
-cd /path/to/worktree && claude --dangerously-load-development-channels server:jean
-```
-> The `--dangerously-load-development-channels server:jean` flag is required while custom channels are a research preview — it tells Claude Code to load the `jean` channel that `jean setup` registered. New Claude Code (2.1.x) resolves it only from auto-discovered config (`~/.claude.json` user scope or a project `.mcp.json` in the launch cwd), **not** from `--mcp-config`.
+A dojo is deliberately unopinionated about the work itself. What it gives you is a task board, a searchable record of what the dojo has learned, delivery guarantees on every message, and a bridge to Telegram or Slack for when you are away from the terminal. Who the agents are, how the work divides between them, and how much of it you orchestrate rather than do yourself are yours to set, and to change as you go.
 
-### Send a message to an agent
-```bash
-curl -X POST http://127.0.0.1:8700/send \
-  -H 'content-type: application/json' \
-  -d '{"to":"scratch","from":"you","text":"investigate this bug"}'
-```
+The cost, in every case: a dojo's own infrastructure — one background process, idle between events — running alongside your agents.
 
-### CLI
-```bash
-bun run src/cli/jean.ts board     # show the kanban board
-bun run src/cli/jean.ts status    # infrastructure status
-bun run src/cli/jean.ts send scratch "message"  # send to agent
-```
+## Docs
 
-## Development
-
-```bash
-bun install               # install dependencies
-bun test                  # run every suite
-bun test src/domain       # the domain core: conformance + composed scenarios
-bun test src/adapter      # the shell: transport, wiring, executor laws
-bun run infra             # start the infra service in the foreground
-bun run check             # type check + lint
-```
-
-## Design
-
-See [docs/concepts.md](docs/concepts.md) for the full architecture and design decisions.
+- [Running Jean](docs/running.md) — install, and your first session
+- [Agents](docs/agents.md) — roles and sessions
+- [Messaging](docs/messaging.md) — mailboxes, delivery, replying, commenting
+- [CLI reference](docs/cli-reference.md)
