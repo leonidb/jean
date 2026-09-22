@@ -29,6 +29,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
+import { macosOnly } from '../test-tags.ts'
 
 const CLI = resolve(import.meta.dir, 'jean.ts')
 const dirs: string[] = []
@@ -116,7 +117,8 @@ function kernelAssertionsOf(sitterPid: number): string {
     .join('\n')
 }
 
-describe.skipIf(process.platform !== 'darwin')('a live dojo holds the machine awake, and lets go when it stops', () => {
+// macos-only: caffeinate is macOS's, and the feature returns early elsewhere.
+macosOnly.describe('a live dojo holds the machine awake, and lets go when it stops', () => {
   test('the assertion is held for the server’s own pid, and released when the server exits', async () => {
     const root = freshDojo(freePort())
     const boot = runJean(root, 'infra', 'start')

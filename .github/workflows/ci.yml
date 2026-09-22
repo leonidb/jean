@@ -1,0 +1,76 @@
+# The gate sequence from CLAUDE.md, in the same order, on both platforms.
+#
+# Types and lint read files and nothing else, so they run once, first, and the
+# tests wait on them. Tests that need a macOS facility skip themselves and say
+# why, so what runs is decided in the test files rather than here.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # No engines/packageManager field to read this from; raise it deliberately.
+  BUN_VERSION: 1.4.2
+
+jobs:
+  check:
+    name: types and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install, exactly as locked
+        run: bun install --frozen-lockfile
+
+      - run: bun run check
+
+  test:
+    name: ${{ matrix.os }}
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install, exactly as locked
+        run: bun install --frozen-lockfile
+
+      - name: "The domain: conformance and composed scenarios"
+        run: bun test src/domain
+
+      - name: "The adapter: transport, wiring and executor laws"
+        run: bun test src/adapter
+
+      # These drive `jean dojo init --git`, which commits. A runner has no git
+      # identity; this supplies one for this step only, without touching the
+      # runner's config.
+      - name: "Event store, transports, channel, CLI, scripts"
+        env:
+          GIT_AUTHOR_NAME: ci
+          GIT_AUTHOR_EMAIL: ci@localhost
+          GIT_COMMITTER_NAME: ci
+          GIT_COMMITTER_EMAIL: ci@localhost
+        run: bun test src/es src/infra src/channel src/cli scripts
