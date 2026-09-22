@@ -1,12 +1,14 @@
 # Jean
 
+[![ci](https://github.com/leonidb/jean/actions/workflows/ci.yml/badge.svg)](https://github.com/leonidb/jean/actions/workflows/ci.yml) [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 Jean /ʒɑ̃/ (zhon) runs a group of Claude Code agents on one project, with one of them in charge.
 
 A **dojo** is where a group trains under one teacher; here it is a project, the agents working on it, and the record of everything that passed between them. The **sensei** is the agent in charge: you talk to it, and it turns what you ask for into tasks and hands them out. A **worker** is an agent that takes a task, does it, and reports back.
 
 You tell the sensei what you want. It writes a task, picks a worker, and sends it over. The worker does the work and reports back to the sensei, which has the result when you ask — and if the worker goes quiet, the sensei hears about that too. Every task, message and report passes through the dojo's log as it happens, so when you come back you read what happened, in order. What the agents learn while they work — about the project, and about how you work — accumulates in the dojo's **library**: a wiki built from what they memorize, which every agent reads, so the dojo grows more tuned to your work the longer it runs.
 
-Everything runs on your machine: the agents, the log, and the server they share. One person, one project, a handful of agents.
+Everything runs on your machine: the agents, the log, and the server they share. One person, one project, a handful of agents. Claude Code is the reference runtime, not a limit of the design. The dojo — its log, board, mailbox and the protocol agents speak — is tied to no provider; Codex and OpenCode are planned next.
 
 New to Jean? Start with [your first session](docs/running.md#your-first-session).
 
