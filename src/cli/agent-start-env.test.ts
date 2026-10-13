@@ -21,10 +21,8 @@ const MARKERS = {
 }
 
 describe('agentLaunchEnv', () => {
-  test('turns agent view and exit handoff off, even over inherited values', () => {
-    const env = agentLaunchEnv({ CLAUDE_CODE_DISABLE_AGENT_VIEW: '0', CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF: '0' }, AGENT)
-    expect(env.CLAUDE_CODE_DISABLE_AGENT_VIEW).toBe('1')
-    expect(env.CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF).toBe('1')
+  test('turns agent view off, even over an inherited value', () => {
+    expect(agentLaunchEnv({ CLAUDE_CODE_DISABLE_AGENT_VIEW: '0' }, AGENT).CLAUDE_CODE_DISABLE_AGENT_VIEW).toBe('1')
   })
 
   test('drops inherited background-session markers and keeps everything else', () => {
@@ -85,7 +83,6 @@ test('agent view off; inherited background-session markers dropped; identity set
       CLAUDE_CODE_SESSION_KIND: 'bg',
       CLAUDE_CODE_SESSION_ID: 'abc',
       CLAUDE_CODE_DISABLE_AGENT_VIEW: '0',
-      CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF: '0',
       CLAUDE_CODE_KEEP_ME: 'kept',
     },
     stdout: 'pipe',
@@ -100,7 +97,6 @@ test('agent view off; inherited background-session markers dropped; identity set
       .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
   )
   expect(env.CLAUDE_CODE_DISABLE_AGENT_VIEW).toBe('1')
-  expect(env.CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF).toBe('1')
   for (const gone of [
     'CLAUDE_JOB_DIR',
     'CLAUDE_BG_BACKEND',
