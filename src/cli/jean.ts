@@ -69,6 +69,7 @@ import {
   probeInfra,
   readRuntimeFiles,
 } from '../probe.ts'
+import { agentLaunchEnv } from './agent-env.ts'
 import { type LayoutSpec, pickTerminalOpener } from './terminal-layout.ts'
 
 const args = process.argv.slice(2)
@@ -3561,13 +3562,7 @@ function cmdAgentStart(name?: string) {
   // Do NOT drop JEAN_AGENT — without it the agent loads the channel but never registers.
   const result = Bun.spawnSync(['claude', ...flags, '--dangerously-load-development-channels', 'server:jean'], {
     cwd: agent.path,
-    env: {
-      ...process.env,
-      JEAN_AGENT: name,
-      JEAN_ROLE: agent.role,
-      JEAN_DOJO: dojoRoot,
-      JEAN_AGENT_DIR: resolve(agent.path, '.jean'),
-    },
+    env: agentLaunchEnv(process.env, { name, role: agent.role, dojoRoot, agentDir: agent.path }),
     stdin: 'inherit',
     stdout: 'inherit',
     stderr: 'inherit',
