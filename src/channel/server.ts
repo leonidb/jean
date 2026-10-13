@@ -133,7 +133,7 @@ const AGENT_TAGS: string[] = FILE_META.tags
 // ── MCP Server ─────────────────────────────────────────────────────
 
 const mcp = new Server(
-  { name: 'jean', version: '0.1.0' },
+  { name: 'jean', version: '0.2.0' },
   {
     capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
     instructions: buildInstructions(AGENT_ROLE, AGENT_NAME),
