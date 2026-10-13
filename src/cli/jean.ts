@@ -3573,7 +3573,7 @@ function cmdAgentStart(name?: string) {
 // ── Usage ─────────────────────────────────────────────────────────
 
 function printUsage() {
-  console.log(`jean — multi-agent orchestration (v0.2.0)
+  console.log(`jean — multi-agent orchestration (v0.1.0)
 
 Commands:
   jean dojo init [path] [--port <N>] [--git | --git-from <repo>]    Initialize a new dojo
