@@ -42,6 +42,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, relative, resolve, sep } from 'node:path'
+import pkg from '../../package.json' with { type: 'json' }
 import {
   CONFIG_SCHEMA,
   getByPath,
@@ -3573,7 +3574,7 @@ function cmdAgentStart(name?: string) {
 // ── Usage ─────────────────────────────────────────────────────────
 
 function printUsage() {
-  console.log(`jean — multi-agent orchestration (v0.1.0)
+  console.log(`jean — multi-agent orchestration (v${pkg.version})
 
 Commands:
   jean dojo init [path] [--port <N>] [--git | --git-from <repo>]    Initialize a new dojo
