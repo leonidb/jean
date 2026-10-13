@@ -18,7 +18,7 @@ The system is a **domain core** — pure modules that decide, holding no I/O —
 bun run <file.ts>           # run a file
 bun install                 # install dependencies
 bun add <package>           # add dependency
-bun run bump minor          # edits package.json only; commit it alone as "chore: bump version to X"; tag vX on main after merge
+bun run bump minor          # edits package.json only; ship it as its own PR, "chore: bump version to X"; tag vX on main after merge
 
 # The gate ladder. `bun test` runs everything; these are the rungs, and a
 # change is not done until all of them are green.
