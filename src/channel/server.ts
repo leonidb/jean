@@ -17,9 +17,9 @@ import { dirname, resolve } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import pkg from '../../package.json' with { type: 'json' }
 import { type AgentRole, type DeliverMsg, type ErrorMsg, isAgentRole, type RegisteredMsg } from '../infra/protocol.ts'
 import { findDojoRootFrom, readRuntimeFiles } from '../probe.ts'
-import pkg from './package.json' with { type: 'json' }
 import {
   buildInstructions,
   buildTools,
