@@ -19,6 +19,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { type AgentRole, type DeliverMsg, type ErrorMsg, isAgentRole, type RegisteredMsg } from '../infra/protocol.ts'
 import { findDojoRootFrom, readRuntimeFiles } from '../probe.ts'
+import pkg from './package.json' with { type: 'json' }
 import {
   buildInstructions,
   buildTools,
@@ -133,7 +134,7 @@ const AGENT_TAGS: string[] = FILE_META.tags
 // ── MCP Server ─────────────────────────────────────────────────────
 
 const mcp = new Server(
-  { name: 'jean', version: '0.1.0' },
+  { name: 'jean', version: pkg.version },
   {
     capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
     instructions: buildInstructions(AGENT_ROLE, AGENT_NAME),

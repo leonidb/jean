@@ -16,6 +16,7 @@
     "infra": "bun run src/adapter/server.ts",
     "board": "bun run src/cli/jean.ts board",
     "status": "bun run src/cli/jean.ts status",
+    "bump": "bun run scripts/bump.ts",
     "test": "bun test src/es src/infra src/channel src/cli scripts",
     "test:domain": "bun test src/domain",
     "test:adapter": "bun test src/adapter",
