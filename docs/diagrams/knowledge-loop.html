@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Knowledge — no agent writes the wiki</title>
+<!--
+  The knowledge loop, as docs/wiki.md describes it. Source of truth for
+  knowledge-loop-{light,dark}.png.
+
+  Rebuild:  bun run export.ts "$PWD/knowledge-loop.html" "$PWD" knowledge-loop 1280 720
+
+  Teal is the knowledge layer's colour from layers.html and marks the data
+  path. Amber is spent, as there, on the sensei and the human.
+-->
+<style>
+  :root {
+    --page: #ffffff; --board: #fcfdff; --ink: #0b1220; --muted: #5b6675;
+    --edge: #c9d1dc; --flow: #14708f; --flow-fill: #e7f4f9;
+    --accent: #b06a12; --accent-fill: #fbf1e2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #05070c; --board: #0e131f; --ink: #e9edf5; --muted: #9aa5b6;
+      --edge: #2a3344; --flow: #6ccbe9; --flow-fill: #0d2734;
+      --accent: #eab866; --accent-fill: #2a1f0e;
+    }
+  }
+  html, body { margin: 0; background: var(--page); }
+  body { font: 400 15px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  svg { display: block; width: 1280px; height: 720px; }
+  .node { fill: var(--board); stroke: var(--edge); stroke-width: 1.5; }
+  .node.core { fill: var(--flow-fill); stroke: var(--flow); }
+  .node.actor { fill: var(--accent-fill); stroke: var(--accent); }
+  .name { fill: var(--ink); font-weight: 600; font-size: 17px; text-anchor: middle; }
+  .sub { fill: var(--muted); font-size: 13px; text-anchor: middle; }
+  .label { fill: var(--muted); font-size: 13px; }
+  .flow { fill: none; stroke: var(--flow); stroke-width: 2; }
+  .flow.later { stroke-dasharray: 6 5; }
+  .ctl { fill: none; stroke: var(--accent); stroke-width: 2; }
+  .title { fill: var(--ink); font-weight: 650; font-size: 22px; }
+  .lede { fill: var(--muted); font-size: 15px; }
+</style>
+<svg viewBox="0 0 1280 720" role="img" aria-label="Agents write to the event log through memorize and their task threads. The nightly librarian reads new events and raw sources and commits the wiki. One search reads the wiki and what is not consolidated yet. The sensei runs a weekly sweep for staleness, settles the librarian's routine anomalies and brings real decisions to the human; corrections and answers go back into the log as memories.">
+  <defs>
+    <marker id="a-flow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--flow)"/></marker>
+    <marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--accent)"/></marker>
+  </defs>
+
+  <text class="title" x="56" y="64">No agent writes the wiki</text>
+  <text class="lede" x="56" y="92">The librarian derives it from the event log and raw sources. Search reads the wiki and what isn't consolidated yet.</text>
+
+  <!-- human and sensei -->
+  <rect class="node actor" x="56" y="170" width="140" height="56" rx="10"/>
+  <text class="name" x="126" y="204">Human</text>
+  <rect class="node actor" x="330" y="170" width="200" height="56" rx="10"/>
+  <text class="name" x="430" y="196">Sensei</text>
+  <text class="sub" x="430" y="215">orchestrator</text>
+  <path class="ctl" d="M198 198H328" marker-start="url(#a-ctl)" marker-end="url(#a-ctl)"/>
+  <text class="label" x="263" y="172" text-anchor="middle">real</text>
+  <text class="label" x="263" y="189" text-anchor="middle">decisions</text>
+
+  <!-- raw sources -->
+  <rect class="node" x="650" y="196" width="200" height="56" rx="10"/>
+  <text class="name" x="750" y="221">Raw sources</text>
+  <text class="sub" x="750" y="240">.jean/raw_context</text>
+
+  <!-- main row -->
+  <rect class="node" x="56" y="350" width="180" height="60" rx="10"/>
+  <text class="name" x="146" y="376">Agents</text>
+  <text class="sub" x="146" y="395">workers · sensei</text>
+
+  <path class="node core" d="M350 330V430A80 14 0 0 0 510 430V330"/>
+  <ellipse class="node core" cx="430" cy="330" rx="80" ry="14"/>
+  <text class="name" x="430" y="384">Event log</text>
+  <text class="sub" x="430" y="403">append-only</text>
+
+  <rect class="node core" x="640" y="344" width="220" height="72" rx="10"/>
+  <text class="name" x="750" y="374">Nightly librarian</text>
+  <text class="sub" x="750" y="394">draft · review · commit</text>
+
+  <rect class="node core" x="1000" y="350" width="210" height="60" rx="10"/>
+  <text class="name" x="1105" y="376">Wiki</text>
+  <text class="sub" x="1105" y="395">.jean/context · git</text>
+
+  <rect class="node core" x="1000" y="540" width="210" height="60" rx="10"/>
+  <text class="name" x="1105" y="566">One-stop search</text>
+  <text class="sub" x="1105" y="585">/context/search</text>
+
+  <!-- writes -->
+  <path class="flow" d="M238 380H347" marker-end="url(#a-flow)"/>
+  <text class="label" x="292" y="370" text-anchor="middle">memorize</text>
+  <text class="label" x="292" y="400" text-anchor="middle">task threads</text>
+  <path class="flow" d="M512 380H637" marker-end="url(#a-flow)"/>
+  <text class="label" x="575" y="370" text-anchor="middle">since the cursor</text>
+  <path class="flow" d="M780 254V341" marker-end="url(#a-flow)"/>
+  <text class="label" x="790" y="302">new files</text>
+  <path class="flow" d="M862 380H997" marker-end="url(#a-flow)"/>
+  <text class="label" x="930" y="370" text-anchor="middle">commits changes</text>
+
+  <!-- reads -->
+  <path class="flow" d="M1105 412V537" marker-end="url(#a-flow)"/>
+  <text class="label" x="1095" y="480" text-anchor="end">pages</text>
+  <path class="flow later" d="M430 446V570H997" marker-end="url(#a-flow)"/>
+  <text class="label" x="715" y="560" text-anchor="middle">memories after the cursor · tasks · conversation</text>
+  <path class="flow" d="M1105 602V650H146V413" marker-end="url(#a-flow)"/>
+  <text class="label" x="625" y="640" text-anchor="middle">agents read, in one call</text>
+
+  <!-- keeping it true -->
+  <path class="ctl" d="M430 228V312" marker-end="url(#a-ctl)"/>
+  <text class="label" x="420" y="262" text-anchor="end">weekly sweep</text>
+  <text class="label" x="420" y="280" text-anchor="end">corrections · answers</text>
+  <path class="ctl" d="M670 342V286H486V229" marker-end="url(#a-ctl)"/>
+  <text class="label" x="578" y="278" text-anchor="middle">anomalies</text>
+</svg>
+</html>

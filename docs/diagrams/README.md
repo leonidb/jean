@@ -1,13 +1,16 @@
 # docs/diagrams
 
-The canonical layered diagram. `layers.html` is the source of truth; the PNGs
-are rendered from it.
+The canonical layered diagram, `layers.html`, and the wiki chapter's two:
+`knowledge-loop.html` (the whole loop) and `knowledge-run.html` (one librarian
+run). Each HTML file is the source of truth; the PNGs are rendered from it.
 
 ## Rebuilding
 
 ```sh
 export CHROME_PATH=/path/to/chrome-headless-shell
 bun run export.ts "$PWD/layers.html" "$PWD" layers 1280 760
+bun run export.ts "$PWD/knowledge-loop.html" "$PWD" knowledge-loop 1280 720
+bun run export.ts "$PWD/knowledge-run.html" "$PWD" knowledge-run 1280 520
 ```
 
 Each call writes `-light.png` and `-dark.png` at 2× device scale, one per colour
