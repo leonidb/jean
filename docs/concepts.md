@@ -115,8 +115,8 @@ A second projection tracking unacknowledged events per recipient. Every agent �
 Groups tasks by folder/worktree. One queue = one folder = one active agent.
 Multiple queues run in parallel.
 
-### Context / Library
-Live project data at `.jean/context/` — what the dojo has **learned** about its world and how to work in it. Two sub-kinds: domain knowledge (findings) and convention knowledge (preferences, learned procedures). The librarian is the sole writer; agents read for decision-making. Separate from skills (skills = how agents work; library = what the dojo has learned). Optional ingest inbox at `.jean/raw_context/` (immutable to the librarian, Karpathy-style) when the dojo digests external documents. See [Library](library.md) for the full model.
+### Context / Wiki
+Live project data at `.jean/context/` — what the dojo has **learned** about its world and how to work in it. Two sub-kinds: domain knowledge (findings) and convention knowledge (preferences, learned procedures). The librarian is the sole writer; agents read for decision-making. Separate from skills (skills = how agents work; wiki = what the dojo has learned). Optional ingest inbox at `.jean/raw_context/` (immutable to the librarian, Karpathy-style) when the dojo digests external documents. See [The wiki](wiki.md) for the full model.
 
 ---
 

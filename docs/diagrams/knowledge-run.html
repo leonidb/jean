@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Knowledge — one librarian run</title>
+<!--
+  One consolidation run, as docs/wiki.md describes it. Source of truth for
+  knowledge-run-{light,dark}.png.
+
+  Rebuild:  bun run export.ts "$PWD/knowledge-run.html" "$PWD" knowledge-run 1280 520
+
+  Teal fills the two phases that run a model; the commit is drawn plain
+  because it has none. Its three effects read top to bottom in the order
+  they happen.
+-->
+<style>
+  :root {
+    --page: #ffffff; --board: #fcfdff; --ink: #0b1220; --muted: #5b6675;
+    --edge: #c9d1dc; --flow: #14708f; --flow-fill: #e7f4f9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #05070c; --board: #0e131f; --ink: #e9edf5; --muted: #9aa5b6;
+      --edge: #2a3344; --flow: #6ccbe9; --flow-fill: #0d2734;
+    }
+  }
+  html, body { margin: 0; background: var(--page); }
+  body { font: 400 15px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  svg { display: block; width: 1280px; height: 520px; }
+  .node { fill: var(--board); stroke: var(--edge); stroke-width: 1.5; }
+  .node.model { fill: var(--flow-fill); stroke: var(--flow); }
+  .node.infra { fill: var(--board); stroke: var(--ink); }
+  .node.file { fill: none; stroke: var(--edge); stroke-dasharray: 5 4; }
+  .name { fill: var(--ink); font-weight: 600; font-size: 17px; text-anchor: middle; }
+  .sub { fill: var(--muted); font-size: 13px; text-anchor: middle; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; fill: var(--muted); text-anchor: middle; }
+  .label { fill: var(--muted); font-size: 13px; text-anchor: middle; }
+  .tag { font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-anchor: middle; }
+  .flow { fill: none; stroke: var(--flow); stroke-width: 2; }
+  .soft { fill: none; stroke: var(--edge); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .title { fill: var(--ink); font-weight: 650; font-size: 22px; }
+  .lede { fill: var(--muted); font-size: 15px; }
+</style>
+<svg viewBox="0 0 1280 520" role="img" aria-label="A librarian run: recovery, then a draft and a review that each run a model and write to staging, then a commit with no model that writes the wiki's git commit, records the wiki-consolidated event, and only then advances the cursor.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--flow)"/></marker>
+    <marker id="s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--edge)"/></marker>
+  </defs>
+
+  <text class="title" x="56" y="64">One librarian run</text>
+  <text class="lede" x="56" y="92">Two phases run a model and write only to the consolidator's directory. The commit runs none, and the cursor moves last.</text>
+
+  <rect class="node" x="56" y="210" width="160" height="84" rx="10"/>
+  <text class="name" x="136" y="240">Since the cursor</text>
+  <text class="sub" x="136" y="262">memories · tasks</text>
+  <text class="sub" x="136" y="280">new raw files</text>
+
+  <rect class="node model" x="308" y="210" width="190" height="84" rx="10"/>
+  <text class="tag" x="403" y="234" fill="var(--flow)">MODEL</text>
+  <text class="name" x="403" y="258">Draft</text>
+  <text class="sub" x="403" y="278">decides per page</text>
+
+  <rect class="node model" x="590" y="210" width="190" height="84" rx="10"/>
+  <text class="tag" x="685" y="234" fill="var(--flow)">MODEL</text>
+  <text class="name" x="685" y="258">Review</text>
+  <text class="sub" x="685" y="278">proofreads · builds index</text>
+
+  <rect class="node infra" x="872" y="210" width="160" height="84" rx="10"/>
+  <text class="tag" x="952" y="234" fill="var(--muted)">NO MODEL</text>
+  <text class="name" x="952" y="258">Commit</text>
+  <text class="sub" x="952" y="278">in the infrastructure</text>
+
+  <rect class="node" x="1074" y="150" width="150" height="56" rx="10"/>
+  <text class="sub" x="1149" y="174" fill="var(--ink)">git commit in</text>
+  <text class="mono" x="1149" y="193">.jean/context</text>
+  <rect class="node" x="1074" y="224" width="150" height="56" rx="10"/>
+  <text class="mono" x="1149" y="248">wiki-consolidated</text>
+  <text class="sub" x="1149" y="267">event, to the sensei</text>
+  <rect class="node" x="1074" y="298" width="150" height="56" rx="10"/>
+  <text class="sub" x="1149" y="322" fill="var(--ink)">cursor advances</text>
+  <text class="mono" x="1149" y="341">cursor.json</text>
+
+  <path class="flow" d="M218 252H305" marker-end="url(#a)"/>
+  <path class="flow" d="M500 252H587" marker-end="url(#a)"/>
+  <path class="flow" d="M782 252H869" marker-end="url(#a)"/>
+  <text class="label" x="262" y="226">recovery:</text>
+  <text class="label" x="262" y="242">clear staging</text>
+  <text class="label" x="544" y="226">needs</text>
+  <text class="label" x="544" y="242">plan.json</text>
+  <text class="label" x="826" y="226">needs a clean</text>
+  <text class="label" x="826" y="242">review exit</text>
+
+  <path class="flow" d="M1034 236H1053V178H1071" marker-end="url(#a)"/>
+  <path class="flow" d="M1034 252H1071" marker-end="url(#a)"/>
+  <path class="flow" d="M1034 268H1053V326H1071" marker-end="url(#a)"/>
+
+  <rect class="node file" x="308" y="360" width="472" height="64" rx="10"/>
+  <text class="mono" x="544" y="388">.jean/.consolidator/</text>
+  <text class="sub" x="544" y="408">staging/, the next version of the wiki · plan.json · review.json</text>
+  <path class="soft" d="M403 296V357" marker-end="url(#s)"/>
+  <path class="soft" d="M685 296V357" marker-end="url(#s)"/>
+  <path class="soft" d="M782 392H952V297" marker-end="url(#s)"/>
+  <text class="label" x="867" y="384">copied in</text>
+
+  <text class="label" x="56" y="480" style="text-anchor:start">Each attempt has a 20-minute timeout by default, and every attempt is recorded as a headless-completed event.</text>
+</svg>
+</html>
