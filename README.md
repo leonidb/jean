@@ -39,3 +39,7 @@ The cost, in every case: a dojo's own infrastructure — one background process,
 - [Knowledge](docs/knowledge.md) — the kinds of memory a dojo keeps, and search across them
 - [The wiki](docs/wiki.md) — memorizing, the nightly librarian, corrections, the weekly sweep
 - [CLI reference](docs/cli-reference.md)
+
+## Blog posts
+
+- [Building shared memory for a team of agents](https://leonidb.github.io/building-shared-memory-for-a-team-of-agents/) — and lessons from running them for 6 months in 6 projects
