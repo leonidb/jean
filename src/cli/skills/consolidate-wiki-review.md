@@ -45,7 +45,7 @@ You're not redoing the draft's work. You're catching what one-pass writing misse
 - **One concept per page.** Split a page that covers **two or more distinct concepts** — the trigger is multi-concept, *not* length (a long single concept stays whole; size safety-valve ~350 lines with a fault line). When you split, update inbound `[[wiki-link]]` references. Leave already-coherent pages unchanged (fixed-point — don't reshape a page that's fine, don't undo last run's split).
 - **Compact older content.** Detail superseded by later events should collapse to a one-liner (or move to `log.md`). Pages don't grow forever.
 - **Wiki-links are first-class.** Every concept reference uses `[[Page Name]]`. When a page mentions another wiki page, link it.
-- **No task / project state.** State-of-the-world data lives on the board, not in pages. If draft wrote phrases like "task 012 in-progress", "v1 readiness in-flight", "PR #123 awaiting review", "currently rolling out X" — strip those clauses. Keep the *learning* (e.g. "warming the cache avoids the cold-start timeout, found in task 012") and drop the state (e.g. "task 012 done"). When a whole sentence is just task state, delete the sentence. When the page's whole reason for existing is to track state, **archive it — content-preserving**: move the page's body into `log.md` under a `## [<date>] archived | <page> | <why>` heading, THEN remove the page from staging + `index.md`. The content survives in `log.md`; `.jean/context/` is gitignored, so a page you merely delete is unrecoverable — never just drop + note. Removing a pure task-state page this way is cleanup, not knowledge loss; don't route it to a human. (Only escalate to `anomalies` if you're unsure whether durable knowledge is buried under the state — real knowledge *removal* stays a judgment call.)
+- **No task / project state.** State-of-the-world data lives on the board, not in pages. If draft wrote phrases like "task 012 in-progress", "v1 readiness in-flight", "PR #123 awaiting review", "currently rolling out X" — strip those clauses. Keep the *learning* (e.g. "warming the cache avoids the cold-start timeout, found in task 012") and drop the state (e.g. "task 012 done"). When a whole sentence is just task state, delete the sentence. When the page's whole reason for existing is to track state, **archive it — content-preserving**: move the page's body into `log.md` under a `## [<date>] archived | <page> | <why>` heading, THEN remove the page from staging + `index.md`. The content survives in `log.md`; a page you merely delete is lost outright if it was newly created this run, and otherwise at best survives in `.jean/context/`'s git history, a chore to recover — never just drop + note. Removing a pure task-state page this way is cleanup, not knowledge loss; don't route it to a human. (Only escalate to `anomalies` if you're unsure whether durable knowledge is buried under the state — real knowledge *removal* stays a judgment call.)
 
 ### 2. Cross-page consistency
 
@@ -120,7 +120,7 @@ cat .jean/.consolidator/plan.json
 
 This tells you what the draft phase touched. Pages in `decisions[]` with `op: keep` rarely need re-reading; focus your effort on `create` and `update` pages.
 
-If `decisions` is empty (no input this run), your job is minimal — verify staging is empty / matches context, write a no-op `review.json`, exit.
+If `decisions` has no `create`, `update` or `archive` entry (an empty night), your job is minimal — write a `review.json` with no changes that carries `plan.json`'s anomalies forward (Step 5), exit. On such a night phase 3 leaves `context/` untouched and needs no staging dir (it discards any), so a missing or empty `staging/` is normal, not an anomaly — don't report it.
 
 ### Step 2 — verify staging matches plan
 
@@ -169,7 +169,7 @@ EOF
 
 Log `[time] review phase done — N changes, K anomalies` and exit cleanly.
 
-The shell phase will read `plan.json` + `review.json`, swap staging→context, emit `wiki-consolidated`, advance cursor.
+The shell phase will read `plan.json` + `review.json`. If the plan has a `create`, `update` or `archive` decision, it syncs staging into `context/` and commits whatever changed; otherwise it leaves `context/` alone and discards any staging dir. Either way it emits `wiki-consolidated` and advances the cursor.
 
 ## What you do NOT do in this phase
 
@@ -196,6 +196,8 @@ The shell phase will read `plan.json` + `review.json`, swap staging→context, e
 The principle: **fix mechanical issues AND knowledge-preserving restructuring (split / merge / compact) silently; surface only genuine unknowns you cannot resolve** — an unresolvable contradiction, a page that's genuinely missing. A structural change that keeps every bit of content is never a "judgment call" to punt to a human who can't act on it.
 
 ## Sharpness checklist before exit
+
+On an empty night (Step 1's early exit), only the `review.json` and `.jean/context/` items apply.
 
 - [ ] Every page in staging has frontmatter with `description:`
 - [ ] `index.md` regenerated, lists every page in staging (except `index.md` and `log.md`)
